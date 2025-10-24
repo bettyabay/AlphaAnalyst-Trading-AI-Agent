@@ -13,3 +13,12 @@ python-dotenv
 requests
 datetime
 supabase
+# Phase 2: Enhanced AI and Document Processing
+PyPDF2
+python-docx
+textract==1.6.3
+sentence-transformers
+scikit-learn
+numpy
+matplotlib
+seaborn
