@@ -98,8 +98,20 @@ class DocumentManager:
             file_extension = os.path.splitext(filename)[1]
             unique_filename = f"{uuid.uuid4()}{file_extension}"
             file_path = os.path.join(self.upload_dir, unique_filename)
-            with open(file_path, "wb") as f:
-                f.write(file_content.getbuffer())
+            
+            # Handle different file input types
+            if hasattr(file_content, 'getbuffer'):
+                # Streamlit file uploader
+                with open(file_path, "wb") as f:
+                    f.write(file_content.getbuffer())
+            elif hasattr(file_content, 'read'):
+                # Regular file object
+                with open(file_path, "wb") as f:
+                    f.write(file_content.read())
+            else:
+                # Assume it's bytes
+                with open(file_path, "wb") as f:
+                    f.write(file_content)
 
             # Extract text content from the uploaded file
             file_extension = os.path.splitext(filename)[1]
@@ -109,19 +121,12 @@ class DocumentManager:
             embedding_vector = self._generate_embedding(content_text)
 
             if self.supabase:
-                # Insert into Supabase documents table per actual schema
+                # Insert into Supabase research_documents table per actual schema
                 payload = {
-                    "content": content_text or f"Document: {filename}",
-                    "metadata": {
-                        "symbol": symbol,
-                        "file_name": filename,
-                        "source": "user_upload",
-                        "title": title,
-                        "document_type": document_type,
-                        "file_path": file_path
-                    },
-                    "embedding": embedding_vector,
-                    "user_id": None
+                    "file_name": filename,
+                    "file_content": content_text or f"Document: {filename}",
+                    "symbol": symbol,
+                    "uploaded_at": datetime.now().isoformat()
                 }
                 try:
                     resp = self.supabase.table("research_documents").insert(payload).execute()
@@ -149,22 +154,13 @@ class DocumentManager:
                 return []
                 
             query = self.supabase.table("research_documents").select("*")
-            # Filter by symbol in metadata if symbol provided
+            # Filter by symbol if provided
             if symbol:
-                # Note: This is a simplified filter - in practice you might need more complex filtering
-                resp = query.execute()
-                rows = resp.data if hasattr(resp, "data") else []
-                # Filter by symbol in metadata
-                filtered_rows = []
-                for row in rows:
-                    metadata = row.get("metadata", {})
-                    if metadata.get("symbol") == symbol:
-                        filtered_rows.append(row)
-                return filtered_rows
-            else:
-                resp = query.execute()
-                rows = resp.data if hasattr(resp, "data") else []
-                return rows
+                query = query.eq("symbol", symbol)
+            
+            resp = query.execute()
+            rows = resp.data if hasattr(resp, "data") else []
+            return rows
             
         except Exception as e:
             print(f"Error retrieving documents: {e}")
@@ -177,10 +173,10 @@ class DocumentManager:
                 print("Supabase not configured. Cannot retrieve document content.")
                 return None
                 
-            resp = self.supabase.table("research_documents").select("content").eq("id", document_id).execute()
+            resp = self.supabase.table("research_documents").select("file_content").eq("id", document_id).execute()
             data = resp.data if hasattr(resp, "data") else []
             if data and len(data) > 0:
-                return data[0].get("content")
+                return data[0].get("file_content")
             return None
         except Exception as e:
             print(f"Error reading document {document_id}: {e}")
