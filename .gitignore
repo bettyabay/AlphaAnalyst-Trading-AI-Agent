@@ -1,3 +1,16 @@
 .venv
 venv/
 .venv/
+# Virtual environment
+.venv/
+venv/
+
+# Environment variables
+.env
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.pyc
+
+# Uploads (since your log showed these files too)
+uploads/
