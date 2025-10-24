@@ -36,7 +36,7 @@ class DataIngestionPipeline:
             print(f"Error initializing stocks: {e}")
             return False
     
-    def ingest_historical_data(self, symbol: str, days_back: int = 365) -> bool:
+    def ingest_historical_data(self, symbol: str, days_back: int = 1825) -> bool:  # Default to 5 years
         """Ingest historical data for a symbol"""
         try:
             if not self.supabase:
@@ -73,12 +73,30 @@ class DataIngestionPipeline:
             
             if rows:
                 try:
-                    resp = self.supabase.table("market_data").insert(rows).execute()
+                    # Use upsert to handle duplicates gracefully
+                    resp = self.supabase.table("market_data").upsert(rows).execute()
                     records_processed = len(rows)
-                    print(f"Successfully ingested {records_processed} records for {symbol}")
+                    print(f"Successfully processed {records_processed} records for {symbol} (upserted)")
                     return True
                 except Exception as e:
-                    print(f"Supabase insert failed for {symbol}: {e}")
+                    print(f"Bulk upsert failed for {symbol}: {e}")
+                    # Try individual upserts to handle duplicates gracefully
+                    success_count = 0
+                    duplicate_count = 0
+                    for row in rows:
+                        try:
+                            self.supabase.table("market_data").upsert([row]).execute()
+                            success_count += 1
+                        except Exception as individual_error:
+                            if "duplicate key" in str(individual_error).lower():
+                                duplicate_count += 1
+                                print(f"Record already exists for {symbol} on {row['date']} - skipping")
+                            else:
+                                print(f"Failed to upsert record for {symbol} on {row['date']}: {individual_error}")
+                    
+                    if success_count > 0 or duplicate_count > 0:
+                        print(f"Processed {symbol}: {success_count} new records, {duplicate_count} duplicates skipped")
+                        return True
                     return False
             else:
                 print(f"No data to insert for {symbol}")
@@ -88,7 +106,7 @@ class DataIngestionPipeline:
             print(f"Error ingesting historical data for {symbol}: {e}")
             return False
     
-    def ingest_all_historical_data(self, days_back: int = 365) -> Dict[str, bool]:
+    def ingest_all_historical_data(self, days_back: int = 1825) -> Dict[str, bool]:  # Default to 5 years
         """Ingest historical data for all watchlist stocks"""
         results = {}
         symbols = get_watchlist_symbols()
@@ -127,7 +145,7 @@ class DataIngestionPipeline:
                     "historical_records": hist_count,
                     "latest_date": latest_date,
                     "is_complete": hist_count > 0,
-                    "completion_percentage": min(100, (hist_count / 252) * 100)  # Assuming 252 trading days
+                    "completion_percentage": min(100, (hist_count / 1260) * 100)  # Assuming 1260 trading days (5 years)
                 }
             except Exception as e:
                 print(f"Error getting status for {symbol}: {e}")
