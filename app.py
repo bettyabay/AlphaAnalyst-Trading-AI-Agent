@@ -33,35 +33,264 @@ st.set_page_config(page_title="Stocks Analysis AI Agents", page_icon="", layout=
 
 st.markdown("""
     <style>
-    .main { padding: 2rem; }
-    .stApp { max-width: 1400px; margin: 0 auto; }
-    .card {
+    /* Main Layout */
+    .main { 
+        padding: 2rem; 
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        min-height: 100vh;
+    }
+    
+    .stApp { 
+        max-width: 1400px; 
+        margin: 0 auto; 
+        background: transparent;
+    }
+    
+    /* Phase Navigation */
+    .phase-nav {
+        background: rgba(255, 255, 255, 0.95);
+        backdrop-filter: blur(10px);
+        border-radius: 20px;
+        padding: 1.5rem;
+        margin: 1rem 0;
+        box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+        border: 1px solid rgba(255, 255, 255, 0.2);
+    }
+    
+    /* Feature Cards */
+    .feature-card {
         background: linear-gradient(135deg, #f6f8fa 0%, #ffffff 100%);
+        border-radius: 20px;
+        padding: 2rem;
+        margin: 1.5rem 0;
+        box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+        border: 1px solid rgba(255, 255, 255, 0.3);
+        backdrop-filter: blur(10px);
+        transition: all 0.3s ease;
+        position: relative;
+        overflow: hidden;
+    }
+    
+    .feature-card::before {
+        content: '';
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 4px;
+        background: linear-gradient(90deg, #667eea, #764ba2, #f093fb);
+        border-radius: 20px 20px 0 0;
+    }
+    
+    .feature-card:hover {
+        transform: translateY(-5px);
+        box-shadow: 0 20px 40px rgba(0,0,0,0.15);
+    }
+    
+    /* Section Headers */
+    .section-header {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        padding: 1.5rem 2rem;
+        border-radius: 20px;
+        margin: 2rem 0 1.5rem 0;
+        font-size: 1.8rem;
+        font-weight: 700;
+        text-align: center;
+        box-shadow: 0 6px 20px rgba(102, 126, 234, 0.25);
+        border: 2px solid rgba(255, 255, 255, 0.1);
+        text-shadow: 0 2px 4px rgba(0,0,0,0.2);
+        letter-spacing: 0.5px;
+    }
+    
+    /* Metrics */
+    .metric-card {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
         border-radius: 15px;
         padding: 1.5rem;
         margin: 1rem 0;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-        border: 1px solid #e1e4e8;
+        text-align: center;
+        box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3);
+        transition: all 0.3s ease;
+    }
+    
+    .metric-card:hover {
+        transform: scale(1.05);
+        box-shadow: 0 8px 25px rgba(102, 126, 234, 0.4);
     }
 
     .metric-value {
-        font-size: 24px;
+        font-size: 2rem;
         font-weight: bold;
-        color: #0366d6;
+        margin-bottom: 0.5rem;
+        text-shadow: 0 2px 4px rgba(0,0,0,0.1);
     }
 
     .metric-label {
-        font-size: 14px;
-        color: #586069;
+        font-size: 0.9rem;
+        opacity: 0.9;
         text-transform: uppercase;
+        letter-spacing: 1px;
     }
     
+    /* Chart Container */
     .chart-container {
-        background: white;
+        background: rgba(255, 255, 255, 0.95);
+        backdrop-filter: blur(10px);
+        border-radius: 20px;
+        padding: 1.5rem;
+        margin: 1.5rem 0;
+        border: 1px solid rgba(255, 255, 255, 0.3);
+        box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+    }
+    
+    /* Buttons */
+    .stButton > button {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        border: none;
+        border-radius: 10px;
+        padding: 0.5rem 1rem;
+        font-weight: 600;
+        transition: all 0.3s ease;
+        box-shadow: 0 2px 8px rgba(102, 126, 234, 0.2);
+    }
+    
+    .stButton > button:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
+        background: linear-gradient(135deg, #5a6fd8 0%, #6a4190 100%);
+    }
+    
+    /* Tabs */
+    .stTabs [data-baseweb="tab-list"] {
+        background: rgba(255, 255, 255, 0.1);
         border-radius: 15px;
+        padding: 0.5rem;
+        backdrop-filter: blur(10px);
+    }
+    
+    .stTabs [data-baseweb="tab"] {
+        background: transparent;
+        border-radius: 10px;
+        color: #667eea;
+        font-weight: 600;
+        transition: all 0.3s ease;
+    }
+    
+    .stTabs [aria-selected="true"] {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3);
+    }
+    
+    /* DataFrames */
+    .dataframe {
+        background: rgba(255, 255, 255, 0.95);
+        border-radius: 15px;
+        overflow: hidden;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+    }
+    
+    /* Success/Error Messages */
+    .stSuccess {
+        background: linear-gradient(135deg, #4CAF50 0%, #45a049 100%);
+        color: white;
+        border-radius: 10px;
         padding: 1rem;
         margin: 1rem 0;
-        border: 1px solid #e1e4e8;
+        box-shadow: 0 4px 15px rgba(76, 175, 80, 0.3);
+    }
+    
+    .stError {
+        background: linear-gradient(135deg, #f44336 0%, #d32f2f 100%);
+        color: white;
+        border-radius: 10px;
+        padding: 1rem;
+        margin: 1rem 0;
+        box-shadow: 0 4px 15px rgba(244, 67, 54, 0.3);
+    }
+    
+    .stWarning {
+        background: linear-gradient(135deg, #ff9800 0%, #f57c00 100%);
+        color: white;
+        border-radius: 10px;
+        padding: 1rem;
+        margin: 1rem 0;
+        box-shadow: 0 4px 15px rgba(255, 152, 0, 0.3);
+    }
+    
+    .stInfo {
+        background: linear-gradient(135deg, #2196F3 0%, #1976D2 100%);
+        color: white;
+        border-radius: 10px;
+        padding: 1rem;
+        margin: 1rem 0;
+        box-shadow: 0 4px 15px rgba(33, 150, 243, 0.3);
+    }
+    
+    /* Phase Selector */
+    .phase-selector {
+        display: flex;
+        gap: 1rem;
+        margin: 2rem 0;
+        flex-wrap: wrap;
+    }
+    
+    .phase-button {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        border: none;
+        border-radius: 15px;
+        padding: 1rem 2rem;
+        font-weight: 600;
+        transition: all 0.3s ease;
+        box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3);
+        cursor: pointer;
+    }
+    
+    .phase-button:hover {
+        transform: translateY(-3px);
+        box-shadow: 0 8px 25px rgba(102, 126, 234, 0.4);
+    }
+    
+    /* Active Phase Display */
+    .active-phase {
+        background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+        color: #495057;
+        padding: 1rem 2rem;
+        border-radius: 12px;
+        text-align: center;
+        font-size: 1.1rem;
+        font-weight: 500;
+        margin: 1rem 0;
+        border: 2px solid #dee2e6;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+        letter-spacing: 0.3px;
+    }
+    
+    /* Phase Title Display */
+    .phase-title {
+        background: linear-gradient(135deg, #ffffff 0%, #f8f9fa 100%);
+        color: #212529;
+        padding: 1.2rem 2rem;
+        border-radius: 15px;
+        text-align: center;
+        font-size: 1.4rem;
+        font-weight: 600;
+        margin: 1.5rem 0;
+        border: 1px solid #e9ecef;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        letter-spacing: 0.5px;
+        text-shadow: 0 1px 2px rgba(0,0,0,0.05);
+    }
+    
+    /* Responsive Design */
+    @media (max-width: 768px) {
+        .main { padding: 1rem; }
+        .feature-card { padding: 1rem; }
+        .metric-value { font-size: 1.5rem; }
     }
     </style>
     """, unsafe_allow_html=True)
@@ -398,69 +627,17 @@ def list_database_tables():
 
 def phase1_foundation_data():
     """Phase 1: Foundation & Data Infrastructure"""
-    st.markdown("## Phase 1: Foundation & Data Infrastructure")
     
-    # Debug Information Section
-    st.markdown("### 🔧 Debug Information")
-    debug_col1, debug_col2, debug_col3, debug_col4 = st.columns(4)
-    with debug_col1:
-        if st.button("Test Polygon API", use_container_width=True, key="debug_polygon"):
-            test_polygon_connection()
-    with debug_col2:
-        if st.button("Test Database", use_container_width=True, key="debug_database"):
-            test_database_connection()
-    with debug_col3:
-        if st.button("Check Data Status", use_container_width=True, key="debug_data_status"):
-            # Move the data status check here for easier access
-            sb = get_supabase()
-            if sb:
-                # Supabase path: compute counts per symbol from market_data
-                rows = []
-                for symbol in WATCHLIST_STOCKS.keys():
-                    try:
-                        resp = sb.rpc("get_symbol_stats", {"p_symbol": symbol}).execute()
-                        # If RPC not available, fallback to simple count query
-                    except Exception:
-                        resp = sb.table("market_data").select("date").eq("symbol", symbol).execute()
-                    data = resp.data if hasattr(resp, "data") else []
-                    count = len(data) if isinstance(data, list) else 0
-                    rows.append({
-                        "Symbol": symbol,
-                        "Records": count,
-                        "Latest Date": "-",
-                        "Completion %": f"{min(100, (count/1260)*100):.1f}%"  # 5 years = 1260 trading days
-                    })
-                status_df = pd.DataFrame(rows)
-                st.dataframe(status_df, use_container_width=True)
-            else:
-                st.error("Database not connected")
-    with debug_col4:
-        if st.button("List Tables", use_container_width=True, key="debug_list_tables"):
-            list_database_tables()
+    # Database & Infrastructure Setup
+    st.markdown('<div class="feature-card">', unsafe_allow_html=True)
+    st.markdown("### Database & Infrastructure Setup")
     
-    # Additional debug buttons
-    debug_col5, debug_col6, debug_col7, debug_col8 = st.columns(4)
-    with debug_col5:
-        if st.button("Test Polygon Detailed", use_container_width=True, key="debug_polygon_detailed"):
-            test_polygon_api_detailed()
-    with debug_col6:
-        if st.button("Test Single Ingestion", use_container_width=True, key="debug_single_ingestion"):
-            test_historical_ingestion_single()
-    with debug_col7:
-        if st.button("Check Environment", use_container_width=True, key="debug_environment"):
-            check_environment_variables()
-    with debug_col8:
-        if st.button("Full Diagnostic", use_container_width=True, key="debug_full_diagnostic"):
-            run_full_diagnostic()
-    
-    st.markdown("---")
-    
-    # Database initialization
     col1, col2 = st.columns(2)
     with col1:
         if st.button("Initialize Database", use_container_width=True, key="init_database"):
             if initialize_database():
                 st.success("Database initialized successfully!")
+                st.balloons()
             else:
                 st.error("Database initialization failed!")
     
@@ -469,19 +646,24 @@ def phase1_foundation_data():
             pipeline = DataIngestionPipeline()
             if pipeline.initialize_stocks():
                 st.success("Stocks initialized successfully!")
+                st.balloons()
             else:
                 st.error("Stock initialization failed!")
             pipeline.close()
+    st.markdown('</div>', unsafe_allow_html=True)
     
     # Watchlist display
+    st.markdown('<div class="feature-card">', unsafe_allow_html=True)
     st.markdown("### Watchlist (19 High-Beta US Stocks)")
     watchlist_df = pd.DataFrame([
         {"Symbol": symbol, "Company": name} 
         for symbol, name in WATCHLIST_STOCKS.items()
     ])
     st.dataframe(watchlist_df, use_container_width=True)
+    st.markdown('</div>', unsafe_allow_html=True)
     
     # Data ingestion
+    st.markdown('<div class="feature-card">', unsafe_allow_html=True)
     st.markdown("### Data Ingestion Pipeline")
     col1, col2 = st.columns(2)
     
@@ -516,6 +698,7 @@ def phase1_foundation_data():
             
             if success_count > 0:
                 st.success(f"✅ Successfully processed {success_count}/{len(results)} stocks")
+                st.balloons()
             else:
                 st.error(f"❌ Failed to process all {len(results)} stocks")
             
@@ -572,46 +755,161 @@ def phase1_foundation_data():
                     for symbol, info in status.items()
                 ])
                 st.dataframe(status_df, use_container_width=True)
+    st.markdown('</div>', unsafe_allow_html=True)
     
     # Document management
+    st.markdown('<div class="feature-card">', unsafe_allow_html=True)
     st.markdown("### Document Management")
     doc_manager = DocumentManager()
+    
+    # Show available stocks
+    st.info(f"**Available Stocks:** {', '.join(list(WATCHLIST_STOCKS.keys())[:10])}... (19 total)")
     
     # Upload document
     uploaded_file = st.file_uploader("Upload Research Document", type=['pdf', 'txt', 'docx'])
     if uploaded_file:
-        symbol = st.selectbox("Select Stock (Optional)", [""] + list(WATCHLIST_STOCKS.keys()))
-        title = st.text_input("Document Title", value=uploaded_file.name)
+        col1, col2 = st.columns(2)
+        with col1:
+            symbol = st.selectbox("Select Stock (Optional)", [""] + list(WATCHLIST_STOCKS.keys()), 
+                                 help="Choose from 19 high-beta US stocks in our watchlist")
+        with col2:
+            # Create a better default title
+            default_title = uploaded_file.name.replace('.pdf', '').replace('.docx', '').replace('.txt', '')
+            title = st.text_input("Document Title", value=default_title)
         
-        if st.button("Upload Document", key="upload_doc_phase1"):
-            result = doc_manager.upload_document(
-                uploaded_file, 
-                uploaded_file.name, 
-                title,
-                symbol=symbol if symbol else None
-            )
-            if result["success"]:
-                st.success("Document uploaded successfully!")
+        # Show file info
+        st.info(f"📄 **File:** {uploaded_file.name} | **Size:** {uploaded_file.size / 1024:.1f} KB")
+        
+        if st.button("Upload Document", key="upload_doc_phase1", type="primary"):
+            if not title.strip():
+                st.error("Please enter a document title")
             else:
-                st.error(f"Upload failed: {result['message']}")
+                with st.spinner("Uploading and processing document..."):
+                    result = doc_manager.upload_document(
+                        uploaded_file, 
+                        uploaded_file.name, 
+                        title,
+                        symbol=symbol if symbol else None
+                    )
+                    if result["success"]:
+                        st.success(f"✅ Document '{title}' uploaded successfully!")
+                        st.balloons()
+                    else:
+                        st.error(f"Upload failed: {result['message']}")
     
     # Display documents
     st.markdown("#### Uploaded Documents")
     documents = doc_manager.get_documents()
     if documents:
+        # Add document management controls
+        col1, col2, col3 = st.columns([2, 1, 1])
+        with col1:
+            st.write(f"**Total Documents:** {len(documents)}")
+        with col2:
+            if st.button("🔄 Refresh", key="refresh_docs"):
+                st.rerun()
+        with col3:
+            # Filter by symbol
+            symbols = ["All"] + list(set([doc.get("symbol", "N/A") for doc in documents if doc.get("symbol")]))
+            selected_symbol = st.selectbox("Filter by Symbol", symbols, key="doc_filter")
+        
         # Transform documents for display
         display_docs = []
-        for doc in documents:
-            metadata = doc.get("metadata", {})
+        filtered_docs = documents
+        if selected_symbol != "All":
+            filtered_docs = [doc for doc in documents if doc.get("symbol") == selected_symbol]
+        
+        for i, doc in enumerate(filtered_docs):
+            # Create a better display name
+            file_name = doc.get("file_name", f"Document_{i+1}")
+            symbol = doc.get("symbol", "N/A")
+            
+            # Create a descriptive name
+            if symbol != "N/A":
+                display_name = f"{file_name} ({symbol})"
+            else:
+                display_name = file_name
+            
+            # Format creation date
+            created_at = doc.get("uploaded_at", doc.get("created_at", ""))
+            if created_at:
+                try:
+                    from datetime import datetime
+                    dt = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                    formatted_date = dt.strftime("%Y-%m-%d %H:%M")
+                except:
+                    formatted_date = created_at[:10] if len(created_at) >= 10 else "Unknown"
+            else:
+                formatted_date = "Unknown"
+            
+            # Get content preview
+            content = doc.get("file_content", "")
+            content_preview = content[:150] + "..." if len(content) > 150 else content
+            
             display_docs.append({
-                "ID": doc.get("id", "")[:8] + "...",  # Show first 8 chars of UUID
-                "File Name": metadata.get("file_name", "Unknown"),
-                "Symbol": metadata.get("symbol", "N/A"),
-                "Content Preview": doc.get("content", "")[:100] + "..." if len(doc.get("content", "")) > 100 else doc.get("content", ""),
-                "Created": doc.get("created_at", "Unknown")[:10] if doc.get("created_at") else "Unknown"
+                "ID": f"#{i+1}",
+                "File Name": display_name,
+                "Symbol": symbol,
+                "Content Preview": content_preview,
+                "Created": formatted_date,
+                "Size": f"{len(content)} chars"
             })
-        doc_df = pd.DataFrame(display_docs)
-        st.dataframe(doc_df, use_container_width=True)
+        
+        if display_docs:
+            doc_df = pd.DataFrame(display_docs)
+            st.dataframe(doc_df, use_container_width=True)
+            
+            # Add document actions
+            st.markdown("#### Document Actions")
+            selected_doc_idx = st.selectbox(
+                "Select Document for Actions", 
+                range(len(filtered_docs)),
+                format_func=lambda x: f"#{x+1} - {display_docs[x]['File Name']}",
+                key="doc_actions"
+            )
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                if st.button("📄 View Full Content", key="view_content"):
+                    selected_doc = filtered_docs[selected_doc_idx]
+                    st.subheader(f"Content: {selected_doc.get('file_name', 'Unknown')}")
+                    st.text_area("Document Content", selected_doc.get("file_content", ""), height=300)
+            
+            with col2:
+                if st.button("🤖 AI Analysis", key="ai_analysis"):
+                    selected_doc = filtered_docs[selected_doc_idx]
+                    doc_id = selected_doc.get("id")
+                    symbol = selected_doc.get("symbol", "N/A")
+                    
+                    if doc_id:
+                        with st.spinner("Analyzing document with AI..."):
+                            analysis = doc_manager.analyze_document_with_ai(doc_id, symbol)
+                            signals = doc_manager.extract_trading_signals(doc_id)
+                            
+                            if analysis.get("success"):
+                                st.success("AI Analysis Complete!")
+                                st.balloons()
+                                st.write("**Analysis:**", analysis["analysis"])
+                                if signals.get("success"):
+                                    st.write("**Sentiment:**", signals["overall_sentiment"])
+                                    st.write("**Confidence:**", f"{signals['confidence']}/10")
+                            else:
+                                st.error("AI Analysis failed")
+                    else:
+                        st.error("Document ID not found")
+            
+            with col3:
+                if st.button("🗑️ Delete Document", key="delete_doc"):
+                    selected_doc = filtered_docs[selected_doc_idx]
+                    doc_id = selected_doc.get("id")
+                    if doc_id and doc_manager.delete_document(doc_id):
+                        st.success("Document deleted successfully!")
+                        st.balloons()
+                        st.rerun()
+                    else:
+                        st.error("Failed to delete document")
+        else:
+            st.info(f"No documents found for symbol: {selected_symbol}")
     else:
         st.info("No documents uploaded yet")
     
@@ -619,17 +917,17 @@ def phase1_foundation_data():
 
 def phase2_master_data_ai():
     """Phase 2: Master Data & AI Integration"""
-    st.header("🎯 Phase 2: Master Data & AI Integration")
+    st.markdown('<div class="phase-title">Phase 2: Master Data & AI Integration</div>', unsafe_allow_html=True)
     
     # Initialize AI analyzer
     ai_analyzer = AIResearchAnalyzer()
     
     # Create tabs for different features
     tab1, tab2, tab3, tab4 = st.tabs([
-        "📊 Master Data Dashboard", 
-        "🤖 AI Document Analysis", 
-        "📈 Instrument Profiles", 
-        "🔍 Research Insights"
+        "Master Data Dashboard", 
+        "AI Document Analysis", 
+        "Instrument Profiles", 
+        "Research Insights"
     ])
     
     with tab1:
@@ -653,6 +951,7 @@ def phase2_master_data_ai():
                 
                 if "error" not in summary:
                     st.success("Master data analysis completed!")
+                    st.balloons()
                     
                     # Display summary metrics
                     st.subheader("Analysis Summary")
@@ -683,6 +982,7 @@ def phase2_master_data_ai():
         
         # Document upload with enhanced processing
         st.write("Upload research documents for AI analysis:")
+        st.info(f"📊 **Available Stocks:** {', '.join(symbols[:10])}... (19 total)")
         
         uploaded_file = st.file_uploader(
             "Choose a document", 
@@ -693,7 +993,8 @@ def phase2_master_data_ai():
         if uploaded_file:
             col1, col2, col3 = st.columns(3)
             with col1:
-                symbol = st.selectbox("Select Symbol", [""] + symbols)
+                symbol = st.selectbox("Select Symbol", [""] + symbols, 
+                                     help="Choose from 19 high-beta US stocks in our watchlist")
             with col2:
                 title = st.text_input("Document Title", uploaded_file.name)
             with col3:
@@ -714,6 +1015,7 @@ def phase2_master_data_ai():
                     
                     if result["success"]:
                         st.success("Document uploaded successfully!")
+                        st.balloons()
                         
                         # Perform AI analysis
                         with st.spinner("Performing AI analysis..."):
@@ -729,6 +1031,7 @@ def phase2_master_data_ai():
                                     
                                     if analysis.get("success"):
                                         st.success("AI Analysis completed!")
+                                        st.balloons()
                                         
                                         # Display analysis results
                                         st.subheader("AI Analysis Results")
@@ -781,6 +1084,7 @@ def phase2_master_data_ai():
                 
                 if "error" not in profile:
                     st.success(f"Profile generated for {selected_symbol}")
+                    st.balloons()
                     
                     # Display comprehensive profile
                     col1, col2 = st.columns(2)
@@ -867,12 +1171,12 @@ def phase2_master_data_ai():
     ai_analyzer.close()
 
 def main():
-    st.title("Stocks Analysis AI Agent")
+    st.markdown('<div class="section-header">AlphaAnalyst Trading AI Agent</div>', unsafe_allow_html=True)
     
     # Phase selector buttons
     phases = [
         "Foundation & Data Infrastructure",
-        "Master Data & AI Integration",
+        "Master Data & AI Integration", 
         "Trading Engine Core",
         "Session Management & Execution",
         "Results & Analysis Modules",
@@ -881,6 +1185,7 @@ def main():
     if 'active_phase' not in st.session_state:
         st.session_state.active_phase = phases[0]
     
+    st.markdown('<div class="phase-nav">', unsafe_allow_html=True)
     row1 = st.columns(3)
     with row1[0]:
         if st.button(phases[0], use_container_width=True, key="phase_1"):
@@ -902,8 +1207,9 @@ def main():
     with row2[2]:
         if st.button(phases[5], use_container_width=True, key="phase_6"):
             st.session_state.active_phase = phases[5]
+    st.markdown('</div>', unsafe_allow_html=True)
     
-    st.markdown(f"<div class='card'><div class='metric-label'>Active Phase</div><div class='metric-value'>{st.session_state.active_phase}</div></div>", unsafe_allow_html=True)
+    st.markdown(f'<div class="active-phase">Active Phase: {st.session_state.active_phase}</div>', unsafe_allow_html=True)
     
     # Phase-specific content
     if st.session_state.active_phase == phases[0]:
@@ -920,8 +1226,8 @@ def main():
         st.info("Phase 6: Advanced Features & Polish - Coming Soon!")
     
     # Original functionality (keep for backward compatibility)
-    st.markdown("---")
-    st.markdown("### Original Analysis (Legacy)")
+    st.markdown('<div class="feature-card">', unsafe_allow_html=True)
+    st.markdown("### Quick Stock Analysis")
     stock_input = st.text_input("Enter Company Name", help="e.g., APPLE, TCS")
     
     if st.button("Analyze", use_container_width=True, key="legacy_analyze"):
@@ -938,21 +1244,22 @@ def main():
                 if info and hist is not None:
                     col1, col2, col3 = st.columns(3)
                     with col1:
-                        st.markdown(f"<div class='card'><div class='metric-value'>${info.get('currentPrice', 'N/A')}</div><div class='metric-label'>Current Price</div></div>", unsafe_allow_html=True)
+                        st.markdown(f'<div class="metric-card"><div class="metric-value">${info.get("currentPrice", "N/A")}</div><div class="metric-label">Current Price</div></div>', unsafe_allow_html=True)
                     with col2:
-                        st.markdown(f"<div class='card'><div class='metric-value'>{info.get('forwardPE', 'N/A')}</div><div class='metric-label'>Forward P/E</div></div>", unsafe_allow_html=True)
+                        st.markdown(f'<div class="metric-card"><div class="metric-value">{info.get("forwardPE", "N/A")}</div><div class="metric-label">Forward P/E</div></div>', unsafe_allow_html=True)
                     with col3:
-                        st.markdown(f"<div class='card'><div class='metric-value'>{info.get('recommendationKey', 'N/A').title()}</div><div class='metric-label'>Recommendation</div></div>", unsafe_allow_html=True)
+                        st.markdown(f'<div class="metric-card"><div class="metric-value">{info.get("recommendationKey", "N/A").title()}</div><div class="metric-label">Recommendation</div></div>', unsafe_allow_html=True)
                     
-                    st.markdown("<div class='chart-container'>", unsafe_allow_html=True)
+                    st.markdown('<div class="chart-container">', unsafe_allow_html=True)
                     st.plotly_chart(create_price_chart(hist, symbol), use_container_width=True)
-                    st.markdown("</div>", unsafe_allow_html=True)
+                    st.markdown('</div>', unsafe_allow_html=True)
                     
                     if 'longBusinessSummary' in info:
-                        st.markdown("<div class='card'>", unsafe_allow_html=True)
+                        st.markdown('<div class="feature-card">', unsafe_allow_html=True)
                         st.markdown("### Company Overview")
                         st.write(info['longBusinessSummary'])
-                        st.markdown("</div>", unsafe_allow_html=True)
+                        st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
                     
 if __name__ == "__main__":
     main()

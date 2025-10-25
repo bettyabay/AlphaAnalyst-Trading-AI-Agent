@@ -3,6 +3,7 @@ Document management system for AlphaAnalyst Trading AI Agent
 Enhanced for Phase 2 with PDF processing and AI analysis
 """
 import os
+import io
 import uuid
 from datetime import datetime
 from typing import List, Dict, Optional, BinaryIO
@@ -17,9 +18,7 @@ from ..database.config import get_supabase
 class DocumentManager:
     """Document management for research documents"""
     
-    def __init__(self, upload_dir: str = "uploads"):
-        self.upload_dir = upload_dir
-        self._ensure_upload_dir()
+    def __init__(self):
         self.supabase = get_supabase()
         # Initialize sentence transformer for embeddings
         try:
@@ -28,13 +27,24 @@ class DocumentManager:
             print(f"Warning: Could not load embedding model: {e}")
             self.embedding_model = None
     
-    def _ensure_upload_dir(self):
-        """Ensure upload directory exists"""
-        if not os.path.exists(self.upload_dir):
-            os.makedirs(self.upload_dir)
+    def _extract_text_from_stream(self, file_content: BinaryIO, file_extension: str) -> str:
+        """Extract text content from file stream (no local storage)"""
+        try:
+            if file_extension.lower() == '.pdf':
+                return self._extract_pdf_from_stream(file_content)
+            elif file_extension.lower() in ['.docx', '.doc']:
+                return self._extract_docx_from_stream(file_content)
+            elif file_extension.lower() in ['.txt']:
+                return self._extract_txt_from_stream(file_content)
+            else:
+                # Try textract as fallback
+                return self._extract_with_textract(file_content)
+        except Exception as e:
+            print(f"Error extracting text from stream: {e}")
+            return f"Error extracting text from uploaded file"
     
     def _extract_text_from_file(self, file_path: str, file_extension: str) -> str:
-        """Extract text content from various file formats"""
+        """Extract text content from various file formats (legacy method)"""
         try:
             if file_extension.lower() == '.pdf':
                 return self._extract_pdf_text(file_path)
@@ -74,6 +84,89 @@ class DocumentManager:
             print(f"Error reading DOCX {file_path}: {e}")
             return ""
     
+    def _extract_pdf_from_stream(self, file_content: BinaryIO) -> str:
+        """Extract text from PDF stream"""
+        text = ""
+        try:
+            # Reset file pointer to beginning
+            if hasattr(file_content, 'seek'):
+                file_content.seek(0)
+            
+            # Read PDF from stream
+            if hasattr(file_content, 'getbuffer'):
+                pdf_reader = PyPDF2.PdfReader(io.BytesIO(file_content.getbuffer()))
+            else:
+                pdf_reader = PyPDF2.PdfReader(file_content)
+            
+            for page in pdf_reader.pages:
+                text += page.extract_text() + "\n"
+        except Exception as e:
+            print(f"Error reading PDF from stream: {e}")
+        return text
+    
+    def _extract_docx_from_stream(self, file_content: BinaryIO) -> str:
+        """Extract text from DOCX stream"""
+        try:
+            # Reset file pointer to beginning
+            if hasattr(file_content, 'seek'):
+                file_content.seek(0)
+            
+            # Read DOCX from stream
+            if hasattr(file_content, 'getbuffer'):
+                doc = docx.Document(io.BytesIO(file_content.getbuffer()))
+            else:
+                doc = docx.Document(file_content)
+            
+            text = ""
+            for paragraph in doc.paragraphs:
+                text += paragraph.text + "\n"
+            return text
+        except Exception as e:
+            print(f"Error reading DOCX from stream: {e}")
+            return ""
+    
+    def _extract_txt_from_stream(self, file_content: BinaryIO) -> str:
+        """Extract text from TXT stream"""
+        try:
+            # Reset file pointer to beginning
+            if hasattr(file_content, 'seek'):
+                file_content.seek(0)
+            
+            # Read text from stream
+            if hasattr(file_content, 'getbuffer'):
+                return file_content.getbuffer().decode('utf-8')
+            else:
+                return file_content.read().decode('utf-8')
+        except Exception as e:
+            print(f"Error reading TXT from stream: {e}")
+            return ""
+    
+    def _extract_with_textract(self, file_content: BinaryIO) -> str:
+        """Extract text using textract from stream"""
+        try:
+            # Reset file pointer to beginning
+            if hasattr(file_content, 'seek'):
+                file_content.seek(0)
+            
+            # Create temporary file for textract
+            import tempfile
+            with tempfile.NamedTemporaryFile(delete=False) as temp_file:
+                if hasattr(file_content, 'getbuffer'):
+                    temp_file.write(file_content.getbuffer())
+                else:
+                    temp_file.write(file_content.read())
+                temp_file.flush()
+                
+                # Use textract on temporary file
+                result = textract.process(temp_file.name).decode('utf-8')
+                
+                # Clean up temporary file
+                os.unlink(temp_file.name)
+                return result
+        except Exception as e:
+            print(f"Error using textract on stream: {e}")
+            return ""
+    
     def _generate_embedding(self, text: str) -> Optional[List[float]]:
         """Generate embedding vector for text"""
         if not self.embedding_model or not text:
@@ -92,36 +185,31 @@ class DocumentManager:
                        document_type: str = "research",
                        symbol: Optional[str] = None,
                        source: str = "user_upload") -> Dict:
-        """Upload and store a document"""
+        """Upload and store a document (cloud-only storage)"""
         try:
-            # Save locally for reference
-            file_extension = os.path.splitext(filename)[1]
-            unique_filename = f"{uuid.uuid4()}{file_extension}"
-            file_path = os.path.join(self.upload_dir, unique_filename)
-            
-            # Handle different file input types
+            # File size validation (10MB limit)
+            MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
             if hasattr(file_content, 'getbuffer'):
-                # Streamlit file uploader
-                with open(file_path, "wb") as f:
-                    f.write(file_content.getbuffer())
+                file_size = len(file_content.getbuffer())
             elif hasattr(file_content, 'read'):
-                # Regular file object
-                with open(file_path, "wb") as f:
-                    f.write(file_content.read())
+                file_content.seek(0, 2)  # Seek to end
+                file_size = file_content.tell()
+                file_content.seek(0)  # Reset to beginning
             else:
-                # Assume it's bytes
-                with open(file_path, "wb") as f:
-                    f.write(file_content)
-
-            # Extract text content from the uploaded file
+                file_size = len(file_content)
+            
+            if file_size > MAX_FILE_SIZE:
+                return {"success": False, "error": "File too large", "message": f"File size {file_size/1024/1024:.1f}MB exceeds 10MB limit"}
+            
+            # Extract text content directly from file stream (no local storage)
             file_extension = os.path.splitext(filename)[1]
-            content_text = self._extract_text_from_file(file_path, file_extension)
+            content_text = self._extract_text_from_stream(file_content, file_extension)
             
             # Generate embedding for the content
             embedding_vector = self._generate_embedding(content_text)
 
             if self.supabase:
-                # Insert into Supabase research_documents table per actual schema
+                # Insert into Supabase research_documents table
                 payload = {
                     "file_name": filename,
                     "file_content": content_text or f"Document: {filename}",
@@ -134,7 +222,7 @@ class DocumentManager:
                 except Exception as e:
                     print(f"Supabase insert error details: {e}")
                     return {"success": False, "error": str(e), "message": "Supabase insert failed"}
-                return {"success": True, "message": "Document uploaded to Supabase", "file_path": file_path}
+                return {"success": True, "message": "Document uploaded to cloud storage", "document_id": resp.data[0]['id'] if resp.data else None}
             else:
                 return {"success": False, "error": "Supabase not configured", "message": "Cannot upload document"}
             
