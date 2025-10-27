@@ -4,7 +4,7 @@ import plotly.graph_objects as go
 import yfinance as yf
 import numpy as np
 from phi.agent.agent import Agent
-from phi.model.groq import Groq
+from phi.model.xai import xAI
 from phi.tools.yfinance import YFinanceTools
 from phi.tools.duckduckgo import DuckDuckGo
 from phi.tools.googlesearch import GoogleSearch
@@ -148,19 +148,21 @@ st.markdown("""
     /* Buttons */
     .stButton > button {
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white;
+        color: white !important;
         border: none;
         border-radius: 10px;
         padding: 0.5rem 1rem;
-        font-weight: 600;
+        font-weight: 700;
         transition: all 0.3s ease;
         box-shadow: 0 2px 8px rgba(102, 126, 234, 0.2);
+        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
     }
     
     .stButton > button:hover {
         transform: translateY(-1px);
         box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
         background: linear-gradient(135deg, #5a6fd8 0%, #6a4190 100%);
+        color: white !important;
     }
     
     /* Tabs */
@@ -301,19 +303,19 @@ def initialize_agents():
             st.session_state.web_agent = Agent(
                 name="Web Search Agent",
                 role="Search the web for information",
-                model=Groq(api_key=GROQ_API_KEY),
+                model=xAI(api_key=GROQ_API_KEY),
                 tools=[GoogleSearch(fixed_max_results=5), DuckDuckGo(fixed_max_results=5)]
             )
             st.session_state.finance_agent = Agent(
                 name="Financial AI Agent",
                 role="Providing financial insights",
-                model=Groq(api_key=GROQ_API_KEY),
+                model=xAI(api_key=GROQ_API_KEY),
                 tools=[YFinanceTools()]
             )
             st.session_state.multi_ai_agent = Agent(
                 name='Stock Market Agent',
                 role='Stock market analysis specialist',
-                model=Groq(api_key=GROQ_API_KEY),
+                model=xAI(api_key=GROQ_API_KEY),
                 team=[st.session_state.web_agent, st.session_state.finance_agent]
             )
             st.session_state.agents_initialized = True
@@ -868,7 +870,7 @@ def phase1_foundation_data():
                 key="doc_actions"
             )
             
-            col1, col2, col3 = st.columns(3)
+            col1, col2 = st.columns(2)
             with col1:
                 if st.button("📄 View Full Content", key="view_content"):
                     selected_doc = filtered_docs[selected_doc_idx]
@@ -876,29 +878,6 @@ def phase1_foundation_data():
                     st.text_area("Document Content", selected_doc.get("file_content", ""), height=300)
             
             with col2:
-                if st.button("🤖 AI Analysis", key="ai_analysis"):
-                    selected_doc = filtered_docs[selected_doc_idx]
-                    doc_id = selected_doc.get("id")
-                    symbol = selected_doc.get("symbol", "N/A")
-                    
-                    if doc_id:
-                        with st.spinner("Analyzing document with AI..."):
-                            analysis = doc_manager.analyze_document_with_ai(doc_id, symbol)
-                            signals = doc_manager.extract_trading_signals(doc_id)
-                            
-                            if analysis.get("success"):
-                                st.success("AI Analysis Complete!")
-                                st.balloons()
-                                st.write("**Analysis:**", analysis["analysis"])
-                                if signals.get("success"):
-                                    st.write("**Sentiment:**", signals["overall_sentiment"])
-                                    st.write("**Confidence:**", f"{signals['confidence']}/10")
-                            else:
-                                st.error("AI Analysis failed")
-                    else:
-                        st.error("Document ID not found")
-            
-            with col3:
                 if st.button("🗑️ Delete Document", key="delete_doc"):
                     selected_doc = filtered_docs[selected_doc_idx]
                     doc_id = selected_doc.get("id")
@@ -1029,35 +1008,38 @@ def phase2_master_data_ai():
                                     analysis = doc_manager.analyze_document_with_ai(doc_id, symbol)
                                     signals = doc_manager.extract_trading_signals(doc_id)
                                     
-                                    if analysis.get("success"):
-                                        st.success("AI Analysis completed!")
-                                        st.balloons()
-                                        
-                                        # Display analysis results
-                                        st.subheader("AI Analysis Results")
-                                        
-                                        col1, col2 = st.columns(2)
-                                        with col1:
-                                            st.write("**Document Analysis:**")
+                                    # Always display results, even if analysis failed
+                                    st.subheader("AI Analysis Results")
+                                    
+                                    # Display analysis results
+                                    col1, col2 = st.columns(2)
+                                    with col1:
+                                        st.write("**Document Analysis:**")
+                                        if analysis.get("success"):
                                             st.write(analysis["analysis"])
-                                        
-                                        with col2:
-                                            st.write("**Trading Signals:**")
-                                            if signals.get("success"):
-                                                st.write(f"**Sentiment:** {signals['overall_sentiment']}")
-                                                st.write(f"**Confidence:** {signals['confidence']}/10")
-                                                st.write(f"**Bullish Signals:** {len(signals['bullish_signals'])}")
-                                                st.write(f"**Bearish Signals:** {len(signals['bearish_signals'])}")
-                                        
-                                        # Store analysis in session state
-                                        if "document_analyses" not in st.session_state:
-                                            st.session_state.document_analyses = []
-                                        st.session_state.document_analyses.append({
-                                            "symbol": symbol,
-                                            "title": title,
-                                            "analysis": analysis,
-                                            "signals": signals
-                                        })
+                                        else:
+                                            st.warning(f"AI analysis failed: {analysis.get('error', 'Unknown error')}")
+                                            st.info("💡 Make sure GROQ_API_KEY is set in your .env file to enable AI analysis")
+                                    
+                                    with col2:
+                                        st.write("**Trading Signals:**")
+                                        if signals.get("success"):
+                                            st.write(f"**Sentiment:** {signals['overall_sentiment']}")
+                                            st.write(f"**Confidence:** {signals['confidence']}/10")
+                                            st.write(f"**Bullish Signals:** {len(signals['bullish_signals'])}")
+                                            st.write(f"**Bearish Signals:** {len(signals['bearish_signals'])}")
+                                        else:
+                                            st.warning(f"Signal extraction failed: {signals.get('error', 'Unknown error')}")
+                                    
+                                    # Store analysis in session state
+                                    if "document_analyses" not in st.session_state:
+                                        st.session_state.document_analyses = []
+                                    st.session_state.document_analyses.append({
+                                        "symbol": symbol,
+                                        "title": title,
+                                        "analysis": analysis,
+                                        "signals": signals
+                                    })
                     else:
                         st.error(f"Upload failed: {result.get('error', 'Unknown error')}")
                 else:
@@ -1068,9 +1050,14 @@ def phase2_master_data_ai():
             st.subheader("Recent Document Analyses")
             for analysis in st.session_state.document_analyses[-5:]:  # Show last 5
                 with st.expander(f"{analysis['symbol']} - {analysis['title']}"):
-                    st.write("**Analysis:**", analysis['analysis']['analysis'])
+                    if analysis['analysis'].get('success'):
+                        st.write("**Analysis:**", analysis['analysis']['analysis'])
+                    else:
+                        st.write("**Analysis:**", f"Failed: {analysis['analysis'].get('error', 'Unknown error')}")
                     if analysis['signals'].get('success'):
                         st.write("**Signals:**", analysis['signals']['overall_sentiment'])
+                    else:
+                        st.write("**Signals:**", f"Failed: {analysis['signals'].get('error', 'Unknown error')}")
     
     with tab3:
         st.subheader("Instrument Profiles")
@@ -1171,7 +1158,7 @@ def phase2_master_data_ai():
     ai_analyzer.close()
 
 def main():
-    st.markdown('<div class="section-header">AlphaAnalyst Trading AI Agent</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-header">AlphaAnalyst Trading AI Agent - Phase 1</div>', unsafe_allow_html=True)
     
     # Phase selector buttons
     phases = [

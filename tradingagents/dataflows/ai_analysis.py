@@ -7,8 +7,12 @@ from typing import Dict, List, Optional, Any
 from datetime import datetime
 import pandas as pd
 import numpy as np
+from dotenv import load_dotenv
 
-from phi.model.groq import Groq
+# Load environment variables
+load_dotenv()
+
+from phi.model.xai import xAI
 from phi.agent.agent import Agent
 from .document_manager import DocumentManager
 from .polygon_integration import PolygonDataClient
@@ -18,10 +22,15 @@ class AIResearchAnalyzer:
     """AI-powered research analysis for trading insights"""
     
     def __init__(self):
-        self.groq_model = Groq(
-            model="llama-3.1-70b-versatile",
-            api_key=os.getenv("GROQ_API_KEY", "")
-        )
+        api_key = os.getenv("GROQ_API_KEY", "")
+        if not api_key:
+            print("Warning: GROQ_API_KEY not found. AI analysis will be disabled.")
+            self.xai_model = None
+        else:
+            self.xai_model = xAI(
+                model="grok-beta",
+                api_key=api_key
+            )
         self.document_manager = DocumentManager()
         self.polygon_client = PolygonDataClient()
     
@@ -103,6 +112,9 @@ class AIResearchAnalyzer:
                                        doc_insights: List[Dict], news_sentiment: Dict) -> Dict:
         """Generate comprehensive AI analysis"""
         try:
+            if not self.xai_model:
+                return {"error": "AI analysis disabled - GROQ_API_KEY not configured"}
+            
             # Prepare context for AI analysis
             context = f"""
             Symbol: {symbol}
@@ -143,7 +155,9 @@ class AIResearchAnalyzer:
             Format your response as a structured analysis suitable for investment decision making.
             """
             
-            response = self.groq_model.generate(analysis_prompt)
+            # Use Agent for proper API call
+            agent = Agent(model=self.xai_model)
+            response = agent.run(analysis_prompt)
             
             return {
                 "analysis_text": response,

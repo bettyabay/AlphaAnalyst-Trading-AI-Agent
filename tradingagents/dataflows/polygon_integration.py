@@ -103,6 +103,20 @@ class PolygonDataClient:
             print(f"Error fetching news for {symbol}: {e}")
             return []
     
+    def get_recent_data(self, symbol: str, days: int = 30) -> pd.DataFrame:
+        """Get recent price data for a symbol"""
+        try:
+            end_date = datetime.now()
+            start_date = end_date - timedelta(days=days)
+            
+            start_date_str = start_date.strftime("%Y-%m-%d")
+            end_date_str = end_date.strftime("%Y-%m-%d")
+            
+            return self.get_historical_data(symbol, start_date_str, end_date_str)
+        except Exception as e:
+            print(f"Error fetching recent data for {symbol}: {e}")
+            return pd.DataFrame()
+    
     def batch_historical_data(self, symbols: List[str], start_date: str, end_date: str) -> Dict[str, pd.DataFrame]:
         """Get historical data for multiple symbols"""
         results = {}

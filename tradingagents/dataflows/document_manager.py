@@ -11,6 +11,10 @@ import PyPDF2
 import docx
 import docx2txt
 import numpy as np
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # Optional import for sentence transformers
 try:
@@ -375,14 +379,18 @@ class DocumentManager:
             if not content:
                 return {"success": False, "error": "Document content not found"}
             
-            # Use Groq/Phi for analysis
-            from phi.model.groq import Groq
+            # Use xAI/Phi for analysis
+            from phi.model.xai import xAI
             from phi.agent.agent import Agent
             
-            # Initialize Groq model
-            groq_model = Groq(
-                model="llama-3.1-70b-versatile",
-                api_key=os.getenv("GROQ_API_KEY", "")
+            # Initialize xAI model
+            api_key = os.getenv("GROQ_API_KEY", "")
+            if not api_key:
+                return {"success": False, "error": "AI analysis disabled - GROQ_API_KEY not configured"}
+            
+            xai_model = xAI(
+                model="grok-beta",
+                api_key=api_key
             )
             
             # Create analysis prompt
@@ -404,8 +412,9 @@ class DocumentManager:
             Format your response as a structured analysis.
             """
             
-            # Get AI analysis
-            response = groq_model.generate(analysis_prompt)
+            # Get AI analysis using Agent
+            agent = Agent(model=xai_model)
+            response = agent.run(analysis_prompt)
             
             return {
                 "success": True,
