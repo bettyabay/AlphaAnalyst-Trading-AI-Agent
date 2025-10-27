@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import List, Dict, Optional, BinaryIO
 import PyPDF2
 import docx
-import textract
+import docx2txt
 from sentence_transformers import SentenceTransformer
 import numpy as np
 
@@ -37,8 +37,8 @@ class DocumentManager:
             elif file_extension.lower() in ['.txt']:
                 return self._extract_txt_from_stream(file_content)
             else:
-                # Try textract as fallback
-                return self._extract_with_textract(file_content)
+                # Try alternative extraction for unknown formats
+                return self._extract_with_alternative_method(file_content, file_extension)
         except Exception as e:
             print(f"Error extracting text from stream: {e}")
             return f"Error extracting text from uploaded file"
@@ -54,8 +54,8 @@ class DocumentManager:
                 with open(file_path, 'r', encoding='utf-8') as f:
                     return f.read()
             else:
-                # Try textract as fallback
-                return textract.process(file_path).decode('utf-8')
+                # Try alternative extraction for unknown formats
+                return self._extract_with_alternative_method_from_file(file_path, file_extension)
         except Exception as e:
             print(f"Error extracting text from {file_path}: {e}")
             return f"Error extracting text from {file_path}"
@@ -141,31 +141,77 @@ class DocumentManager:
             print(f"Error reading TXT from stream: {e}")
             return ""
     
-    def _extract_with_textract(self, file_content: BinaryIO) -> str:
-        """Extract text using textract from stream"""
+    def _extract_with_alternative_method(self, file_content: BinaryIO, file_extension: str) -> str:
+        """Extract text using alternative methods for unsupported formats"""
         try:
             # Reset file pointer to beginning
             if hasattr(file_content, 'seek'):
                 file_content.seek(0)
             
-            # Create temporary file for textract
+            # For .doc files (old Word format), try to use text from file
+            if file_extension.lower() == '.doc':
+                # Try reading as text first
+                try:
+                    if hasattr(file_content, 'getbuffer'):
+                        return file_content.getbuffer().decode('utf-8', errors='ignore')
+                    else:
+                        return file_content.read().decode('utf-8', errors='ignore')
+                except:
+                    pass
+            
+            # Create temporary file and try docx2txt
             import tempfile
-            with tempfile.NamedTemporaryFile(delete=False) as temp_file:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension) as temp_file:
                 if hasattr(file_content, 'getbuffer'):
                     temp_file.write(file_content.getbuffer())
                 else:
                     temp_file.write(file_content.read())
                 temp_file.flush()
                 
-                # Use textract on temporary file
-                result = textract.process(temp_file.name).decode('utf-8')
+                try:
+                    # Try docx2txt for .doc files
+                    if file_extension.lower() in ['.doc', '.docx']:
+                        result = docx2txt.process(temp_file.name)
+                        if result:
+                            return result
+                except:
+                    pass
+                
+                # Fallback: try reading as raw text
+                try:
+                    with open(temp_file.name, 'r', encoding='utf-8', errors='ignore') as f:
+                        result = f.read()
+                    if result:
+                        return result
+                except:
+                    pass
                 
                 # Clean up temporary file
                 os.unlink(temp_file.name)
-                return result
+                return f"Unable to extract text from {file_extension} format"
         except Exception as e:
-            print(f"Error using textract on stream: {e}")
+            print(f"Error using alternative extraction on stream: {e}")
             return ""
+    
+    def _extract_with_alternative_method_from_file(self, file_path: str, file_extension: str) -> str:
+        """Extract text using alternative methods from file path"""
+        try:
+            # For .doc files (old Word format)
+            if file_extension.lower() == '.doc':
+                try:
+                    return docx2txt.process(file_path)
+                except:
+                    pass
+            
+            # Try reading as raw text
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                result = f.read()
+            if result:
+                return result
+            return f"Unable to extract text from {file_extension} format"
+        except Exception as e:
+            print(f"Error using alternative extraction from file: {e}")
+            return f"Unable to extract text from {file_extension} format"
     
     def _generate_embedding(self, text: str) -> Optional[List[float]]:
         """Generate embedding vector for text"""
