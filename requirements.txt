@@ -19,6 +19,9 @@ docx2txt==0.8
 python-pptx==0.6.18
 xlrd==1.2.0
 xlsxwriter==3.2.9
+textract @ git+https://github.com/deanmalmgren/textract.git
+beautifulsoup4>=4.11.1
+
 
 # Search and Web Scraping
 duckduckgo_search==8.1.1
@@ -32,3 +35,4 @@ pytesseract==0.3.13
 # Utilities
 requests==2.32.5
 pycountry==24.6.1
+
