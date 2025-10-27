@@ -10,8 +10,15 @@ from typing import List, Dict, Optional, BinaryIO
 import PyPDF2
 import docx
 import docx2txt
-from sentence_transformers import SentenceTransformer
 import numpy as np
+
+# Optional import for sentence transformers
+try:
+    from sentence_transformers import SentenceTransformer
+    SENTENCE_TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    SENTENCE_TRANSFORMERS_AVAILABLE = False
+    SentenceTransformer = None
 
 from ..database.config import get_supabase
 
@@ -20,12 +27,13 @@ class DocumentManager:
     
     def __init__(self):
         self.supabase = get_supabase()
-        # Initialize sentence transformer for embeddings
-        try:
-            self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
-        except Exception as e:
-            print(f"Warning: Could not load embedding model: {e}")
-            self.embedding_model = None
+        # Initialize sentence transformer for embeddings (if available)
+        self.embedding_model = None
+        if SENTENCE_TRANSFORMERS_AVAILABLE and SentenceTransformer:
+            try:
+                self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+            except Exception as e:
+                print(f"Warning: Could not load embedding model: {e}")
     
     def _extract_text_from_stream(self, file_content: BinaryIO, file_extension: str) -> str:
         """Extract text content from file stream (no local storage)"""
