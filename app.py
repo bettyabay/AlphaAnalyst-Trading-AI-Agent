@@ -896,7 +896,6 @@ def phase1_foundation_data():
 
 def phase2_master_data_ai():
     """Phase 2: Master Data & AI Integration"""
-    st.markdown('<div class="phase-title">Phase 2: Master Data & AI Integration</div>', unsafe_allow_html=True)
     
     # Initialize AI analyzer
     ai_analyzer = AIResearchAnalyzer()
@@ -996,17 +995,17 @@ def phase2_master_data_ai():
                         st.success("Document uploaded successfully!")
                         st.balloons()
                         
-                        # Perform AI analysis
-                        with st.spinner("Performing AI analysis..."):
-                            # Get the document ID from the result
+                        # Perform AI analysis and persist RAG to Supabase
+                        with st.spinner("Analyzing with AI and storing RAG..."):
                             documents = doc_manager.get_documents(symbol=symbol)
                             if documents:
-                                latest_doc = documents[-1]  # Get the most recent document
+                                latest_doc = documents[-1]
                                 doc_id = latest_doc.get("id")
                                 
                                 if doc_id:
-                                    analysis = doc_manager.analyze_document_with_ai(doc_id, symbol)
-                                    signals = doc_manager.extract_trading_signals(doc_id)
+                                    result_bundle = doc_manager.analyze_and_store(doc_id, symbol)
+                                    analysis = result_bundle.get("analysis", {})
+                                    signals = result_bundle.get("signals", {})
                                     
                                     # Always display results, even if analysis failed
                                     st.subheader("AI Analysis Results")
@@ -1019,7 +1018,10 @@ def phase2_master_data_ai():
                                             st.write(analysis["analysis"])
                                         else:
                                             st.warning(f"AI analysis failed: {analysis.get('error', 'Unknown error')}")
-                                            st.info("💡 Make sure GROQ_API_KEY is set in your .env file to enable AI analysis")
+                                            details = analysis.get('details')
+                                            if details:
+                                                st.code(details)
+                                            st.info("💡 Set XAI_API_KEY (for xAI) or GROQ_API_KEY (for Groq fallback). Ensure provider access is valid.")
                                     
                                     with col2:
                                         st.write("**Trading Signals:**")
@@ -1157,6 +1159,294 @@ def phase2_master_data_ai():
     # Close AI analyzer
     ai_analyzer.close()
 
+def _calc_sma(series, window):
+    return series.rolling(window=window).mean()
+
+def _calc_rsi(close_prices, period=14):
+    delta = close_prices.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / (loss.replace(0, np.nan))
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.fillna(50)
+
+def _calc_atr(df, period=14):
+    high_low = df['High'] - df['Low']
+    high_close = (df['High'] - df['Close'].shift()).abs()
+    low_close = (df['Low'] - df['Close'].shift()).abs()
+    true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    atr = true_range.rolling(window=period).mean()
+    return atr
+
+def _fetch_history(symbol, period="6mo", interval="1d"):
+    try:
+        data = yf.download(symbol, period=period, interval=interval, progress=False)
+        if data is None or data.empty:
+            return None
+        data = data.rename(columns={
+            'Open': 'Open', 'High': 'High', 'Low': 'Low', 'Close': 'Close', 'Adj Close': 'Adj Close', 'Volume': 'Volume'
+        })
+        return data
+    except Exception:
+        return None
+
+def run_volume_screening(symbols):
+    rows = []
+    for sym in symbols:
+        hist = _fetch_history(sym, period="3mo")
+        if hist is None or hist.empty or len(hist) < 20:
+            rows.append({
+                "Symbol": sym,
+                "AvgVol20": np.nan,
+                "TodayVol": np.nan,
+                "VolSpike": np.nan,
+                "SMA50_SMA200": np.nan,
+                "RSI": np.nan,
+                "Pass": False
+            })
+            continue
+        avg20 = hist['Volume'].tail(20).mean()
+        today_vol = hist['Volume'].iloc[-1]
+        vol_spike = today_vol / avg20 if avg20 and not np.isnan(avg20) and avg20 > 0 else np.nan
+        sma50 = _calc_sma(hist['Close'], 50)
+        sma200 = _calc_sma(hist['Close'], 200)
+        rsi = _calc_rsi(hist['Close']).iloc[-1]
+        sma_spread = (sma50.iloc[-1] - sma200.iloc[-1]) if not (pd.isna(sma50.iloc[-1]) or pd.isna(sma200.iloc[-1])) else np.nan
+        passed = (not np.isnan(vol_spike) and vol_spike >= 1.5) and (not np.isnan(sma_spread) and sma_spread > 0) and (30 < rsi < 70)
+        rows.append({
+            "Symbol": sym,
+            "AvgVol20": int(avg20) if not np.isnan(avg20) else np.nan,
+            "TodayVol": int(today_vol) if not np.isnan(today_vol) else np.nan,
+            "VolSpike": round(vol_spike, 2) if not np.isnan(vol_spike) else np.nan,
+            "SMA50_SMA200": round(sma_spread, 2) if not np.isnan(sma_spread) else np.nan,
+            "RSI": round(float(rsi), 1) if not np.isnan(rsi) else np.nan,
+            "Pass": passed
+        })
+    return pd.DataFrame(rows)
+
+def run_seven_stage_fire_test(symbol):
+    result = {"symbol": symbol, "stages": [], "score": 0, "max_score": 7}
+    hist = _fetch_history(symbol, period="6mo")
+    if hist is None or hist.empty:
+        result["error"] = "No price data"
+        return result
+
+    # Helper to safely extract a 1-D Series for a given OHLCV column, handling MultiIndex
+    def _get_col_series(df, col_name):
+        if not isinstance(df, pd.DataFrame):
+            return None
+        s = None
+        try:
+            if col_name in df.columns:
+                s = df[col_name]
+            elif isinstance(df.columns, pd.MultiIndex):
+                try:
+                    s = df.xs(col_name, axis=1, level=0)
+                except Exception:
+                    try:
+                        s = df.xs(col_name, axis=1, level=1)
+                    except Exception:
+                        s = None
+        except Exception:
+            s = None
+        if s is None:
+            return None
+        if isinstance(s, pd.DataFrame):
+            if s.shape[1] >= 1:
+                s = s.iloc[:, 0]
+            else:
+                return None
+        # Ensure 1-D series
+        if not isinstance(s, pd.Series):
+            try:
+                arr = np.ravel(s)
+                s = pd.Series(arr, index=df.index[: len(arr)])
+            except Exception:
+                return None
+        return s
+
+    open_s = _get_col_series(hist, 'Open')
+    high_s = _get_col_series(hist, 'High')
+    low_s = _get_col_series(hist, 'Low')
+    close_s = _get_col_series(hist, 'Close')
+    vol_s = _get_col_series(hist, 'Volume')
+
+    # If essential columns missing, abort gracefully
+    if close_s is None or high_s is None or low_s is None or vol_s is None:
+        result["error"] = "Insufficient OHLCV data"
+        return result
+
+    # Stage 1: Liquidity (volume adequacy)
+    vol_tail = pd.to_numeric(vol_s.tail(20), errors='coerce')
+    avg20 = float(vol_tail.mean()) if len(vol_tail) else np.nan
+    pass1 = pd.notna(avg20) and avg20 >= 1_000_000
+    result["stages"].append({
+        "name": "Liquidity",
+        "pass": pass1,
+        "detail": f"Avg20Vol={int(avg20)}" if pd.notna(avg20) else "Avg20Vol=NA"
+    })
+    result["score"] += 1 if pass1 else 0
+
+    # Stage 2: Volatility sanity (ATR relative to price)
+    price = close_s.iloc[-1]
+    atr_df = pd.DataFrame({
+        'High': pd.to_numeric(high_s, errors='coerce'),
+        'Low': pd.to_numeric(low_s, errors='coerce'),
+        'Close': pd.to_numeric(close_s, errors='coerce'),
+    })
+    atr = _calc_atr(atr_df)
+    atr_last = atr.iloc[-1] if len(atr) else np.nan
+    atr_pct = (atr_last / price) * 100 if pd.notna(atr_last) and pd.notna(price) and price != 0 else np.nan
+    pass2 = pd.notna(atr_pct) and 1 <= atr_pct <= 8
+    result["stages"].append({
+        "name": "Volatility",
+        "pass": pass2,
+        "detail": f"ATR%={atr_pct:.2f}%" if pd.notna(atr_pct) else "ATR%=NA"
+    })
+    result["score"] += 1 if pass2 else 0
+
+    # Stage 3: Trend (SMA50 > SMA200)
+    sma50 = _calc_sma(close_s, 50)
+    sma200 = _calc_sma(close_s, 200)
+    sma50_last = sma50.iloc[-1] if len(sma50) else np.nan
+    sma200_last = sma200.iloc[-1] if len(sma200) else np.nan
+    pass3 = pd.notna(sma50_last) and pd.notna(sma200_last) and sma50_last > sma200_last
+    detail3 = f"SMA50-SMA200={(sma50_last - sma200_last):.2f}" if pd.notna(sma50_last) and pd.notna(sma200_last) else "SMA50-SMA200=NA"
+    result["stages"].append({"name": "Trend", "pass": pass3, "detail": detail3})
+    result["score"] += 1 if pass3 else 0
+
+    # Stage 4: Momentum (RSI between 40 and 65)
+    rsi_series = _calc_rsi(close_s)
+    rsi = rsi_series.iloc[-1] if len(rsi_series) else np.nan
+    pass4 = pd.notna(rsi) and 40 <= rsi <= 65
+    result["stages"].append({"name": "Momentum", "pass": pass4, "detail": f"RSI={rsi:.1f}" if pd.notna(rsi) else "RSI=NA"})
+    result["score"] += 1 if pass4 else 0
+
+    # Stage 5: Breakout check (close above recent range high)
+    recent_high = pd.to_numeric(high_s.tail(20), errors='coerce').max()
+    pass5 = pd.notna(price) and pd.notna(recent_high) and price > recent_high * 0.995  # within 0.5% of breakout
+    detail5 = f"Px={price:.2f} vs 20dHigh={recent_high:.2f}" if pd.notna(price) and pd.notna(recent_high) else "Px/High=NA"
+    result["stages"].append({"name": "Breakout", "pass": pass5, "detail": detail5})
+    result["score"] += 1 if pass5 else 0
+
+    # Stage 6: Risk (support proximity using SMA20)
+    sma20 = _calc_sma(close_s, 20)
+    support = sma20.iloc[-1] if len(sma20) and pd.notna(sma20.iloc[-1]) else price
+    risk_pct = ((price - support) / price) * 100 if pd.notna(price) and price != 0 and pd.notna(support) else np.nan
+    pass6 = pd.notna(risk_pct) and 0 <= risk_pct <= 5
+    result["stages"].append({"name": "Risk", "pass": pass6, "detail": f"Risk%={risk_pct:.2f}" if pd.notna(risk_pct) else "Risk%=NA"})
+    result["score"] += 1 if pass6 else 0
+
+    # Stage 7: AI sentiment integration (from Phase 2 analyzer if available)
+    ai_pass = False
+    ai_detail = "No AI"
+    try:
+        analyzer = AIResearchAnalyzer()
+        profile = analyzer.analyze_instrument_profile(symbol)
+        analyzer.close()
+        ai = profile.get("ai_analysis", {}) if isinstance(profile, dict) else {}
+        sentiment = ai.get("overall_sentiment")
+        confidence = ai.get("confidence", 5)
+        ai_pass = sentiment in ["Bullish", "Neutral"] and float(confidence) >= 5
+        ai_detail = f"Sent={sentiment}, Conf={confidence}"
+    except Exception as _:
+        ai_pass = False
+        ai_detail = "AI error"
+    result["stages"].append({"name": "AI Sentiment", "pass": ai_pass, "detail": ai_detail})
+    result["score"] += 1 if ai_pass else 0
+
+    return result
+
+def ai_enhanced_recommendation(symbol):
+    fire = run_seven_stage_fire_test(symbol)
+    score_ratio = fire["score"] / fire["max_score"] if fire.get("max_score") else 0
+    base_rec = "Hold"
+    if score_ratio >= 0.85:
+        base_rec = "Strong Buy"
+    elif score_ratio >= 0.6:
+        base_rec = "Buy"
+    elif score_ratio <= 0.3:
+        base_rec = "Sell"
+
+    ai_conf = 5.0
+    try:
+        analyzer = AIResearchAnalyzer()
+        profile = analyzer.analyze_instrument_profile(symbol)
+        analyzer.close()
+        ai = profile.get("ai_analysis", {}) if isinstance(profile, dict) else {}
+        ai_conf = float(ai.get("confidence", 5))
+    except Exception:
+        ai_conf = 5.0
+
+    final_conf = round(0.7 * (score_ratio * 10) + 0.3 * ai_conf, 1)
+    return {"symbol": symbol, "recommendation": base_rec, "confidence": final_conf, "fire_test": fire}
+
+def phase3_trading_engine_core():
+    
+
+    symbols = get_watchlist_symbols()
+
+    tab1, tab2, tab3 = st.tabs(["Volume Screening", "7-Stage Fire Test", "Trading Wizard"])
+
+    with tab1:
+        st.subheader("Phase 1 Volume Screening")
+        if st.button("Run Screening", type="primary", key="run_screening"):
+            with st.spinner("Screening watchlist..."):
+                df = run_volume_screening(symbols)
+            st.dataframe(df, use_container_width=True)
+            passed = df[df['Pass'] == True]["Symbol"].tolist()
+            st.success(f"Passed: {len(passed)} / {len(df)}")
+            if passed:
+                st.write(", ".join(passed))
+
+    with tab2:
+        st.subheader("7-Stage Fire Testing")
+        sel = st.selectbox("Select Symbol", symbols, key="fire_symbol")
+        if st.button("Run Fire Test", type="primary", key="run_fire"):
+            with st.spinner(f"Testing {sel}..."):
+                res = run_seven_stage_fire_test(sel)
+            if res.get("error"):
+                st.error(res["error"])
+            else:
+                st.metric("Score", f"{res['score']} / {res['max_score']}")
+                stages_df = pd.DataFrame([{
+                    "Stage": s["name"],
+                    "Pass": "✅" if s["pass"] else "❌",
+                    "Detail": s["detail"]
+                } for s in res["stages"]])
+                st.dataframe(stages_df, use_container_width=True)
+
+    with tab3:
+        st.subheader("Step-by-Step Trading Interface")
+        sel2 = st.selectbox("Symbol", symbols, key="wiz_symbol")
+        step = st.radio("Step", ["1) Analyze", "2) Risk & Entry", "3) Recommendation"], horizontal=True)
+
+        if step.startswith("1"):
+            with st.spinner("Computing AI-enhanced analysis..."):
+                rec = ai_enhanced_recommendation(sel2)
+            st.write(f"Recommendation: {rec['recommendation']}")
+            st.write(f"Confidence: {rec['confidence']}/10")
+            st.metric("Fire Test", f"{rec['fire_test']['score']} / {rec['fire_test']['max_score']}")
+
+        elif step.startswith("2"):
+            hist = _fetch_history(sel2, period="3mo")
+            if hist is None or hist.empty:
+                st.error("No data")
+            else:
+                atr = _calc_atr(hist).iloc[-1]
+                px = hist['Close'].iloc[-1]
+                stop = px - 1.5 * atr if atr == atr else px * 0.97
+                target = px + 2 * (px - stop)
+                st.write(f"Price: {px:.2f}")
+                st.write(f"Suggested Stop: {stop:.2f}")
+                st.write(f"Suggested Target: {target:.2f}")
+
+        else:
+            with st.spinner("Finalizing recommendation..."):
+                rec = ai_enhanced_recommendation(sel2)
+            st.success(f"{sel2}: {rec['recommendation']} (Confidence {rec['confidence']}/10)")
+            st.write("Use Step 2 to refine entries and risk.")
+
 def main():
     st.markdown('<div class="section-header">AlphaAnalyst Trading AI Agent - Phase 1</div>', unsafe_allow_html=True)
     
@@ -1204,7 +1494,7 @@ def main():
     elif st.session_state.active_phase == phases[1]:
         phase2_master_data_ai()
     elif st.session_state.active_phase == phases[2]:
-        st.info("Phase 3: Trading Engine Core - Coming Soon!")
+        phase3_trading_engine_core()
     elif st.session_state.active_phase == phases[3]:
         st.info("Phase 4: Session Management & Execution - Coming Soon!")
     elif st.session_state.active_phase == phases[4]:

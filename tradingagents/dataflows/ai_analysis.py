@@ -16,20 +16,21 @@ from phi.model.xai import xAI
 from phi.agent.agent import Agent
 from .document_manager import DocumentManager
 from .polygon_integration import PolygonDataClient
+from groq import Groq
 
 
 class AIResearchAnalyzer:
     """AI-powered research analysis for trading insights"""
     
     def __init__(self):
-        api_key = os.getenv("GROQ_API_KEY", "")
-        if not api_key:
-            print("Warning: GROQ_API_KEY not found. AI analysis will be disabled.")
+        xai_key = os.getenv("XAI_API_KEY", "")
+        if not xai_key:
+            print("Warning: XAI_API_KEY not found. xAI provider disabled; will fallback to Groq if configured.")
             self.xai_model = None
         else:
             self.xai_model = xAI(
                 model="grok-beta",
-                api_key=api_key
+                api_key=xai_key
             )
         self.document_manager = DocumentManager()
         self.polygon_client = PolygonDataClient()
@@ -113,7 +114,10 @@ class AIResearchAnalyzer:
         """Generate comprehensive AI analysis"""
         try:
             if not self.xai_model:
-                return {"error": "AI analysis disabled - GROQ_API_KEY not configured"}
+                # Fallback to Groq if available
+                groq_key = os.getenv("GROQ_API_KEY", "")
+                if not groq_key:
+                    return {"error": "AI analysis disabled - XAI_API_KEY or GROQ_API_KEY not configured"}
             
             # Prepare context for AI analysis
             context = f"""
@@ -155,9 +159,29 @@ class AIResearchAnalyzer:
             Format your response as a structured analysis suitable for investment decision making.
             """
             
-            # Use Agent for proper API call
-            agent = Agent(model=self.xai_model)
-            response = agent.run(analysis_prompt)
+            # Try xAI via Agent first
+            response = None
+            if self.xai_model:
+                try:
+                    agent = Agent(model=self.xai_model)
+                    response = agent.run(analysis_prompt)
+                except Exception as e:
+                    # On xAI failure, fallback to Groq
+                    response = None
+            if response is None:
+                groq_key = os.getenv("GROQ_API_KEY", "")
+                if not groq_key:
+                    return {"error": "AI analysis error: No working provider. Set GROQ_API_KEY or XAI_API_KEY"}
+                client = Groq(api_key=groq_key)
+                chat = client.chat.completions.create(
+                    model="llama-3.1-70b-versatile",
+                    messages=[
+                        {"role": "system", "content": "You are a professional financial analyst."},
+                        {"role": "user", "content": analysis_prompt},
+                    ],
+                    temperature=0.2,
+                )
+                response = chat.choices[0].message.content if chat.choices else ""
             
             return {
                 "analysis_text": response,
@@ -167,7 +191,10 @@ class AIResearchAnalyzer:
             }
             
         except Exception as e:
-            return {"error": f"AI analysis error: {str(e)}"}
+            msg = str(e)
+            if "403" in msg or "permission" in msg.lower() or "credits" in msg.lower():
+                return {"error": "AI analysis error: Permission/credits issue with provider. Set XAI_API_KEY or GROQ_API_KEY and ensure access.", "details": msg}
+            return {"error": f"AI analysis error: {msg}"}
     
     def _format_document_insights(self, doc_insights: List[Dict]) -> str:
         """Format document insights for AI analysis"""

@@ -12,6 +12,7 @@ import docx
 import docx2txt
 import numpy as np
 from dotenv import load_dotenv
+import os
 
 # Load environment variables
 load_dotenv()
@@ -25,6 +26,7 @@ except ImportError:
     SentenceTransformer = None
 
 from ..database.config import get_supabase
+from groq import Groq
 
 class DocumentManager:
     """Document management for research documents"""
@@ -33,11 +35,21 @@ class DocumentManager:
         self.supabase = get_supabase()
         # Initialize sentence transformer for embeddings (if available)
         self.embedding_model = None
+        self.gemini_client = None
         if SENTENCE_TRANSFORMERS_AVAILABLE and SentenceTransformer:
             try:
                 self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
             except Exception as e:
                 print(f"Warning: Could not load embedding model: {e}")
+        # Gemini fallback
+        try:
+            import google.generativeai as genai
+            gemini_key = os.getenv("GEMINI_API_KEY", "")
+            if gemini_key:
+                genai.configure(api_key=gemini_key)
+                self.gemini_client = genai
+        except Exception as e:
+            self.gemini_client = None
     
     def _extract_text_from_stream(self, file_content: BinaryIO, file_extension: str) -> str:
         """Extract text content from file stream (no local storage)"""
@@ -227,14 +239,29 @@ class DocumentManager:
     
     def _generate_embedding(self, text: str) -> Optional[List[float]]:
         """Generate embedding vector for text"""
-        if not self.embedding_model or not text:
+        if not text:
             return None
-        try:
-            embedding = self.embedding_model.encode(text)
-            return embedding.tolist()
-        except Exception as e:
-            print(f"Error generating embedding: {e}")
-            return None
+        # 1) sentence-transformers primary
+        if self.embedding_model:
+            try:
+                embedding = self.embedding_model.encode(text)
+                return embedding.tolist()
+            except Exception as e:
+                print(f"Embedding (sentence-transformers) failed: {e}")
+        # 2) Gemini fallback
+        if self.gemini_client:
+            try:
+                model = self.gemini_client.GenerativeModel("text-embedding-004")
+                resp = model.embed_content(text)
+                vec = resp.get("embedding", {}).get("values") if isinstance(resp, dict) else getattr(resp, "embedding", None)
+                if hasattr(vec, "values"):
+                    return list(vec.values)
+                if isinstance(vec, list):
+                    return vec
+            except Exception as e:
+                print(f"Embedding (Gemini) failed: {e}")
+        # No embedding available
+        return None
     
     def upload_document(self, 
                        file_content: BinaryIO, 
@@ -267,19 +294,35 @@ class DocumentManager:
             embedding_vector = self._generate_embedding(content_text)
 
             if self.supabase:
-                # Insert into Supabase research_documents table
-                payload = {
+                # Insert minimal required columns first
+                base_payload = {
                     "file_name": filename,
                     "file_content": content_text or f"Document: {filename}",
                     "symbol": symbol,
-                    "uploaded_at": datetime.now().isoformat()
+                    "uploaded_at": datetime.now().isoformat(),
                 }
                 try:
-                    resp = self.supabase.table("research_documents").insert(payload).execute()
+                    resp = self.supabase.table("research_documents").insert(base_payload).execute()
                     print(f"Supabase insert response: {resp}")
                 except Exception as e:
                     print(f"Supabase insert error details: {e}")
                     return {"success": False, "error": str(e), "message": "Supabase insert failed"}
+
+                # Try to update optional RAG fields if the columns exist
+                try:
+                    new_id = resp.data[0]['id'] if resp.data else None
+                    if new_id:
+                        optional_update = {
+                            "rag_embedding": embedding_vector if embedding_vector is not None else None,
+                            "doc_title": title,
+                            "document_type": document_type,
+                            "source": source
+                        }
+                        self.supabase.table("research_documents").update(optional_update).eq("id", new_id).execute()
+                except Exception as e:
+                    # Non-fatal: schema may not have optional columns
+                    print(f"Supabase optional update skipped: {e}")
+
                 return {"success": True, "message": "Document uploaded to cloud storage", "document_id": resp.data[0]['id'] if resp.data else None}
             else:
                 return {"success": False, "error": "Supabase not configured", "message": "Cannot upload document"}
@@ -383,15 +426,9 @@ class DocumentManager:
             from phi.model.xai import xAI
             from phi.agent.agent import Agent
             
-            # Initialize xAI model
-            api_key = os.getenv("GROQ_API_KEY", "")
-            if not api_key:
-                return {"success": False, "error": "AI analysis disabled - GROQ_API_KEY not configured"}
-            
-            xai_model = xAI(
-                model="grok-beta",
-                api_key=api_key
-            )
+            # Initialize xAI model only with its own key; fallback to Groq later
+            xai_key = os.getenv("XAI_API_KEY", "")
+            xai_model = xAI(model="grok-beta", api_key=xai_key) if xai_key else None
             
             # Create analysis prompt
             analysis_prompt = f"""
@@ -412,9 +449,29 @@ class DocumentManager:
             Format your response as a structured analysis.
             """
             
-            # Get AI analysis using Agent
-            agent = Agent(model=xai_model)
-            response = agent.run(analysis_prompt)
+            # Get AI analysis using Agent (xAI), fallback to Groq if needed
+            response = None
+            if xai_model:
+                try:
+                    agent = Agent(model=xai_model)
+                    response = agent.run(analysis_prompt)
+                except Exception:
+                    response = None
+            if response is None:
+                groq_key = os.getenv("GROQ_API_KEY", "")
+                if groq_key:
+                    client = Groq(api_key=groq_key)
+                    chat = client.chat.completions.create(
+                        model="llama-3.1-70b-versatile",
+                        messages=[
+                            {"role": "system", "content": "You are a professional financial analyst."},
+                            {"role": "user", "content": analysis_prompt},
+                        ],
+                        temperature=0.2,
+                    )
+                    response = chat.choices[0].message.content if chat.choices else ""
+                else:
+                    return {"success": False, "error": "No working provider. Set XAI_API_KEY or GROQ_API_KEY"}
             
             return {
                 "success": True,
@@ -425,7 +482,10 @@ class DocumentManager:
             }
             
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            msg = str(e)
+            if "403" in msg or "permission" in msg.lower() or "credits" in msg.lower():
+                return {"success": False, "error": "Permission/credits issue with xAI. Set XAI_API_KEY and ensure team has credits.", "details": msg}
+            return {"success": False, "error": msg}
     
     def extract_trading_signals(self, document_id: str) -> Dict:
         """Extract specific trading signals from document"""
@@ -469,6 +529,54 @@ class DocumentManager:
                 "confidence": min(abs(sentiment_score) * 2, 10)  # Scale to 1-10
             }
             
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def analyze_and_store(self, document_id: str, symbol: Optional[str] = None) -> Dict:
+        """Run AI analysis + signal extraction and persist results into Supabase for RAG."""
+        try:
+            if not self.supabase:
+                return {"success": False, "error": "Supabase not configured"}
+
+            # Retrieve content and ensure embedding present
+            content = self.get_document_content(document_id) or ""
+            embedding_vector = self._generate_embedding(content)
+
+            # AI analysis and signals
+            analysis = self.analyze_document_with_ai(document_id, symbol)
+            signals = self.extract_trading_signals(document_id)
+
+            # Prepare update payload with optional fields guarded
+            update_payload = {
+                "rag_embedding": embedding_vector if embedding_vector is not None else None,
+                "last_analyzed_at": datetime.now().isoformat(),
+            }
+
+            if analysis.get("success"):
+                update_payload.update({
+                    "ai_analysis_text": analysis.get("analysis"),
+                    # Simple extractions for recommendation/sentiment/confidence can be post-processed by ai_analysis module later
+                })
+            if signals.get("success"):
+                update_payload.update({
+                    "overall_sentiment": signals.get("overall_sentiment"),
+                    "signal_confidence": signals.get("confidence"),
+                    "bullish_signals": signals.get("bullish_signals"),
+                    "bearish_signals": signals.get("bearish_signals"),
+                })
+
+            # Attempt update; tolerate missing columns
+            try:
+                self.supabase.table("research_documents").update(update_payload).eq("id", document_id).execute()
+            except Exception as e:
+                print(f"Supabase update warning (non-fatal): {e}")
+
+            return {
+                "success": True,
+                "document_id": document_id,
+                "analysis": analysis,
+                "signals": signals,
+            }
         except Exception as e:
             return {"success": False, "error": str(e)}
     
