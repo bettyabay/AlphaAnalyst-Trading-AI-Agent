@@ -17,13 +17,7 @@ import os
 # Load environment variables
 load_dotenv()
 
-# Optional import for sentence transformers
-try:
-    from sentence_transformers import SentenceTransformer
-    SENTENCE_TRANSFORMERS_AVAILABLE = True
-except ImportError:
-    SENTENCE_TRANSFORMERS_AVAILABLE = False
-    SentenceTransformer = None
+"""Gemini-only embedding configuration (sentence-transformers disabled by design)."""
 
 from ..database.config import get_supabase
 from groq import Groq
@@ -34,14 +28,9 @@ class DocumentManager:
     def __init__(self):
         self.supabase = get_supabase()
         # Initialize sentence transformer for embeddings (if available)
-        self.embedding_model = None
+        self.embedding_model = None  # Explicitly unused (Gemini-only embeddings)
         self.gemini_client = None
-        if SENTENCE_TRANSFORMERS_AVAILABLE and SentenceTransformer:
-            try:
-                self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
-            except Exception as e:
-                print(f"Warning: Could not load embedding model: {e}")
-        # Gemini fallback
+        # Gemini embedding provider
         try:
             import google.generativeai as genai
             gemini_key = os.getenv("GEMINI_API_KEY", "")
@@ -241,14 +230,7 @@ class DocumentManager:
         """Generate embedding vector for text"""
         if not text:
             return None
-        # 1) sentence-transformers primary
-        if self.embedding_model:
-            try:
-                embedding = self.embedding_model.encode(text)
-                return embedding.tolist()
-            except Exception as e:
-                print(f"Embedding (sentence-transformers) failed: {e}")
-        # 2) Gemini fallback
+        # Gemini-only embeddings
         if self.gemini_client:
             try:
                 model = self.gemini_client.GenerativeModel("text-embedding-004")
