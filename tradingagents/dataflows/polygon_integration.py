@@ -57,6 +57,36 @@ class PolygonDataClient:
         except Exception as e:
             print(f"Error fetching historical data for {symbol}: {e}")
             return pd.DataFrame()
+
+    def get_intraday_data(self, symbol: str, start_date: str, end_date: str, multiplier: int = 5, timespan: str = "minute") -> pd.DataFrame:
+        """Get intraday (e.g. 5-min) aggregated price data for a symbol
+
+        Uses the Polygon aggregated range endpoint with a multiplier (e.g. 5) and timespan (e.g. 'minute').
+        Returns a DataFrame with columns: timestamp, open, high, low, close, volume
+        """
+        url = f"{self.base_url}/v2/aggs/ticker/{symbol}/range/{multiplier}/{timespan}/{start_date}/{end_date}"
+        params = {"apikey": self.api_key, "adjusted": "true", "sort": "asc"}
+
+        try:
+            response = requests.get(url, params=params)
+            response.raise_for_status()
+            data = response.json()
+
+            if data.get("results"):
+                df = pd.DataFrame(data["results"])
+                df["timestamp"] = pd.to_datetime(df["t"], unit="ms")
+                df = df.rename(columns={
+                    "o": "open", "h": "high", "l": "low", 
+                    "c": "close", "v": "volume"
+                })
+                return df[["timestamp", "open", "high", "low", "close", "volume"]]
+            else:
+                print(f"No intraday data returned for {symbol}. Response: {data}")
+                return pd.DataFrame()
+
+        except Exception as e:
+            print(f"Error fetching intraday data for {symbol}: {e}")
+            return pd.DataFrame()
     
     def get_real_time_price(self, symbol: str) -> Dict:
         """Get real-time price for a symbol"""

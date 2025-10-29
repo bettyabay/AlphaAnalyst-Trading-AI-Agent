@@ -4,7 +4,6 @@ import plotly.graph_objects as go
 import yfinance as yf
 import numpy as np
 from phi.agent.agent import Agent
-from phi.model.xai import xAI
 from phi.tools.yfinance import YFinanceTools
 from phi.tools.duckduckgo import DuckDuckGo
 from phi.tools.googlesearch import GoogleSearch
@@ -298,31 +297,10 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 def initialize_agents():
+    # Agents disabled for Groq-only setup; keep UI functional without xAI
     if not st.session_state.get('agents_initialized', False):
-        try:
-            st.session_state.web_agent = Agent(
-                name="Web Search Agent",
-                role="Search the web for information",
-                model=xAI(api_key=GROQ_API_KEY),
-                tools=[GoogleSearch(fixed_max_results=5), DuckDuckGo(fixed_max_results=5)]
-            )
-            st.session_state.finance_agent = Agent(
-                name="Financial AI Agent",
-                role="Providing financial insights",
-                model=xAI(api_key=GROQ_API_KEY),
-                tools=[YFinanceTools()]
-            )
-            st.session_state.multi_ai_agent = Agent(
-                name='Stock Market Agent',
-                role='Stock market analysis specialist',
-                model=xAI(api_key=GROQ_API_KEY),
-                team=[st.session_state.web_agent, st.session_state.finance_agent]
-            )
-            st.session_state.agents_initialized = True
-            return True
-        except Exception as e:
-            st.error(f"Agent initialization error: {str(e)}")
-            return False
+        st.session_state.agents_initialized = True
+        return True
 
 def get_stock_data(symbol):
     try:
@@ -720,6 +698,56 @@ def phase1_foundation_data():
             # Clear progress indicators
             progress_bar.empty()
             status_text.empty()
+
+    # New: 5-minute intraday ingestion (past 2 years)
+    with col1:
+        if st.button("Ingest All Historical 5-min Data (2 years)", use_container_width=True, key="ingest_all_5min"):
+            pipeline = DataIngestionPipeline()
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+
+            symbols = get_watchlist_symbols()
+            results_5min = {}
+
+            for i, symbol in enumerate(symbols):
+                status_text.text(f"Processing 5-min {symbol}... ({i+1}/{len(symbols)})")
+                progress_bar.progress((i + 1) / len(symbols))
+
+                # 2 years of 5-min data -> days_back=730
+                result = pipeline.ingest_historical_data(symbol, days_back=730, interval='5min')
+                results_5min[symbol] = result
+
+                if result:
+                    st.success(f"✅ 5-min {symbol} processed successfully")
+                else:
+                    st.warning(f"⚠️ 5-min {symbol} had issues (check console for details)")
+
+            pipeline.close()
+
+            success_count = sum(1 for success in results_5min.values() if success)
+            failed_count = len(results_5min) - success_count
+
+            if success_count > 0:
+                st.success(f"✅ Successfully processed 5-min data for {success_count}/{len(results_5min)} stocks")
+                st.balloons()
+            else:
+                st.error(f"❌ Failed to process 5-min data for all {len(results_5min)} stocks")
+
+            if failed_count > 0:
+                st.warning(f"⚠️ {failed_count} stocks had issues for 5-min ingestion")
+                failed_stocks = [symbol for symbol, success in results_5min.items() if not success]
+                st.write("Stocks with issues:", ", ".join(failed_stocks))
+
+            # Show detailed results
+            st.subheader("5-min Detailed Results")
+            results_df = pd.DataFrame([
+                {"Symbol": symbol, "Status": "✅ Success" if success else "⚠️ Issues"}
+                for symbol, success in results_5min.items()
+            ])
+            st.dataframe(results_df, use_container_width=True)
+
+            progress_bar.empty()
+            status_text.empty()
     
     with col2:
         if st.button("Check Data Status", use_container_width=True, key="main_data_status"):
@@ -743,6 +771,31 @@ def phase1_foundation_data():
                     })
                 status_df = pd.DataFrame(rows)
                 st.dataframe(status_df, use_container_width=True)
+
+                # Also show 5-min data counts if table exists
+                rows_5min = []
+                for symbol in WATCHLIST_STOCKS.keys():
+                    try:
+                        resp5 = sb.table("market_data_5min").select("timestamp").eq("symbol", symbol).limit(1).execute()
+                        # If query succeeds, get count via RPC or select
+                        try:
+                            resp5c = sb.rpc("get_symbol_stats_5min", {"p_symbol": symbol}).execute()
+                            data5 = resp5c.data if hasattr(resp5c, "data") else []
+                            count5 = len(data5) if isinstance(data5, list) else 0
+                        except Exception:
+                            resp5all = sb.table("market_data_5min").select("timestamp").eq("symbol", symbol).execute()
+                            data5all = resp5all.data if hasattr(resp5all, "data") else []
+                            count5 = len(data5all) if isinstance(data5all, list) else 0
+                    except Exception:
+                        count5 = 0
+                    rows_5min.append({
+                        "Symbol": symbol,
+                        "Records (5min)": count5,
+                        "Latest Timestamp": "-"
+                    })
+                status_df_5min = pd.DataFrame(rows_5min)
+                st.subheader("5-minute data status")
+                st.dataframe(status_df_5min, use_container_width=True)
             else:
                 pipeline = DataIngestionPipeline()
                 status = pipeline.get_data_completion_status()
@@ -1021,7 +1074,7 @@ def phase2_master_data_ai():
                                             details = analysis.get('details')
                                             if details:
                                                 st.code(details)
-                                            st.info("💡 Set XAI_API_KEY (for xAI) or GROQ_API_KEY (for Groq fallback). Ensure provider access is valid.")
+                                            st.info("💡 Set GROQ_API_KEY and ensure provider access is valid.")
                                     
                                     with col2:
                                         st.write("**Trading Signals:**")

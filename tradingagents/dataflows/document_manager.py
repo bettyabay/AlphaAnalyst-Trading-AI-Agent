@@ -404,13 +404,8 @@ class DocumentManager:
             if not content:
                 return {"success": False, "error": "Document content not found"}
             
-            # Use xAI/Phi for analysis
-            from phi.model.xai import xAI
-            from phi.agent.agent import Agent
-            
-            # Initialize xAI model only with its own key; fallback to Groq later
-            xai_key = os.getenv("XAI_API_KEY", "")
-            xai_model = xAI(model="grok-beta", api_key=xai_key) if xai_key else None
+            # Use Groq for analysis (Groq-only)
+            from groq import Groq
             
             # Create analysis prompt
             analysis_prompt = f"""
@@ -431,29 +426,20 @@ class DocumentManager:
             Format your response as a structured analysis.
             """
             
-            # Get AI analysis using Agent (xAI), fallback to Groq if needed
-            response = None
-            if xai_model:
-                try:
-                    agent = Agent(model=xai_model)
-                    response = agent.run(analysis_prompt)
-                except Exception:
-                    response = None
-            if response is None:
-                groq_key = os.getenv("GROQ_API_KEY", "")
-                if groq_key:
-                    client = Groq(api_key=groq_key)
-                    chat = client.chat.completions.create(
-                        model="llama-3.1-70b-versatile",
-                        messages=[
-                            {"role": "system", "content": "You are a professional financial analyst."},
-                            {"role": "user", "content": analysis_prompt},
-                        ],
-                        temperature=0.2,
-                    )
-                    response = chat.choices[0].message.content if chat.choices else ""
-                else:
-                    return {"success": False, "error": "No working provider. Set XAI_API_KEY or GROQ_API_KEY"}
+            # Get AI analysis using Groq
+            groq_key = os.getenv("GROQ_API_KEY", "")
+            if not groq_key:
+                return {"success": False, "error": "No working provider. Set GROQ_API_KEY"}
+            client = Groq(api_key=groq_key)
+            chat = client.chat.completions.create(
+                model="llama-3.1-70b-versatile",
+                messages=[
+                    {"role": "system", "content": "You are a professional financial analyst."},
+                    {"role": "user", "content": analysis_prompt},
+                ],
+                temperature=0.2,
+            )
+            response = chat.choices[0].message.content if chat.choices else ""
             
             return {
                 "success": True,
@@ -466,7 +452,7 @@ class DocumentManager:
         except Exception as e:
             msg = str(e)
             if "403" in msg or "permission" in msg.lower() or "credits" in msg.lower():
-                return {"success": False, "error": "Permission/credits issue with xAI. Set XAI_API_KEY and ensure team has credits.", "details": msg}
+                return {"success": False, "error": "Permission/credits issue with Groq. Ensure GROQ_API_KEY has access.", "details": msg}
             return {"success": False, "error": msg}
     
     def extract_trading_signals(self, document_id: str) -> Dict:
