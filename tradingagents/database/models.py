@@ -25,7 +25,7 @@ SUPABASE_TABLES = {
         "embedding_vector": "jsonb",
         "uploaded_at": "timestamp with time zone"
     },
-    "positions": {
+    "portfolio": {
         "id": "uuid (auto-generated)",
         "user_id": "uuid",
         "symbol": "text",
@@ -40,7 +40,7 @@ SUPABASE_TABLES = {
         "details": "jsonb",
         "timestamp": "timestamp with time zone"
     },
-    "signals": {
+    "trade_signals": {
         "id": "uuid (auto-generated)",
         "symbol": "text",
         "signal_type": "text",
@@ -59,5 +59,36 @@ SUPABASE_TABLES = {
         "data_fetch_status": "jsonb",
         "last_updated": "timestamp with time zone",
         "health_score": "numeric"
+    },
+    "trading_sessions": {
+        "id": "uuid (auto-generated)",
+        "user_id": "uuid",
+        "session_name": "text",
+        "status": "text",  # 'active' or 'closed'
+        "start_date": "timestamp with time zone",
+        "end_date": "timestamp with time zone",
+        "notes": "text",
+        "created_at": "timestamp with time zone"
+    },
+    "trades": {
+        "id": "uuid (auto-generated)",
+        "user_id": "uuid",
+        "session_id": "uuid",
+        "symbol": "text",
+        "quantity": "numeric",
+        "entry_price": "numeric",
+        "exit_price": "numeric",
+        "trade_type": "text",  # 'LONG' or 'SHORT'
+        "status": "text",  # 'active', 'closed', 'partial'
+        "entry_date": "timestamp with time zone",
+        "exit_date": "timestamp with time zone",
+        "stop_loss": "numeric",
+        "target1": "numeric",
+        "target2": "numeric",
+        "realized_pnl": "numeric",
+        "realized_pnl_pct": "numeric",
+        "notes": "text",
+        "close_notes": "text",
+        "created_at": "timestamp with time zone"
     }
 }

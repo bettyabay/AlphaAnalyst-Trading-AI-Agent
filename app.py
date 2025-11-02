@@ -3,6 +3,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import yfinance as yf
 import numpy as np
+from datetime import datetime
 from phi.agent.agent import Agent
 from phi.tools.yfinance import YFinanceTools
 from phi.tools.duckduckgo import DuckDuckGo
@@ -17,6 +18,19 @@ from tradingagents.dataflows.polygon_integration import PolygonDataClient
 
 # Phase 2 imports
 from tradingagents.dataflows.ai_analysis import AIResearchAnalyzer
+
+# Phase 3 imports
+from tradingagents.agents.utils.trading_engine import (
+    VolumeScreeningEngine,
+    FireTestingEngine,
+    AIEnhancedScoringEngine
+)
+
+# Phase 4 imports
+from tradingagents.agents.utils.session_manager import (
+    TradingSessionManager,
+    TradeExecutionService
+)
 
 GROQ_API_KEY = "" 
 
@@ -679,6 +693,30 @@ def phase1_foundation_data():
             if success_count > 0:
                 st.success(f"✅ Successfully processed {success_count}/{len(results)} stocks")
                 st.balloons()
+                
+                # Save button for data ingestion results
+                st.markdown("---")
+                if st.button("💾 Save Ingestion Results to Database", key="save_ingestion_results"):
+                    try:
+                        from tradingagents.database.db_service import update_data_health, log_event
+                        
+                        # Update data health for each symbol
+                        for symbol, success in results.items():
+                            update_data_health(
+                                symbol=symbol,
+                                data_fetch_status={"status": "success" if success else "failed", "source": "phase1_ingestion"},
+                                health_score=10.0 if success else 0.0
+                            )
+                        
+                        # Log completion
+                        log_event("data_ingestion_completed", {
+                            "success_count": success_count,
+                            "failed_count": failed_count,
+                            "total": len(results)
+                        })
+                        st.success("✅ Ingestion results saved to database!")
+                    except Exception as e:
+                        st.error(f"❌ Failed to save: {str(e)}")
             else:
                 st.error(f"❌ Failed to process all {len(results)} stocks")
             
@@ -1005,6 +1043,19 @@ def phase2_master_data_ai():
                     
                     # Store summary in session state
                     st.session_state.master_data_summary = summary
+                    
+                    # Save button for master data
+                    st.markdown("---")
+                    if st.button("💾 Save Master Data Summary to Database", key="save_master_data"):
+                        try:
+                            from tradingagents.database.db_service import log_event
+                            log_event("master_data_generated", {
+                                "total_instruments": summary.get("total_instruments", 0),
+                                "source": "phase2"
+                            })
+                            st.success("✅ Master data summary saved to database!")
+                        except Exception as e:
+                            st.error(f"❌ Failed to save: {str(e)}")
                 else:
                     st.error(f"Error generating summary: {summary['error']}")
     
@@ -1236,9 +1287,11 @@ def _fetch_history(symbol, period="6mo", interval="1d"):
         data = yf.download(symbol, period=period, interval=interval, progress=False)
         if data is None or data.empty:
             return None
-        data = data.rename(columns={
-            'Open': 'Open', 'High': 'High', 'Low': 'Low', 'Close': 'Close', 'Adj Close': 'Adj Close', 'Volume': 'Volume'
-        })
+        
+        # Handle MultiIndex columns (yfinance returns MultiIndex with symbol name as second level)
+        if isinstance(data.columns, pd.MultiIndex):
+            data = data.droplevel(1, axis=1)
+        
         return data
     except Exception:
         return None
@@ -1435,70 +1488,1067 @@ def ai_enhanced_recommendation(symbol):
     return {"symbol": symbol, "recommendation": base_rec, "confidence": final_conf, "fire_test": fire}
 
 def phase3_trading_engine_core():
+    """Phase 3: Trading Engine Core - Complete Phase 1 + Phase 2 Analysis Workflow"""
     
-
+    # Initialize engines
+    if 'volume_screener' not in st.session_state:
+        st.session_state.volume_screener = VolumeScreeningEngine()
+    
+    if 'fire_tester' not in st.session_state:
+        st.session_state.fire_tester = FireTestingEngine()
+    
+    if 'ai_scorer' not in st.session_state:
+        st.session_state.ai_scorer = AIEnhancedScoringEngine()
+    
     symbols = get_watchlist_symbols()
-
-    tab1, tab2, tab3 = st.tabs(["Volume Screening", "7-Stage Fire Test", "Trading Wizard"])
-
+    
+    # Main tabs for Phase 3
+    tab1, tab2, tab3 = st.tabs([
+        "📊 Phase 1: Volume Screening", 
+        "🔥 Phase 2: Deep Analysis", 
+        "⚡ Trading Workflow"
+    ])
+    
     with tab1:
-        st.subheader("Phase 1 Volume Screening")
-        if st.button("Run Screening", type="primary", key="run_screening"):
-            with st.spinner("Screening watchlist..."):
-                df = run_volume_screening(symbols)
-            st.dataframe(df, use_container_width=True)
-            passed = df[df['Pass'] == True]["Symbol"].tolist()
-            st.success(f"Passed: {len(passed)} / {len(df)}")
-            if passed:
-                st.write(", ".join(passed))
-
+        st.markdown('<div class="feature-card">', unsafe_allow_html=True)
+        st.markdown("### Phase 1: Volume Screening Engine")
+        st.write("""
+        **Purpose**: Identify stocks with volume spikes and positive momentum.
+        
+        **Criteria**:
+        - Volume spike >= 1.3x average (20-day)
+        - SMA50 > SMA200 (or SMA20 > SMA50 if SMA200 unavailable) - uptrend
+        - RSI between 30-70 (momentum)
+        - Average volume >= 1M shares (liquidity)
+        """)
+        
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            if st.button("🚀 Run Volume Screening", type="primary", key="run_phase1_screening", use_container_width=True):
+                with st.spinner("Screening watchlist for volume spikes..."):
+                    screening_df = st.session_state.volume_screener.screen_watchlist(symbols)
+                    
+                    # Store results in session state
+                    st.session_state.phase1_results = screening_df
+                    
+                    # Show results
+                    st.success(f"✅ Screening complete! Found {len(screening_df[screening_df['Pass'] == '✅'])} candidates")
+                    
+                    # Display results
+                    st.dataframe(screening_df, use_container_width=True, height=400)
+                    
+                    # Show passed symbols
+                    passed_symbols = screening_df[screening_df['Pass'] == '✅']['Symbol'].tolist()
+                    if passed_symbols:
+                        st.info(f"📈 **Passed Symbols**: {', '.join(passed_symbols)}")
+                        st.session_state.phase1_passed = passed_symbols
+                    else:
+                        st.warning("⚠️ No symbols passed Phase 1 screening")
+                        st.session_state.phase1_passed = []
+                    
+                    # Save button for volume screening results
+                    st.markdown("---")
+                    if st.button("💾 Save Screening Results to Database", key="save_screening_results"):
+                        try:
+                            from tradingagents.database.db_service import log_event
+                            from tradingagents.database.config import get_supabase
+                            from datetime import datetime
+                            
+                            # Check database connection first
+                            supabase = get_supabase()
+                            if not supabase:
+                                st.error("❌ Database not configured! Please set SUPABASE_URL and SUPABASE_KEY in your .env file")
+                            else:
+                                # Prepare data and convert to JSON-serializable
+                                from tradingagents.database.db_service import _make_json_serializable
+                                
+                                screening_data = {
+                                    "total_screened": int(len(screening_df)),
+                                    "passed_count": int(len(passed_symbols)),
+                                    "failed_count": int(len(screening_df) - len(passed_symbols)),
+                                    "passed_symbols": list(passed_symbols),
+                                    "screening_results": screening_df.to_dict('records'),  # Full results
+                                    "timestamp": datetime.now().isoformat(),
+                                    "source": "phase3_tab1"
+                                }
+                                
+                                # Convert all numpy/pandas types
+                                screening_data = _make_json_serializable(screening_data)
+                                
+                                # Save to system_logs table with detailed results
+                                result = log_event("volume_screening_completed", screening_data)
+                                
+                                if result:
+                                    st.success("✅ Screening results saved to database! (Saved to system_logs table)")
+                                else:
+                                    st.error("❌ Failed to save - check console for details")
+                        except Exception as e:
+                            st.error(f"❌ Error saving: {str(e)}")
+                            import traceback
+                            st.code(traceback.format_exc())
+        
+        with col2:
+            if st.button("🔄 Clear Results", key="clear_phase1"):
+                if 'phase1_results' in st.session_state:
+                    del st.session_state.phase1_results
+                if 'phase1_passed' in st.session_state:
+                    del st.session_state.phase1_passed
+                st.rerun()
+        
+        # Show cached results if available
+        if 'phase1_results' in st.session_state:
+            st.markdown("#### 📋 Previous Screening Results")
+            st.dataframe(st.session_state.phase1_results, use_container_width=True)
+        
+        st.markdown('</div>', unsafe_allow_html=True)
+    
     with tab2:
-        st.subheader("7-Stage Fire Testing")
-        sel = st.selectbox("Select Symbol", symbols, key="fire_symbol")
-        if st.button("Run Fire Test", type="primary", key="run_fire"):
-            with st.spinner(f"Testing {sel}..."):
-                res = run_seven_stage_fire_test(sel)
-            if res.get("error"):
-                st.error(res["error"])
-            else:
-                st.metric("Score", f"{res['score']} / {res['max_score']}")
-                stages_df = pd.DataFrame([{
-                    "Stage": s["name"],
-                    "Pass": "✅" if s["pass"] else "❌",
-                    "Detail": s["detail"]
-                } for s in res["stages"]])
-                st.dataframe(stages_df, use_container_width=True)
-
+        st.markdown('<div class="feature-card">', unsafe_allow_html=True)
+        st.markdown("### Phase 2: 7-Stage Fire Testing & AI Analysis")
+        st.write("""
+        **Purpose**: Deep analysis combining technical indicators with AI insights from research documents.
+        
+        **7 Stages**:
+        1. **Liquidity**: Average volume >= 1M shares
+        2. **Volatility**: ATR between 1-8% of price
+        3. **Trend**: SMA50 > SMA200 (uptrend)
+        4. **Momentum**: RSI between 40-65
+        5. **Breakout**: Price near 20-day high
+        6. **Risk**: Support distance <= 5%
+        7. **AI Sentiment**: Research document analysis
+        """)
+        
+        # Symbol selection for Phase 2
+        phase2_symbols = st.session_state.get('phase1_passed', symbols)
+        
+        if not phase2_symbols:
+            st.warning("⚠️ No symbols passed Phase 1. Select any symbol for Phase 2 analysis.")
+            phase2_symbols = symbols
+        
+        selected_symbol = st.selectbox(
+            "Select Symbol for Phase 2 Analysis",
+            phase2_symbols,
+            key="phase2_symbol_selector",
+            help="Ideally choose from Phase 1 passed symbols"
+        )
+        
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            if st.button("🔥 Run 7-Stage Fire Test", type="primary", key="run_phase2_firetest", use_container_width=True):
+                with st.spinner(f"Running comprehensive analysis for {selected_symbol}..."):
+                    fire_result = st.session_state.fire_tester.run_fire_test(selected_symbol)
+                    
+                    # Store results
+                    st.session_state.phase2_results = fire_result
+                    
+                    if fire_result.get("error"):
+                        st.error(f"❌ Error: {fire_result['error']}")
+                    else:
+                        # Display results
+                        score_ratio = fire_result["score"] / fire_result["max_score"]
+                        score_color = "green" if score_ratio >= 0.7 else "orange" if score_ratio >= 0.5 else "red"
+                        
+                        col_score1, col_score2, col_score3 = st.columns(3)
+                        with col_score1:
+                            st.metric("Fire Test Score", f"{fire_result['score']} / {fire_result['max_score']}")
+                        with col_score2:
+                            st.metric("Score Percentage", f"{score_ratio*100:.1f}%")
+                        with col_score3:
+                            recommendation = "✅ PASS" if score_ratio >= 0.7 else "⚠️ REVIEW" if score_ratio >= 0.5 else "❌ FAIL"
+                            st.metric("Recommendation", recommendation)
+                        
+                        # Stage details
+                        st.markdown("#### 📊 Stage Breakdown")
+                        stages_data = []
+                        for stage in fire_result["stages"]:
+                            stages_data.append({
+                                "Stage": stage["name"],
+                                "Status": "✅ PASS" if stage["pass"] else "❌ FAIL",
+                                "Detail": stage["detail"],
+                                "Description": stage.get("description", "")
+                            })
+                        
+                        stages_df = pd.DataFrame(stages_data)
+                        st.dataframe(stages_df, use_container_width=True)
+                        
+                        # Visual stage status
+                        st.markdown("#### 📈 Stage Performance")
+                        for stage in fire_result["stages"]:
+                            status_icon = "✅" if stage["pass"] else "❌"
+                            status_color = "green" if stage["pass"] else "red"
+                            st.markdown(f"""
+                            <div style="padding: 10px; margin: 5px 0; border-left: 4px solid {status_color}; background: rgba(255,255,255,0.5); border-radius: 5px;">
+                                <strong>{status_icon} {stage['name']}</strong>: {stage['detail']}<br>
+                                <small style="color: #666;">{stage.get('description', '')}</small>
+                            </div>
+                            """, unsafe_allow_html=True)
+                        
+                        # Save button for Phase 2 Deep Analysis (Fire Test)
+                        st.markdown("---")
+                        if st.button("💾 Save Phase 2 Analysis to Database", key="save_phase2_analysis"):
+                            try:
+                                from tradingagents.database.db_service import log_event
+                                from tradingagents.database.config import get_supabase
+                                
+                                # Check database connection first
+                                supabase = get_supabase()
+                                if not supabase:
+                                    st.error("❌ Database not configured! Please set SUPABASE_URL and SUPABASE_KEY in your .env file")
+                                else:
+                                    # Prepare data and convert to JSON-serializable
+                                    from tradingagents.database.db_service import _make_json_serializable
+                                    
+                                    fire_test_data = {
+                                        "symbol": selected_symbol,
+                                        "score": int(fire_result["score"]),
+                                        "max_score": int(fire_result["max_score"]),
+                                        "score_percentage": float(round(score_ratio * 100, 2)),
+                                        "stages": fire_result["stages"],
+                                        "timestamp": fire_result.get("timestamp"),
+                                        "source": "phase3_tab2"
+                                    }
+                                    
+                                    # Convert all numpy/pandas types
+                                    fire_test_data = _make_json_serializable(fire_test_data)
+                                    
+                                    result = log_event("phase2_fire_test_completed", fire_test_data)
+                                    
+                                    if result:
+                                        st.success("✅ Phase 2 Deep Analysis saved to database!")
+                                    else:
+                                        st.error("❌ Failed to save - check console for details")
+                            except Exception as e:
+                                st.error(f"❌ Error saving: {str(e)}")
+                                import traceback
+                                st.code(traceback.format_exc())
+        
+        with col2:
+            if st.button("🔄 Clear Results", key="clear_phase2"):
+                if 'phase2_results' in st.session_state:
+                    del st.session_state.phase2_results
+                st.rerun()
+        
+        # Show cached results if available
+        if 'phase2_results' in st.session_state:
+            result = st.session_state.phase2_results
+            if not result.get("error"):
+                st.markdown("#### 📋 Previous Fire Test Results")
+                score_ratio = result["score"] / result["max_score"]
+                st.metric("Previous Score", f"{result['score']} / {result['max_score']} ({score_ratio*100:.1f}%)")
+        
+        st.markdown('</div>', unsafe_allow_html=True)
+    
     with tab3:
-        st.subheader("Step-by-Step Trading Interface")
-        sel2 = st.selectbox("Symbol", symbols, key="wiz_symbol")
-        step = st.radio("Step", ["1) Analyze", "2) Risk & Entry", "3) Recommendation"], horizontal=True)
+        st.markdown('<div class="feature-card">', unsafe_allow_html=True)
+        st.markdown("### ⚡ Complete Trading Workflow")
+        st.write("""
+        **Step-by-Step Trading Interface**: Complete workflow from analysis to execution recommendation.
+        
+        **Workflow**:
+        1. **Phase 1 Analysis**: Volume screening results
+        2. **Phase 2 Analysis**: 7-stage fire test + AI insights
+        3. **AI-Enhanced Recommendation**: Combined scoring
+        4. **Risk & Entry Planning**: Stop-loss and targets
+        5. **Final Decision**: Execute or pass
+        """)
+        
+        # Workflow state management
+        if 'trading_workflow_state' not in st.session_state:
+            st.session_state.trading_workflow_state = {
+                'current_step': 1,
+                'selected_symbol': None,
+                'phase1_complete': False,
+                'phase2_complete': False,
+                'recommendation': None
+            }
+        
+        workflow = st.session_state.trading_workflow_state
+        
+        # Step 1: Select Symbol
+        st.markdown("#### Step 1: Select Symbol")
+        workflow_symbols = workflow.get('phase1_passed_symbols', symbols)
+        workflow['selected_symbol'] = st.selectbox(
+            "Choose Symbol for Trading Analysis",
+            workflow_symbols,
+            key="workflow_symbol",
+            index=0 if workflow['selected_symbol'] not in workflow_symbols else workflow_symbols.index(workflow['selected_symbol']) if workflow['selected_symbol'] in workflow_symbols else 0
+        )
+        
+        if workflow['selected_symbol']:
+            selected_sym = workflow['selected_symbol']
+            
+            # Step 2: Phase 1 Results
+            st.markdown("---")
+            st.markdown("#### Step 2: Phase 1 Volume Screening")
+            
+            if st.button("🔍 Check Phase 1 Status", key="check_phase1_workflow"):
+                with st.spinner("Checking Phase 1 screening..."):
+                    phase1_result = st.session_state.volume_screener.screen_symbol(selected_sym)
+                    
+                    if phase1_result['pass']:
+                        st.success(f"✅ {selected_sym} PASSED Phase 1 screening!")
+                        workflow['phase1_complete'] = True
+                        st.json(phase1_result['metrics'])
+                    else:
+                        st.warning(f"⚠️ {selected_sym} did NOT pass Phase 1: {phase1_result['reason']}")
+                        workflow['phase1_complete'] = False
+                        st.info(f"**Metrics**: {phase1_result['metrics']}")
+            elif workflow.get('phase1_complete'):
+                st.success("✅ Phase 1 screening completed")
+            
+            # Step 3: Phase 2 Analysis
+            st.markdown("---")
+            st.markdown("#### Step 3: Phase 2 Deep Analysis")
+            
+            if st.button("🔥 Run Phase 2 Analysis", type="primary", key="run_phase2_workflow"):
+                with st.spinner(f"Running Phase 2 analysis for {selected_sym}..."):
+                    phase2_result = st.session_state.fire_tester.run_fire_test(selected_sym)
+                    
+                    if phase2_result.get("error"):
+                        st.error(f"❌ Phase 2 Error: {phase2_result['error']}")
+                        workflow['phase2_complete'] = False
+                    else:
+                        workflow['phase2_complete'] = True
+                        workflow['phase2_result'] = phase2_result
+                        
+                        # Display Phase 2 results
+                        score_ratio = phase2_result["score"] / phase2_result["max_score"]
+                        st.success(f"✅ Phase 2 Complete! Score: {phase2_result['score']}/{phase2_result['max_score']} ({score_ratio*100:.1f}%)")
+                        
+                        # Show stages
+                        with st.expander("View Stage Details"):
+                            for stage in phase2_result["stages"]:
+                                status = "✅" if stage["pass"] else "❌"
+                                st.write(f"{status} **{stage['name']}**: {stage['detail']}")
+            
+            # Step 4: AI-Enhanced Recommendation
+            st.markdown("---")
+            st.markdown("#### Step 4: AI-Enhanced Recommendation")
+            
+            if st.button("🧠 Generate AI-Enhanced Recommendation", type="primary", key="generate_recommendation"):
+                with st.spinner(f"Generating AI-enhanced analysis for {selected_sym}..."):
+                    recommendation_result = st.session_state.ai_scorer.calculate_enhanced_score(selected_sym)
+                    
+                    workflow['recommendation'] = recommendation_result
+                    
+                    # Display recommendation
+                    enhanced_score = recommendation_result.get('enhanced_score', 5.0)
+                    rec = recommendation_result.get('recommendation', 'Hold')
+                    
+                    # Color coding
+                    if enhanced_score >= 7.0:
+                        color = "green"
+                        emoji = "🟢"
+                    elif enhanced_score >= 5.0:
+                        color = "orange"
+                        emoji = "🟡"
+                    else:
+                        color = "red"
+                        emoji = "🔴"
+                    
+                    st.markdown(f"""
+                    <div style="padding: 20px; background: linear-gradient(135deg, #{color}40 0%, #{color}20 100%); 
+                                border-radius: 15px; border: 2px solid #{color}; margin: 10px 0;">
+                        <h2 style="margin: 0; color: #{color};">
+                            {emoji} {rec} - Confidence: {enhanced_score}/10
+                        </h2>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    # Score breakdown
+                    col_tech, col_ai = st.columns(2)
+                    with col_tech:
+                        st.metric("Technical Score", f"{recommendation_result.get('technical_score', 0):.2f}/10")
+                        st.write("**Breakdown**: 70% weight")
+                    with col_ai:
+                        st.metric("AI Score", f"{recommendation_result.get('ai_score', 0):.2f}/10")
+                        st.write(f"**Sentiment**: {recommendation_result.get('ai_sentiment', 'Neutral')}")
+                        st.write(f"**Confidence**: {recommendation_result.get('ai_confidence', 5)}/10")
+                        st.write("**Breakdown**: 30% weight")
+                    
+                    # Show AI analysis if available
+                    ai_analysis = recommendation_result.get('ai_analysis', {})
+                    if ai_analysis and not ai_analysis.get('error'):
+                        with st.expander("View AI Analysis"):
+                            st.write(ai_analysis.get('analysis_text', 'No analysis available'))
+                    
+                    # Show fire test summary
+                    fire_test = recommendation_result.get('fire_test', {})
+                    if fire_test and not fire_test.get('error'):
+                        with st.expander("View Fire Test Summary"):
+                            st.metric("Fire Test Score", f"{fire_test.get('score', 0)}/{fire_test.get('max_score', 7)}")
+                            for stage in fire_test.get('stages', []):
+                                status = "✅" if stage['pass'] else "❌"
+                                st.write(f"{status} {stage['name']}: {stage['detail']}")
+                    
+                    # Save button for trade signal
+                    st.markdown("---")
+                    if st.button("💾 Save Trade Signal to Database", key="save_trade_signal"):
+                        try:
+                            from tradingagents.database.db_service import create_trade_signal, log_event
+                            from tradingagents.database.config import get_supabase
+                            
+                            # Check database connection first
+                            supabase = get_supabase()
+                            if not supabase:
+                                st.error("❌ Database not configured! Please set SUPABASE_URL and SUPABASE_KEY in your .env file")
+                            else:
+                                rec = recommendation_result.get('recommendation', 'Hold')
+                                confidence = recommendation_result.get('enhanced_score', 5.0)
+                                
+                                # Convert recommendation to signal type
+                                signal_type_map = {
+                                    'Strong Buy': 'buy',
+                                    'Buy': 'buy',
+                                    'Hold': 'hold',
+                                    'Sell': 'sell',
+                                    'Strong Sell': 'sell'
+                                }
+                                signal_type = signal_type_map.get(rec, 'hold')
+                                
+                                # Save signal
+                                signal_details = {
+                                    'technical_score': recommendation_result.get('technical_score', 0),
+                                    'ai_score': recommendation_result.get('ai_score', 0),
+                                    'ai_sentiment': recommendation_result.get('ai_sentiment', 'Neutral'),
+                                    'fire_test_score': fire_test.get('score', 0) if fire_test else 0
+                                }
+                                
+                                signal_result = create_trade_signal(
+                                    symbol=selected_sym,
+                                    signal_type=signal_type,
+                                    confidence=confidence / 10.0,  # Normalize to 0-1
+                                    details=signal_details
+                                )
+                                
+                                if signal_result:
+                                    log_event(
+                                        "trade_recommendation_generated",
+                                        {
+                                            "symbol": selected_sym,
+                                            "recommendation": rec,
+                                            "confidence": confidence,
+                                            "signal_type": signal_type
+                                        }
+                                    )
+                                    st.success("✅ Trade signal saved to database! (Saved to trade_signals and system_logs tables)")
+                                else:
+                                    st.error("❌ Failed to save trade signal - check console for details")
+                        except Exception as e:
+                            st.error(f"❌ Error saving: {str(e)}")
+                            import traceback
+                            st.code(traceback.format_exc())
+            
+            # Step 5: Risk & Entry Planning
+            st.markdown("---")
+            st.markdown("#### Step 5: Risk & Entry Planning")
+            
+            if workflow.get('recommendation'):
+                if st.button("📊 Calculate Entry & Risk", key="calculate_entry_risk"):
+                    with st.spinner("Calculating optimal entry and risk parameters..."):
+                        hist = _fetch_history(selected_sym, period="3mo")
+                        
+                        if hist is None or hist.empty:
+                            st.error("No price data available")
+                        else:
+                            # Calculate ATR-based stop loss and targets
+                            atr = float(_calc_atr(hist).iloc[-1])
+                            current_price = float(hist['Close'].iloc[-1])
+                            
+                            # Stop loss: 1.5x ATR below entry
+                            stop_loss = current_price - (1.5 * atr)
+                            stop_loss_pct = ((current_price - stop_loss) / current_price) * 100
+                            
+                            # Target 1: 2x risk (1:2 risk/reward)
+                            target1 = current_price + (2 * (current_price - stop_loss))
+                            target1_pct = ((target1 - current_price) / current_price) * 100
+                            
+                            # Target 2: 2.5x risk (1:2.5 risk/reward)
+                            target2 = current_price + (2.5 * (current_price - stop_loss))
+                            target2_pct = ((target2 - current_price) / current_price) * 100
+                            
+                            # Display risk/reward metrics
+                            col_price, col_stop, col_t1, col_t2 = st.columns(4)
+                            with col_price:
+                                st.metric("Entry Price", f"${current_price:.2f}")
+                            with col_stop:
+                                st.metric("Stop Loss", f"${stop_loss:.2f}", f"-{stop_loss_pct:.2f}%")
+                            with col_t1:
+                                st.metric("Target 1", f"${target1:.2f}", f"+{target1_pct:.2f}%")
+                                st.caption("1:2 R/R")
+                            with col_t2:
+                                st.metric("Target 2", f"${target2:.2f}", f"+{target2_pct:.2f}%")
+                                st.caption("1:2.5 R/R")
+                            
+                            # Risk summary
+                            st.markdown("#### 💼 Risk Summary")
+                            risk_amount = current_price - stop_loss
+                            reward1 = target1 - current_price
+                            reward2 = target2 - current_price
+                            
+                            st.info(f"""
+                            **Risk per Share**: ${risk_amount:.2f} ({stop_loss_pct:.2f}%)
+                            
+                            **Potential Rewards**:
+                            - Target 1: ${reward1:.2f} per share ({target1_pct:.2f}%) - **Risk/Reward: 1:2**
+                            - Target 2: ${reward2:.2f} per share ({target2_pct:.2f}%) - **Risk/Reward: 1:2.5**
+                            
+                            **ATR**: ${atr:.2f} (used for stop-loss calculation)
+                            """)
+                            
+                            # Store risk parameters
+                            workflow['risk_params'] = {
+                                'entry': current_price,
+                                'stop_loss': stop_loss,
+                                'target1': target1,
+                                'target2': target2,
+                                'atr': float(atr)
+                            }
+            
+            # Final step: Decision
+            st.markdown("---")
+            st.markdown("#### Step 6: Final Decision")
+            
+            if workflow.get('recommendation') and workflow.get('risk_params'):
+                rec = workflow['recommendation'].get('recommendation', 'Hold')
+                enhanced_score = workflow['recommendation'].get('enhanced_score', 5.0)
+                
+                if rec in ['Strong Buy', 'Buy'] and enhanced_score >= 7.0:
+                    st.success(f"""
+                    ## ✅ READY TO EXECUTE
+                    
+                    **Symbol**: {selected_sym}
+                    **Recommendation**: {rec}
+                    **Confidence**: {enhanced_score}/10
+                    
+                    **Next Steps**:
+                    1. Review entry, stop-loss, and targets above
+                    2. Execute trade with proper position sizing
+                    3. Monitor trade and adjust if needed
+                    """)
+                    
+                    if st.button("✅ Mark as Ready to Trade", type="primary", key="mark_ready"):
+                        st.balloons()
+                        st.success(f"✅ {selected_sym} marked as ready to trade!")
+                
+                # Save complete trading workflow/session
+                st.markdown("---")
+                st.markdown("#### 💾 Save Trading Session")
+                if st.button("💾 Save Complete Trading Flow to Database", key="save_trading_flow"):
+                    try:
+                        from tradingagents.database.db_service import log_event
+                        from tradingagents.database.config import get_supabase
+                        from datetime import datetime
+                        
+                        # Check database connection first
+                        supabase = get_supabase()
+                        if not supabase:
+                            st.error("❌ Database not configured! Please set SUPABASE_URL and SUPABASE_KEY in your .env file")
+                        else:
+                            # Compile complete workflow data
+                            workflow_data = {
+                                "symbol": selected_sym,
+                                "session_date": datetime.now().isoformat(),
+                                "phase1_complete": bool(workflow.get('phase1_complete', False)),  # Ensure Python bool
+                                "phase1_result": workflow.get('phase1_result'),
+                                "phase2_complete": bool(workflow.get('phase2_complete', False)),  # Ensure Python bool
+                                "phase2_result": workflow.get('phase2_result'),
+                                "recommendation": workflow.get('recommendation'),
+                                "risk_params": workflow.get('risk_params'),
+                                "final_decision": rec,
+                                "final_score": float(enhanced_score),  # Ensure Python float
+                                "workflow_status": "ready_to_trade" if (rec in ['Strong Buy', 'Buy'] and enhanced_score >= 7.0) else "review_required" if enhanced_score >= 5.0 else "not_recommended"
+                            }
+                            
+                            # Convert workflow_data to ensure all nested numpy/pandas types are converted
+                            from tradingagents.database.db_service import _make_json_serializable
+                            workflow_data = _make_json_serializable(workflow_data)
+                            
+                            result = log_event("trading_workflow_completed", workflow_data)
+                            if result:
+                                st.success("✅ Complete trading flow saved to database! (Saved to system_logs table)")
+                            else:
+                                st.error("❌ Failed to save - check console for details")
+                    except Exception as e:
+                        st.error(f"❌ Error saving: {str(e)}")
+                        import traceback
+                        st.code(traceback.format_exc())
+                elif enhanced_score >= 5.0:
+                    st.warning(f"""
+                    ## ⚠️ REVIEW REQUIRED
+                    
+                    **Symbol**: {selected_sym}
+                    **Recommendation**: {rec}
+                    **Confidence**: {enhanced_score}/10
+                    
+                    **Consideration**: Review analysis before executing
+                    """)
+                    
+                    # Save complete trading workflow/session (for review required)
+                    st.markdown("---")
+                    st.markdown("#### 💾 Save Trading Session")
+                    if st.button("💾 Save Complete Trading Flow to Database", key="save_trading_flow_review"):
+                        try:
+                            from tradingagents.database.db_service import log_event
+                            from tradingagents.database.config import get_supabase
+                            from datetime import datetime
+                            
+                            # Check database connection first
+                            supabase = get_supabase()
+                            if not supabase:
+                                st.error("❌ Database not configured! Please set SUPABASE_URL and SUPABASE_KEY in your .env file")
+                            else:
+                                # Compile complete workflow data
+                                workflow_data = {
+                                    "symbol": selected_sym,
+                                    "session_date": datetime.now().isoformat(),
+                                    "phase1_complete": bool(workflow.get('phase1_complete', False)),
+                                    "phase1_result": workflow.get('phase1_result'),
+                                    "phase2_complete": bool(workflow.get('phase2_complete', False)),
+                                    "phase2_result": workflow.get('phase2_result'),
+                                    "recommendation": workflow.get('recommendation'),
+                                    "risk_params": workflow.get('risk_params'),
+                                    "final_decision": rec,
+                                    "final_score": float(enhanced_score),
+                                    "workflow_status": "review_required"
+                                }
+                                
+                                # Convert workflow_data to ensure all nested numpy/pandas types are converted
+                                from tradingagents.database.db_service import _make_json_serializable
+                                workflow_data = _make_json_serializable(workflow_data)
+                                
+                                result = log_event("trading_workflow_completed", workflow_data)
+                                if result:
+                                    st.success("✅ Complete trading flow saved to database! (Saved to system_logs table)")
+                                else:
+                                    st.error("❌ Failed to save - check console for details")
+                        except Exception as e:
+                            st.error(f"❌ Error saving: {str(e)}")
+                            import traceback
+                            st.code(traceback.format_exc())
+                else:
+                    st.error(f"""
+                    ## ❌ NOT RECOMMENDED
+                    
+                    **Symbol**: {selected_sym}
+                    **Recommendation**: {rec}
+                    **Confidence**: {enhanced_score}/10
+                    
+                    **Recommendation**: Pass on this trade
+                    """)
+                    
+                    # Save complete trading workflow/session (for not recommended)
+                    st.markdown("---")
+                    st.markdown("#### 💾 Save Trading Session")
+                    if st.button("💾 Save Complete Trading Flow to Database", key="save_trading_flow_not_rec"):
+                        try:
+                            from tradingagents.database.db_service import log_event
+                            from tradingagents.database.config import get_supabase
+                            from datetime import datetime
+                            
+                            # Check database connection first
+                            supabase = get_supabase()
+                            if not supabase:
+                                st.error("❌ Database not configured! Please set SUPABASE_URL and SUPABASE_KEY in your .env file")
+                            else:
+                                # Compile complete workflow data
+                                workflow_data = {
+                                    "symbol": selected_sym,
+                                    "session_date": datetime.now().isoformat(),
+                                    "phase1_complete": bool(workflow.get('phase1_complete', False)),
+                                    "phase1_result": workflow.get('phase1_result'),
+                                    "phase2_complete": bool(workflow.get('phase2_complete', False)),
+                                    "phase2_result": workflow.get('phase2_result'),
+                                    "recommendation": workflow.get('recommendation'),
+                                    "risk_params": workflow.get('risk_params'),
+                                    "final_decision": rec,
+                                    "final_score": float(enhanced_score),
+                                    "workflow_status": "not_recommended"
+                                }
+                                
+                                # Convert workflow_data to ensure all nested numpy/pandas types are converted
+                                from tradingagents.database.db_service import _make_json_serializable
+                                workflow_data = _make_json_serializable(workflow_data)
+                                
+                                result = log_event("trading_workflow_completed", workflow_data)
+                                if result:
+                                    st.success("✅ Complete trading flow saved to database! (Saved to system_logs table)")
+                                else:
+                                    st.error("❌ Failed to save - check console for details")
+                        except Exception as e:
+                            st.error(f"❌ Error saving: {str(e)}")
+                            import traceback
+                            st.code(traceback.format_exc())
+        
+        st.markdown('</div>', unsafe_allow_html=True)
 
-        if step.startswith("1"):
-            with st.spinner("Computing AI-enhanced analysis..."):
-                rec = ai_enhanced_recommendation(sel2)
-            st.write(f"Recommendation: {rec['recommendation']}")
-            st.write(f"Confidence: {rec['confidence']}/10")
-            st.metric("Fire Test", f"{rec['fire_test']['score']} / {rec['fire_test']['max_score']}")
 
-        elif step.startswith("2"):
-            hist = _fetch_history(sel2, period="3mo")
-            if hist is None or hist.empty:
-                st.error("No data")
+def phase4_session_management_execution():
+    """Phase 4: Session Management & Execution - Trade tracking and execution"""
+    
+    # Initialize services
+    user_id = st.session_state.get("user_id", "default_user")
+    
+    if 'session_manager' not in st.session_state:
+        st.session_state.session_manager = TradingSessionManager(user_id)
+    
+    if 'trade_service' not in st.session_state:
+        st.session_state.trade_service = TradeExecutionService(user_id)
+    
+    session_manager = st.session_state.session_manager
+    trade_service = st.session_state.trade_service
+    
+    # Main tabs
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "📋 Session Management",
+        "📈 Active Trades",
+        "⚡ Execute Trade",
+        "📊 Trade History"
+    ])
+    
+    with tab1:
+        st.markdown('<div class="feature-card">', unsafe_allow_html=True)
+        st.markdown("### 📋 Trading Session Management")
+        
+        # Get or create active session
+        active_session = session_manager.get_active_session()
+        
+        col1, col2 = st.columns([2, 1])
+        with col1:
+            if active_session:
+                st.success(f"✅ **Active Session**: {active_session.get('session_name', 'Current Session')}")
+                st.info(f"**Started**: {active_session.get('start_date', 'Unknown')}")
+                
+                if active_session.get('notes'):
+                    st.write(f"**Notes**: {active_session.get('notes')}")
             else:
-                atr = _calc_atr(hist).iloc[-1]
-                px = hist['Close'].iloc[-1]
-                stop = px - 1.5 * atr if atr == atr else px * 0.97
-                target = px + 2 * (px - stop)
-                st.write(f"Price: {px:.2f}")
-                st.write(f"Suggested Stop: {stop:.2f}")
-                st.write(f"Suggested Target: {target:.2f}")
-
+                st.warning("⚠️ No active session. Create a new session to start trading.")
+        
+        with col2:
+            if st.button("🆕 New Session", key="new_session", use_container_width=True):
+                session_name = st.text_input("Session Name", value=f"Session {datetime.now().strftime('%Y-%m-%d %H:%M')}", key="session_name_input")
+                notes = st.text_area("Notes (optional)", key="session_notes_input")
+                if st.button("✅ Create", key="create_session_confirm"):
+                    try:
+                        session = session_manager.create_session(session_name, notes)
+                        if session:
+                            st.success("✅ New session created!")
+                            st.rerun()
+                    except Exception as e:
+                        st.error(f"❌ Error creating session: {str(e)}")
+            
+            if active_session and active_session.get('id') != "default_session":
+                if st.button("🔒 Close Session", key="close_session", use_container_width=True):
+                    st.session_state.show_close_session_form = True
+                
+                if st.session_state.get('show_close_session_form', False):
+                    close_notes = st.text_area("Close Notes (optional)", key="close_notes")
+                    col_close, col_cancel_close = st.columns(2)
+                    with col_close:
+                        if st.button("✅ Confirm Close", key="confirm_close"):
+                            try:
+                                session_manager.close_session(active_session['id'], close_notes)
+                                st.session_state.show_close_session_form = False
+                                st.success("✅ Session closed!")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"❌ Error closing session: {str(e)}")
+                    with col_cancel_close:
+                        if st.button("❌ Cancel", key="cancel_close"):
+                            st.session_state.show_close_session_form = False
+                            st.rerun()
+        
+        # Session history
+        st.markdown("---")
+        st.markdown("#### 📜 Session History")
+        sessions = session_manager.get_all_sessions(limit=10)
+        if sessions:
+            sessions_df = pd.DataFrame([
+                {
+                    "Name": s.get('session_name', 'N/A'),
+                    "Status": s.get('status', 'N/A'),
+                    "Start Date": s.get('start_date', 'N/A'),
+                    "End Date": s.get('end_date', 'N/A') or 'Active'
+                }
+                for s in sessions
+            ])
+            st.dataframe(sessions_df, use_container_width=True)
         else:
-            with st.spinner("Finalizing recommendation..."):
-                rec = ai_enhanced_recommendation(sel2)
-            st.success(f"{sel2}: {rec['recommendation']} (Confidence {rec['confidence']}/10)")
-            st.write("Use Step 2 to refine entries and risk.")
+            st.info("No previous sessions found.")
+        
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    with tab2:
+        st.markdown('<div class="feature-card">', unsafe_allow_html=True)
+        st.markdown("### 📈 Active Trades Dashboard")
+        
+        # Refresh button
+        col_refresh, col_info = st.columns([1, 3])
+        with col_refresh:
+            if st.button("🔄 Refresh", key="refresh_trades", use_container_width=True):
+                st.rerun()
+        
+        with col_info:
+            can_open, message = trade_service.can_open_trade()
+            if can_open:
+                st.info(f"✅ {message}")
+            else:
+                st.warning(f"⚠️ {message}")
+        
+        # Get active trades
+        active_trades = trade_service.get_active_trades()
+        
+        if active_trades:
+            st.markdown(f"#### 🎯 Active Trades: {len(active_trades)}")
+            
+            # Summary metrics
+            total_unrealized_pnl = sum(t.get('unrealized_pnl', 0) for t in active_trades)
+            total_unrealized_pnl_pct = sum(t.get('unrealized_pnl_pct', 0) for t in active_trades) / len(active_trades) if active_trades else 0
+            
+            col_pnl1, col_pnl2, col_pnl3 = st.columns(3)
+            with col_pnl1:
+                pnl_color = "green" if total_unrealized_pnl >= 0 else "red"
+                st.metric("Total Unrealized P&L", f"${total_unrealized_pnl:,.2f}", 
+                         delta=f"{total_unrealized_pnl_pct:.2f}%")
+            with col_pnl2:
+                st.metric("Active Positions", len(active_trades))
+            with col_pnl3:
+                st.metric("Remaining Slots", f"{TradingSessionManager.MAX_CONCURRENT_TRADES - len(active_trades)}")
+            
+            # Trade cards
+            for trade in active_trades:
+                symbol = trade['symbol']
+                pnl = trade.get('unrealized_pnl', 0)
+                pnl_pct = trade.get('unrealized_pnl_pct', 0)
+                current_price = trade.get('current_price', 0)
+                entry_price = trade.get('entry_price', 0)
+                
+                pnl_color = "🟢" if pnl >= 0 else "🔴"
+                
+                with st.expander(f"{pnl_color} {symbol} | Entry: ${entry_price:.2f} | Current: ${current_price:.2f} | P&L: ${pnl:.2f} ({pnl_pct:+.2f}%)"):
+                    col_trade1, col_trade2 = st.columns(2)
+                    
+                    with col_trade1:
+                        st.write(f"**Quantity**: {trade.get('quantity', 0)}")
+                        st.write(f"**Entry Price**: ${entry_price:.2f}")
+                        st.write(f"**Current Price**: ${current_price:.2f}")
+                        st.write(f"**Entry Date**: {trade.get('entry_date', 'N/A')}")
+                    
+                    with col_trade2:
+                        stop_loss = trade.get('stop_loss')
+                        target1 = trade.get('target1')
+                        target2 = trade.get('target2')
+                        
+                        if stop_loss:
+                            st.write(f"**Stop Loss**: ${stop_loss:.2f}")
+                        if target1:
+                            st.write(f"**Target 1**: ${target1:.2f}")
+                        if target2:
+                            st.write(f"**Target 2**: ${target2:.2f}")
+                    
+                    # Close trade section
+                    st.markdown("---")
+                    st.markdown("#### 🚪 Close Trade")
+                    
+                    col_close1, col_close2 = st.columns([2, 1])
+                    with col_close1:
+                        exit_price = st.number_input(f"Exit Price for {symbol}", value=float(current_price), 
+                                                     min_value=0.0, step=0.01, key=f"exit_price_{symbol}")
+                        close_quantity = st.number_input(f"Quantity to Close", value=float(trade.get('quantity', 0)),
+                                                         min_value=0.0, max_value=float(trade.get('quantity', 0)),
+                                                         step=1.0, key=f"close_qty_{symbol}")
+                        close_notes = st.text_input("Close Notes (optional)", key=f"close_notes_{symbol}")
+                    
+                    with col_close2:
+                        if st.button(f"✅ Close {symbol}", key=f"close_{symbol}", type="primary", use_container_width=True):
+                            try:
+                                result = trade_service.close_trade(symbol, exit_price, close_quantity, close_notes)
+                                if result:
+                                    realized_pnl = result.get('realized_pnl', 0)
+                                    st.success(f"✅ Trade closed! Realized P&L: ${realized_pnl:.2f}")
+                                    st.balloons()
+                                    st.rerun()
+                            except Exception as e:
+                                st.error(f"❌ Error closing trade: {str(e)}")
+                    
+                    # Update P&L button
+                    if st.button(f"🔄 Update P&L for {symbol}", key=f"update_pnl_{symbol}"):
+                        with st.spinner("Updating P&L..."):
+                            updated = trade_service.update_trade_pnl(symbol)
+                            if updated:
+                                st.success(f"✅ Updated! Current P&L: ${updated['unrealized_pnl']:.2f} ({updated['unrealized_pnl_pct']:+.2f}%)")
+                                st.rerun()
+            
+            # Bulk refresh all P&L
+            if st.button("🔄 Refresh All P&L", key="refresh_all_pnl"):
+                with st.spinner("Updating all trade P&L..."):
+                    for trade in active_trades:
+                        trade_service.update_trade_pnl(trade['symbol'])
+                    st.success("✅ All P&L updated!")
+                    st.rerun()
+        else:
+            st.info("📭 No active trades. Use the 'Execute Trade' tab to open a new position.")
+        
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    with tab3:
+        st.markdown('<div class="feature-card">', unsafe_allow_html=True)
+        st.markdown("### ⚡ Execute Trade")
+        
+        # Check if we can open a trade
+        can_open, message = trade_service.can_open_trade()
+        if not can_open:
+            st.error(f"❌ {message}")
+            st.stop()
+        
+        st.success(f"✅ {message}")
+        
+        # Trade execution form
+        st.markdown("#### 📝 Trade Details")
+        
+        col_exec1, col_exec2 = st.columns(2)
+        
+        with col_exec1:
+            symbols = get_watchlist_symbols()
+            symbol = st.selectbox("Symbol", symbols, key="execute_symbol")
+            quantity = st.number_input("Quantity", min_value=0.0, step=1.0, value=1.0, key="execute_quantity")
+            trade_type = st.selectbox("Trade Type", ["LONG", "SHORT"], key="execute_type")
+        
+        with col_exec2:
+            # Get current price
+            try:
+                ticker = yf.Ticker(symbol)
+                info = ticker.info
+                current_price = info.get("regularMarketPrice") or info.get("currentPrice") or info.get("previousClose", 0)
+                st.info(f"💵 **Current Price**: ${current_price:.2f}")
+            except Exception:
+                current_price = 0
+                st.warning("⚠️ Could not fetch current price")
+            
+            entry_price = st.number_input("Entry Price", min_value=0.0, step=0.01, 
+                                          value=float(current_price) if current_price else 0.0, 
+                                          key="execute_entry_price")
+            
+            # Risk parameters
+            st.markdown("#### 🛡️ Risk Management (Optional)")
+            stop_loss = st.number_input("Stop Loss", min_value=0.0, step=0.01, value=0.0, key="execute_stop_loss")
+            target1 = st.number_input("Target 1", min_value=0.0, step=0.01, value=0.0, key="execute_target1")
+            target2 = st.number_input("Target 2", min_value=0.0, step=0.01, value=0.0, key="execute_target2")
+        
+        notes = st.text_area("Trade Notes (optional)", key="execute_notes")
+        
+        # Calculate estimated P&L at targets
+        if entry_price > 0 and quantity > 0:
+            st.markdown("#### 💰 Risk/Reward Preview")
+            col_rr1, col_rr2, col_rr3 = st.columns(3)
+            
+            if stop_loss > 0:
+                risk_per_share = abs(entry_price - stop_loss)
+                with col_rr1:
+                    st.metric("Risk/Share", f"${risk_per_share:.2f}")
+                
+                if target1 > 0:
+                    reward1 = abs(target1 - entry_price)
+                    rr1 = reward1 / risk_per_share if risk_per_share > 0 else 0
+                    with col_rr2:
+                        st.metric("Target 1 R/R", f"1:{rr1:.2f}", f"${reward1 * quantity:.2f}")
+                
+                if target2 > 0:
+                    reward2 = abs(target2 - entry_price)
+                    rr2 = reward2 / risk_per_share if risk_per_share > 0 else 0
+                    with col_rr3:
+                        st.metric("Target 2 R/R", f"1:{rr2:.2f}", f"${reward2 * quantity:.2f}")
+        
+        # Execute button
+        st.markdown("---")
+        if st.button("⚡ Execute Trade", type="primary", key="execute_trade_button", use_container_width=True):
+            try:
+                # Validate inputs
+                if not symbol:
+                    st.error("❌ Please select a symbol")
+                elif quantity <= 0:
+                    st.error("❌ Quantity must be greater than 0")
+                elif entry_price <= 0:
+                    st.error("❌ Entry price must be greater than 0")
+                else:
+                    with st.spinner(f"Executing trade for {symbol}..."):
+                        # Get active session
+                        session = session_manager.get_active_session()
+                        session_id = session.get('id') if session else None
+                        
+                        trade = trade_service.open_trade(
+                            symbol=symbol,
+                            quantity=quantity,
+                            entry_price=entry_price if entry_price > 0 else None,
+                            trade_type=trade_type,
+                            stop_loss=stop_loss if stop_loss > 0 else None,
+                            target1=target1 if target1 > 0 else None,
+                            target2=target2 if target2 > 0 else None,
+                            notes=notes,
+                            session_id=session_id
+                        )
+                        
+                        if trade:
+                            st.success(f"✅ Trade executed successfully for {symbol}!")
+                            st.balloons()
+                            st.info(f"**Entry Price**: ${entry_price:.2f} | **Quantity**: {quantity} | **Total Value**: ${entry_price * quantity:.2f}")
+                            st.rerun()
+            except Exception as e:
+                st.error(f"❌ Error executing trade: {str(e)}")
+        
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    with tab4:
+        st.markdown('<div class="feature-card">', unsafe_allow_html=True)
+        st.markdown("### 📊 Trade History")
+        
+        # Get trade history
+        history = trade_service.get_trade_history(limit=50)
+        
+        if history:
+            st.markdown(f"#### 📜 Recent Trades ({len(history)})")
+            
+            # Summary statistics
+            closed_trades = [t for t in history if t.get('status') == 'closed']
+            if closed_trades:
+                total_realized_pnl = sum(t.get('realized_pnl', 0) for t in closed_trades)
+                winning_trades = [t for t in closed_trades if t.get('realized_pnl', 0) > 0]
+                losing_trades = [t for t in closed_trades if t.get('realized_pnl', 0) < 0]
+                
+                col_hist1, col_hist2, col_hist3, col_hist4 = st.columns(4)
+                with col_hist1:
+                    st.metric("Total Realized P&L", f"${total_realized_pnl:,.2f}")
+                with col_hist2:
+                    st.metric("Winning Trades", len(winning_trades))
+                with col_hist3:
+                    st.metric("Losing Trades", len(losing_trades))
+                with col_hist4:
+                    win_rate = (len(winning_trades) / len(closed_trades) * 100) if closed_trades else 0
+                    st.metric("Win Rate", f"{win_rate:.1f}%")
+            
+            # History table
+            history_data = []
+            for trade in history[:20]:  # Show last 20
+                history_data.append({
+                    "Symbol": trade.get('symbol', 'N/A'),
+                    "Type": trade.get('trade_type', 'N/A'),
+                    "Quantity": trade.get('quantity', 0),
+                    "Entry Price": f"${trade.get('entry_price', 0):.2f}",
+                    "Exit Price": f"${trade.get('exit_price', 0):.2f}" if trade.get('exit_price') else "N/A",
+                    "Status": trade.get('status', 'N/A'),
+                    "P&L": f"${trade.get('realized_pnl', trade.get('unrealized_pnl', 0)):.2f}",
+                    "Entry Date": trade.get('entry_date', 'N/A')[:10] if trade.get('entry_date') else 'N/A',
+                    "Exit Date": trade.get('exit_date', 'N/A')[:10] if trade.get('exit_date') else 'N/A'
+                })
+            
+            if history_data:
+                history_df = pd.DataFrame(history_data)
+                st.dataframe(history_df, use_container_width=True, height=400)
+        else:
+            st.info("📭 No trade history found.")
+        
+        st.markdown('</div>', unsafe_allow_html=True)
+
 
 def main():
     st.markdown('<div class="section-header">AlphaAnalyst Trading AI Agent - Phase 1</div>', unsafe_allow_html=True)
@@ -1549,47 +2599,49 @@ def main():
     elif st.session_state.active_phase == phases[2]:
         phase3_trading_engine_core()
     elif st.session_state.active_phase == phases[3]:
-        st.info("Phase 4: Session Management & Execution - Coming Soon!")
+        phase4_session_management_execution()
     elif st.session_state.active_phase == phases[4]:
         st.info("Phase 5: Results & Analysis Modules - Coming Soon!")
     elif st.session_state.active_phase == phases[5]:
         st.info("Phase 6: Advanced Features & Polish - Coming Soon!")
     
-    # Original functionality (keep for backward compatibility)
-    st.markdown('<div class="feature-card">', unsafe_allow_html=True)
-    st.markdown("### Quick Stock Analysis")
-    stock_input = st.text_input("Enter Company Name", help="e.g., APPLE, TCS")
-    
-    if st.button("Analyze", use_container_width=True, key="legacy_analyze"):
-        if not stock_input:
-            st.error("Please enter a stock name")
-            return
+    # Quick Stock Analysis (only for Phase 1)
+    if st.session_state.active_phase == phases[0]:
+        st.markdown('<div class="feature-card">', unsafe_allow_html=True)
+        st.markdown("### Quick Stock Analysis")
+        stock_input = st.text_input("Enter Company Name", help="e.g., APPLE, TCS")
         
-        symbol = COMMON_STOCKS.get(stock_input.upper()) or stock_input
-        
-        if initialize_agents():
-            with st.spinner("Analyzing..."):
-                info, hist = get_stock_data(symbol)
-                
-                if info and hist is not None:
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        st.markdown(f'<div class="metric-card"><div class="metric-value">${info.get("currentPrice", "N/A")}</div><div class="metric-label">Current Price</div></div>', unsafe_allow_html=True)
-                    with col2:
-                        st.markdown(f'<div class="metric-card"><div class="metric-value">{info.get("forwardPE", "N/A")}</div><div class="metric-label">Forward P/E</div></div>', unsafe_allow_html=True)
-                    with col3:
-                        st.markdown(f'<div class="metric-card"><div class="metric-value">{info.get("recommendationKey", "N/A").title()}</div><div class="metric-label">Recommendation</div></div>', unsafe_allow_html=True)
+        if st.button("Analyze", use_container_width=True, key="legacy_analyze"):
+            if not stock_input:
+                st.error("Please enter a stock name")
+                return
+            
+            symbol = COMMON_STOCKS.get(stock_input.upper()) or stock_input
+            
+            if initialize_agents():
+                with st.spinner("Analyzing..."):
+                    info, hist = get_stock_data(symbol)
                     
-                    st.markdown('<div class="chart-container">', unsafe_allow_html=True)
-                    st.plotly_chart(create_price_chart(hist, symbol), use_container_width=True)
-                    st.markdown('</div>', unsafe_allow_html=True)
-                    
-                    if 'longBusinessSummary' in info:
-                        st.markdown('<div class="feature-card">', unsafe_allow_html=True)
-                        st.markdown("### Company Overview")
-                        st.write(info['longBusinessSummary'])
+                    if info and hist is not None:
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.markdown(f'<div class="metric-card"><div class="metric-value">${info.get("currentPrice", "N/A")}</div><div class="metric-label">Current Price</div></div>', unsafe_allow_html=True)
+                        with col2:
+                            st.markdown(f'<div class="metric-card"><div class="metric-value">{info.get("forwardPE", "N/A")}</div><div class="metric-label">Forward P/E</div></div>', unsafe_allow_html=True)
+                        with col3:
+                            st.markdown(f'<div class="metric-card"><div class="metric-value">{info.get("recommendationKey", "N/A").title()}</div><div class="metric-label">Recommendation</div></div>', unsafe_allow_html=True)
+                        
+                        st.markdown('<div class="chart-container">', unsafe_allow_html=True)
+                        st.plotly_chart(create_price_chart(hist, symbol), use_container_width=True)
                         st.markdown('</div>', unsafe_allow_html=True)
-    st.markdown('</div>', unsafe_allow_html=True)
+                        
+                        if 'longBusinessSummary' in info:
+                            st.markdown('<div class="feature-card">', unsafe_allow_html=True)
+                            st.markdown("### Company Overview")
+                            st.write(info['longBusinessSummary'])
+                            st.markdown('</div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+    
                     
 if __name__ == "__main__":
     main()

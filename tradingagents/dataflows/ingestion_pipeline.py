@@ -56,52 +56,155 @@ class DataIngestionPipeline:
                 chunk_delta = timedelta(days=chunk_days)
                 chunk_start = start_date
                 all_success = True
+                total_inserted = 0
+                total_skipped = 0
+                
+                # Track existing timestamps per chunk (only load what we need, when we need it)
+                # This avoids loading all 57K records upfront
+                existing_timestamps_cache = set()
+                
                 while chunk_start < end_date:
                     chunk_end = min(chunk_start + chunk_delta, end_date)
                     start_str = chunk_start.strftime("%Y-%m-%d")
                     end_str = chunk_end.strftime("%Y-%m-%d")
+                    
+                    # Check existing records ONLY for this specific chunk date range
+                    # This is much faster than checking all 57K records
+                    chunk_existing_timestamps = set()
+                    try:
+                        # Query only timestamps in this chunk's date range (much smaller dataset)
+                        chunk_start_iso = chunk_start.isoformat()
+                        chunk_end_iso = chunk_end.isoformat()
+                        
+                        result = self.supabase.table(target_table)\
+                            .select("timestamp")\
+                            .eq("symbol", symbol)\
+                            .gte("timestamp", chunk_start_iso)\
+                            .lt("timestamp", chunk_end_iso)\
+                            .execute()
+                        
+                        if result.data:
+                            for record in result.data:
+                                ts = record.get("timestamp")
+                                if ts and isinstance(ts, str):
+                                    ts_normalized = ts.split('+')[0].split('Z')[0]
+                                    chunk_existing_timestamps.add(ts_normalized)
+                                    existing_timestamps_cache.add(ts_normalized)  # Cache for later chunks
+                    except Exception as e:
+                        print(f"Warning: Could not check existing records for {symbol} chunk {start_str} to {end_str}: {e}")
+                    
                     attempt = 0
                     while attempt < max_retries:
                         try:
-                            data = self.polygon_client.get_intraday_data(symbol, start_str, end_str, multiplier=5)
+                            data = self.polygon_client.get_intraday_data(symbol, start_str, end_str, multiplier=5, max_retries=max_retries)
                             if data.empty:
-                                print(f"No data for {symbol} {start_str} to {end_str}")
+                                # Check if dates are in the future (no need to print for future dates)
+                                try:
+                                    start_dt = datetime.strptime(start_str, "%Y-%m-%d")
+                                    end_dt = datetime.strptime(end_str, "%Y-%m-%d")
+                                    now = datetime.now()
+                                    if start_dt <= now and end_dt <= now:
+                                        # Past dates with no data - might be weekend/holiday
+                                        print(f"No trading data for {symbol} {start_str} to {end_str} (likely weekend/holiday)")
+                                except:
+                                    print(f"No data for {symbol} {start_str} to {end_str}")
                                 break  # Don't retry empty data
+                            
+                            # Prepare rows and filter duplicates using chunk-specific existing timestamps
                             rows = []
+                            new_rows = []
                             for _, row in data.iterrows():
-                                rows.append({
+                                timestamp_iso = row["timestamp"].isoformat()
+                                timestamp_normalized = timestamp_iso.split('+')[0].split('Z')[0]
+                                
+                                row_data = {
                                     "symbol": symbol,
-                                    "timestamp": row["timestamp"].isoformat(),
+                                    "timestamp": timestamp_iso,
                                     "open": float(row["open"]),
                                     "high": float(row["high"]),
                                     "low": float(row["low"]),
                                     "close": float(row["close"]),
                                     "volume": int(row["volume"]),
                                     "source": "polygon"
-                                })
-                            if rows:
+                                }
+                                rows.append(row_data)
+                                
+                                # Check both chunk-specific cache and global cache
+                                if timestamp_normalized not in chunk_existing_timestamps and timestamp_normalized not in existing_timestamps_cache:
+                                    new_rows.append(row_data)
+                                    # Add to both caches to avoid duplicates
+                                    chunk_existing_timestamps.add(timestamp_normalized)
+                                    existing_timestamps_cache.add(timestamp_normalized)
+                            
+                            # Bulk insert only new records (batch if too many to avoid timeouts)
+                            if new_rows:
+                                batch_size = 5000  # Insert in batches to avoid timeout
                                 try:
-                                    self.supabase.table(target_table).upsert(rows).execute()
-                                    print(f"Upserted {len(rows)} records for {symbol} {start_str} to {end_str}")
+                                    if len(new_rows) <= batch_size:
+                                        # Use insert instead of upsert since we've already filtered duplicates
+                                        self.supabase.table(target_table).insert(new_rows).execute()
+                                        total_inserted += len(new_rows)
+                                        total_skipped += (len(rows) - len(new_rows))
+                                        print(f"Inserted {len(new_rows)} new records for {symbol} {start_str} to {end_str} (skipped {len(rows) - len(new_rows)} duplicates)")
+                                    else:
+                                        # Insert in batches
+                                        for i in range(0, len(new_rows), batch_size):
+                                            batch = new_rows[i:i + batch_size]
+                                            self.supabase.table(target_table).insert(batch).execute()
+                                            total_inserted += len(batch)
+                                        total_skipped += (len(rows) - len(new_rows))
+                                        print(f"Inserted {len(new_rows)} new records for {symbol} {start_str} to {end_str} in batches (skipped {len(rows) - len(new_rows)} duplicates)")
                                 except Exception as e:
-                                    print(f"Bulk upsert failed for {symbol} {start_str} to {end_str}: {e}")
-                                    # Try individual upserts
-                                    for row in rows:
-                                        try:
-                                            self.supabase.table(target_table).upsert([row]).execute()
-                                        except Exception as individual_error:
-                                            print(f"Failed to upsert record for {symbol} on {row.get('timestamp')}: {individual_error}")
+                                    # If insert fails (e.g., duplicate key constraint), try upsert as fallback
+                                    print(f"Bulk insert failed for {symbol} {start_str} to {end_str}: {e}. Trying upsert...")
+                                    try:
+                                        # Try upsert in batches if needed
+                                        if len(new_rows) <= batch_size:
+                                            self.supabase.table(target_table).upsert(new_rows).execute()
+                                            total_inserted += len(new_rows)
+                                            print(f"Upserted {len(new_rows)} records for {symbol} {start_str} to {end_str}")
+                                        else:
+                                            for i in range(0, len(new_rows), batch_size):
+                                                batch = new_rows[i:i + batch_size]
+                                                self.supabase.table(target_table).upsert(batch).execute()
+                                                total_inserted += len(batch)
+                                            print(f"Upserted {len(new_rows)} records for {symbol} {start_str} to {end_str} in batches")
+                                    except Exception as upsert_error:
+                                        print(f"Upsert also failed: {upsert_error}")
+                                        all_success = False
+                            else:
+                                total_skipped += len(rows)
+                                print(f"All {len(rows)} records for {symbol} {start_str} to {end_str} already exist, skipping")
+                            
                             break  # Success, break retry loop
                         except Exception as e:
-                            attempt += 1
-                            wait_time = 2 ** attempt
-                            print(f"Error fetching chunk {start_str} to {end_str} for {symbol} (attempt {attempt}): {e}. Retrying in {wait_time}s...")
-                            import time
-                            time.sleep(wait_time)
-                            if attempt == max_retries:
-                                print(f"Max retries reached for {symbol} {start_str} to {end_str}. Skipping chunk.")
-                                all_success = False
+                            # Check if it's a rate limit error that should stop processing
+                            error_str = str(e).lower()
+                            if "429" in error_str or "too many requests" in error_str:
+                                print(f"⚠️ Rate limit exceeded for {symbol}. Consider running with fewer stocks or waiting before continuing.")
+                                # For rate limits, wait longer before retrying
+                                attempt += 1
+                                wait_time = min(60, 10 * (2 ** attempt))  # Cap at 60s, start at 10s
+                                print(f"Waiting {wait_time}s before retry {attempt}/{max_retries}...")
+                                import time
+                                time.sleep(wait_time)
+                                if attempt >= max_retries:
+                                    print(f"Max retries reached for {symbol} {start_str} to {end_str} due to rate limits.")
+                                    all_success = False
+                                    # Continue to next chunk instead of breaking completely
+                                    break
+                            else:
+                                attempt += 1
+                                wait_time = 2 ** attempt
+                                print(f"Error fetching chunk {start_str} to {end_str} for {symbol} (attempt {attempt}): {e}. Retrying in {wait_time}s...")
+                                import time
+                                time.sleep(wait_time)
+                                if attempt >= max_retries:
+                                    print(f"Max retries reached for {symbol} {start_str} to {end_str}. Skipping chunk.")
+                                    all_success = False
                     chunk_start = chunk_end
+                
+                print(f"Completed {symbol}: Inserted {total_inserted} new records, skipped {total_skipped} duplicates")
                 return all_success
             else:
                 # Daily data (original logic)

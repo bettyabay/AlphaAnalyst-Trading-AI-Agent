@@ -18,6 +18,8 @@ class PolygonDataClient:
         self.api_key = os.getenv("POLYGON_API_KEY")
         self.base_url = "https://api.polygon.io"
         self.headers = {"Authorization": f"Bearer {self.api_key}"}
+        self.last_request_time = 0
+        self.min_request_interval = 0.25  # Minimum 250ms between requests (4 requests/sec)
         
     def get_stock_details(self, symbol: str) -> Dict:
         """Get stock details and company information"""
@@ -58,35 +60,111 @@ class PolygonDataClient:
             print(f"Error fetching historical data for {symbol}: {e}")
             return pd.DataFrame()
 
-    def get_intraday_data(self, symbol: str, start_date: str, end_date: str, multiplier: int = 5, timespan: str = "minute") -> pd.DataFrame:
+    def get_intraday_data(self, symbol: str, start_date: str, end_date: str, multiplier: int = 5, timespan: str = "minute", max_retries: int = 5) -> pd.DataFrame:
         """Get intraday (e.g. 5-min) aggregated price data for a symbol
 
         Uses the Polygon aggregated range endpoint with a multiplier (e.g. 5) and timespan (e.g. 'minute').
         Returns a DataFrame with columns: timestamp, open, high, low, close, volume
+        
+        Handles rate limiting with exponential backoff.
         """
         url = f"{self.base_url}/v2/aggs/ticker/{symbol}/range/{multiplier}/{timespan}/{start_date}/{end_date}"
         params = {"apikey": self.api_key, "adjusted": "true", "sort": "asc"}
 
+        # Check if dates are in the future
         try:
-            response = requests.get(url, params=params)
-            response.raise_for_status()
-            data = response.json()
-
-            if data.get("results"):
-                df = pd.DataFrame(data["results"])
-                df["timestamp"] = pd.to_datetime(df["t"], unit="ms")
-                df = df.rename(columns={
-                    "o": "open", "h": "high", "l": "low", 
-                    "c": "close", "v": "volume"
-                })
-                return df[["timestamp", "open", "high", "low", "close", "volume"]]
-            else:
-                print(f"No intraday data returned for {symbol}. Response: {data}")
+            start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+            end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+            now = datetime.now()
+            
+            if start_dt > now or end_dt > now:
+                # Dates are in the future, skip silently (no data expected)
                 return pd.DataFrame()
+        except:
+            pass  # If date parsing fails, continue with API call
 
-        except Exception as e:
-            print(f"Error fetching intraday data for {symbol}: {e}")
-            return pd.DataFrame()
+        for attempt in range(max_retries):
+            try:
+                # Rate limiting: ensure minimum time between requests
+                elapsed = time.time() - self.last_request_time
+                if elapsed < self.min_request_interval:
+                    time.sleep(self.min_request_interval - elapsed)
+                
+                response = requests.get(url, params=params)
+                self.last_request_time = time.time()
+                
+                # Handle rate limiting (429 status code)
+                if response.status_code == 429:
+                    wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s, 8s, 16s
+                    if attempt < max_retries - 1:
+                        print(f"Rate limited (429) for {symbol} {start_date} to {end_date}. Waiting {wait_time}s before retry {attempt + 1}/{max_retries}...")
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        print(f"Rate limit exceeded for {symbol} {start_date} to {end_date} after {max_retries} attempts")
+                        raise requests.exceptions.HTTPError(f"429 Client Error: Too Many Requests")
+                
+                response.raise_for_status()
+                data = response.json()
+
+                if data.get("results"):
+                    df = pd.DataFrame(data["results"])
+                    df["timestamp"] = pd.to_datetime(df["t"], unit="ms")
+                    df = df.rename(columns={
+                        "o": "open", "h": "high", "l": "low", 
+                        "c": "close", "v": "volume"
+                    })
+                    return df[["timestamp", "open", "high", "low", "close", "volume"]]
+                else:
+                    # Check if this is a future date or truly no data
+                    try:
+                        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+                        end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+                        now = datetime.now()
+                        
+                        if start_dt > now or end_dt > now:
+                            # Future dates - no data expected, don't print
+                            return pd.DataFrame()
+                        else:
+                            # Past dates but no data - might be weekend/holiday or data issue
+                            status_msg = data.get("status", "")
+                            if status_msg != "OK":
+                                print(f"No intraday data for {symbol} {start_date} to {end_date}: {status_msg}")
+                            return pd.DataFrame()
+                    except:
+                        # Can't parse dates, just return empty
+                        return pd.DataFrame()
+
+            except requests.exceptions.HTTPError as e:
+                # Check if response exists and if it's a 429
+                response_status = getattr(e.response, 'status_code', None) if hasattr(e, 'response') else None
+                if response_status == 429:
+                    # Already handled above, but catch here too
+                    if attempt < max_retries - 1:
+                        wait_time = 2 ** attempt
+                        print(f"Rate limited (429) for {symbol} {start_date} to {end_date}. Waiting {wait_time}s before retry {attempt + 1}/{max_retries}...")
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        print(f"Rate limit exceeded for {symbol} {start_date} to {end_date} after {max_retries} attempts")
+                        raise
+                else:
+                    # Other HTTP errors
+                    if attempt == max_retries - 1:
+                        print(f"Error fetching intraday data for {symbol}: {e}")
+                        return pd.DataFrame()
+                    # Retry other HTTP errors
+                    wait_time = 1 * (attempt + 1)
+                    time.sleep(wait_time)
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    print(f"Error fetching intraday data for {symbol}: {e}")
+                    return pd.DataFrame()
+                # For other errors, wait a bit and retry
+                wait_time = 1 * (attempt + 1)
+                time.sleep(wait_time)
+        
+        return pd.DataFrame()
     
     def get_real_time_price(self, symbol: str) -> Dict:
         """Get real-time price for a symbol"""

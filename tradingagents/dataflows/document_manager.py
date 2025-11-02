@@ -557,19 +557,22 @@ class DocumentManager:
             for doc in documents:
                 doc_id = doc.get("id")
                 if doc_id:
+                    # Get document symbol (use parameter or document's symbol)
+                    doc_symbol = doc.get("symbol") or symbol
+                    
                     # Get trading signals
                     signals = self.extract_trading_signals(doc_id)
                     
-                    # Get AI analysis if available
-                    analysis = self.analyze_document_with_ai(doc_id, symbol)
+                    # Get AI analysis if available (use document's symbol for analysis)
+                    analysis = self.analyze_document_with_ai(doc_id, doc_symbol)
                     
                     insight = {
                         "document_id": doc_id,
-                        "filename": doc.get("metadata", {}).get("file_name", "Unknown"),
-                        "symbol": doc.get("metadata", {}).get("symbol", symbol),
+                        "filename": doc.get("file_name", doc.get("metadata", {}).get("file_name", "Unknown")),
+                        "symbol": doc_symbol,
                         "signals": signals,
                         "analysis": analysis,
-                        "uploaded_at": doc.get("created_at", "Unknown")
+                        "uploaded_at": doc.get("uploaded_at", doc.get("created_at", "Unknown"))
                     }
                     insights.append(insight)
             
