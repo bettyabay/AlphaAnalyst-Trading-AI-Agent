@@ -294,13 +294,35 @@ class DocumentManager:
                 try:
                     new_id = resp.data[0]['id'] if resp.data else None
                     if new_id:
-                        optional_update = {
-                            "rag_embedding": embedding_vector if embedding_vector is not None else None,
-                            "doc_title": title,
-                            "document_type": document_type,
-                            "source": source
-                        }
-                        self.supabase.table("research_documents").update(optional_update).eq("id", new_id).execute()
+                        optional_update = {}
+                        
+                        # Always try to save embedding_vector (it exists in schema)
+                        if embedding_vector is not None and len(embedding_vector) > 0:
+                            optional_update["embedding_vector"] = embedding_vector
+                            print(f"Generated embedding vector ({len(embedding_vector)} dimensions) for document {new_id}")
+                        else:
+                            print(f"Warning: No embedding vector generated (Gemini API may not be configured)")
+                        
+                        # Try optional fields that may not exist
+                        try:
+                            if title:
+                                optional_update["doc_title"] = title
+                        except:
+                            pass
+                        try:
+                            if document_type:
+                                optional_update["document_type"] = document_type
+                        except:
+                            pass
+                        try:
+                            if source:
+                                optional_update["source"] = source
+                        except:
+                            pass
+                        
+                        if optional_update:
+                            self.supabase.table("research_documents").update(optional_update).eq("id", new_id).execute()
+                            print(f"Updated document {new_id} with embedding_vector and optional fields")
                 except Exception as e:
                     # Non-fatal: schema may not have optional columns
                     print(f"Supabase optional update skipped: {e}")
@@ -427,31 +449,64 @@ class DocumentManager:
             """
             
             # Get AI analysis using Groq
-            groq_key = os.getenv("GROQ_API_KEY", "")
+            groq_key = os.getenv("GROQ_API_KEY", "") or os.getenv("GROK_API_KEY", "")
             if not groq_key:
                 return {"success": False, "error": "No working provider. Set GROQ_API_KEY"}
-            client = Groq(api_key=groq_key)
-            chat = client.chat.completions.create(
-                model="llama-3.1-70b-versatile",
-                messages=[
-                    {"role": "system", "content": "You are a professional financial analyst."},
-                    {"role": "user", "content": analysis_prompt},
-                ],
-                temperature=0.2,
-            )
-            response = chat.choices[0].message.content if chat.choices else ""
             
-            return {
-                "success": True,
-                "analysis": response,
-                "document_id": document_id,
-                "symbol": symbol,
-                "timestamp": datetime.now().isoformat()
-            }
+            # Validate API key format
+            if not groq_key.startswith('gsk_'):
+                return {
+                    "success": False,
+                    "error": "Invalid API Key Format",
+                    "details": "GROQ_API_KEY should start with 'gsk_'. Please check your .env file and ensure you have a valid Groq API key from https://console.groq.com/"
+                }
+            
+            try:
+                client = Groq(api_key=groq_key)
+                chat = client.chat.completions.create(
+                    model="llama-3.1-8b-instant",
+                    messages=[
+                        {"role": "system", "content": "You are a professional financial analyst."},
+                        {"role": "user", "content": analysis_prompt},
+                    ],
+                    temperature=0.2,
+                )
+                response = chat.choices[0].message.content if chat.choices else ""
+                
+                return {
+                    "success": True,
+                    "analysis": response,
+                    "document_id": document_id,
+                    "symbol": symbol,
+                    "timestamp": datetime.now().isoformat()
+                }
+            except Exception as api_error:
+                error_str = str(api_error)
+                if "401" in error_str or "invalid_api_key" in error_str.lower() or "Invalid API Key" in error_str:
+                    masked_key = f"{groq_key[:8]}...{groq_key[-4:]}" if len(groq_key) > 12 else "***"
+                    return {
+                        "success": False,
+                        "error": "Invalid API Key",
+                        "details": f"401 Unauthorized - The GROQ_API_KEY appears to be invalid. Key format: {masked_key}. Please:\n1. Get a valid API key from https://console.groq.com/\n2. Update your .env file: GROQ_API_KEY=gsk_your_actual_key_here\n3. Restart the application"
+                    }
+                elif "403" in error_str or "permission" in error_str.lower() or "credits" in error_str.lower():
+                    return {
+                        "success": False,
+                        "error": "Permission/credits issue with Groq. Ensure GROQ_API_KEY has access.",
+                        "details": error_str
+                    }
+                else:
+                    return {"success": False, "error": error_str, "details": error_str}
             
         except Exception as e:
             msg = str(e)
-            if "403" in msg or "permission" in msg.lower() or "credits" in msg.lower():
+            if "401" in msg or "invalid_api_key" in msg.lower():
+                return {
+                    "success": False,
+                    "error": "Invalid API Key",
+                    "details": f"401 Unauthorized - Please verify your GROQ_API_KEY in the .env file. Get a key from https://console.groq.com/"
+                }
+            elif "403" in msg or "permission" in msg.lower() or "credits" in msg.lower():
                 return {"success": False, "error": "Permission/credits issue with Groq. Ensure GROQ_API_KEY has access.", "details": msg}
             return {"success": False, "error": msg}
     
@@ -516,7 +571,7 @@ class DocumentManager:
 
             # Prepare update payload with optional fields guarded
             update_payload = {
-                "rag_embedding": embedding_vector if embedding_vector is not None else None,
+                "embedding_vector": embedding_vector if embedding_vector is not None else None,
                 "last_analyzed_at": datetime.now().isoformat(),
             }
 

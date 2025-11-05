@@ -4,6 +4,13 @@ import plotly.graph_objects as go
 import yfinance as yf
 import numpy as np
 from datetime import datetime
+from dotenv import load_dotenv
+import os
+import io
+
+# Load environment variables early
+load_dotenv()
+
 from phi.agent.agent import Agent
 from phi.tools.yfinance import YFinanceTools
 from phi.tools.duckduckgo import DuckDuckGo
@@ -32,7 +39,8 @@ from tradingagents.agents.utils.session_manager import (
     TradeExecutionService
 )
 
-GROQ_API_KEY = "" 
+# Load GROQ_API_KEY from environment
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "") or os.getenv("GROK_API_KEY", "") 
 
 COMMON_STOCKS = {
     'NVIDIA': 'NVDA', 'APPLE': 'AAPL', 'GOOGLE': 'GOOGL', 'MICROSOFT': 'MSFT',
@@ -1007,9 +1015,9 @@ def phase2_master_data_ai():
         with col3:
             st.metric("Documents Processed", docs_count)
         
-        # Master data summary (auto-generate on load; allow refresh)
+        # Master data summary (only generate when button is clicked)
         regenerate = st.button("Generate/Refresh Master Data Summary", type="primary", key="generate_master_data")
-        if regenerate or "master_data_summary" not in st.session_state:
+        if regenerate:
             with st.spinner("Generating comprehensive analysis..."):
                 summary = ai_analyzer.get_master_data_summary()
                 if isinstance(summary, dict) and "error" not in summary:
@@ -1036,9 +1044,91 @@ def phase2_master_data_ai():
                 confs = [inst.get("confidence_score", inst.get("ai_analysis", {}).get("confidence", 5)) for inst in summary.get("instruments", [])]
                 avg_confidence = float(np.mean(confs)) if confs else 0.0
                 st.metric("Avg Confidence", f"{avg_confidence:.1f}/10")
+            
+            # Detailed calculation breakdown
+            st.markdown("---")
+            with st.expander("📊 How These Metrics Are Calculated", expanded=True):
+                st.markdown("""
+                ### Calculation Methodology:
+                
+                **1. Bullish Signals:**
+                - Counts instruments where AI analysis returns `overall_sentiment == "Bullish"`
+                - Sentiment is extracted from AI-generated analysis text by searching for keywords like "bullish", "positive", "buy", etc.
+                - If AI analysis fails or returns "Neutral"/"Bearish", it's not counted
+                
+                **2. Bearish Signals:**
+                - Counts instruments where AI analysis returns `overall_sentiment == "Bearish"`
+                - Sentiment is extracted from AI-generated analysis text by searching for keywords like "bearish", "negative", "sell", etc.
+                - If AI analysis fails or returns "Neutral"/"Bullish", it's not counted
+                
+                **3. Average Confidence:**
+                - Calculated as: `mean([confidence_score for each instrument])`
+                - Each instrument's confidence comes from either:
+                  - `confidence_score` field (calculated from document insights and news sentiment)
+                  - OR `ai_analysis.confidence` field (extracted from AI response text, default 5 if not found)
+                - Confidence range: 1-10 (10 = highest confidence)
+                
+                **4. Why You Might See 0 Signals:**
+                - AI analysis may have failed (no GROQ_API_KEY or API error)
+                - All instruments returned "Neutral" sentiment
+                - AI analysis text didn't contain clear sentiment keywords
+                """)
+                
+                # Show detailed breakdown per instrument
+                st.markdown("### 📈 Per-Instrument Breakdown:")
+                instruments = summary.get("instruments", [])
+                
+                # Create a summary table
+                breakdown_data = []
+                for inst in instruments:
+                    symbol = inst.get("symbol", "Unknown")
+                    ai_analysis = inst.get("ai_analysis", {})
+                    sentiment = ai_analysis.get("overall_sentiment", "N/A")
+                    confidence = inst.get("confidence_score", ai_analysis.get("confidence", "N/A"))
+                    has_error = "error" in ai_analysis
+                    error_msg = ai_analysis.get("error", "")
+                    
+                    breakdown_data.append({
+                        "Symbol": symbol,
+                        "Sentiment": sentiment,
+                        "Confidence": confidence if isinstance(confidence, (int, float)) else "N/A",
+                        "Status": "❌ Error" if has_error else "✅ Success",
+                        "Error": error_msg[:50] + "..." if error_msg and len(error_msg) > 50 else error_msg
+                    })
+                
+                if breakdown_data:
+                    df_breakdown = pd.DataFrame(breakdown_data)
+                    st.dataframe(df_breakdown, use_container_width=True, hide_index=True)
+                    
+                    # Summary statistics
+                    st.markdown("### 📊 Summary Statistics:")
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        successful = sum(1 for inst in instruments if "error" not in inst.get("ai_analysis", {}))
+                        failed = len(instruments) - successful
+                        st.metric("Successful Analyses", successful)
+                        st.metric("Failed Analyses", failed)
+                    with col2:
+                        sentiment_counts = {}
+                        for inst in instruments:
+                            sent = inst.get("ai_analysis", {}).get("overall_sentiment", "Unknown")
+                            sentiment_counts[sent] = sentiment_counts.get(sent, 0) + 1
+                        st.write("**Sentiment Distribution:**")
+                        for sent, count in sentiment_counts.items():
+                            st.write(f"- {sent}: {count}")
+                    with col3:
+                        confs = [inst.get("confidence_score", inst.get("ai_analysis", {}).get("confidence", 5)) 
+                                for inst in instruments 
+                                if isinstance(inst.get("confidence_score", inst.get("ai_analysis", {}).get("confidence", 5)), (int, float))]
+                        if confs:
+                            st.write("**Confidence Stats:**")
+                            st.write(f"- Min: {min(confs):.1f}/10")
+                            st.write(f"- Max: {max(confs):.1f}/10")
+                            st.write(f"- Median: {np.median(confs):.1f}/10")
 
             # Save full summary payload to DB
             st.markdown("---")
+            st.info("💾 Master data summary will be saved to the **`system_logs`** table with event type `master_data_generated`")
             if st.button("💾 Save Master Data Summary to Database", key="save_master_data"):
                 try:
                     from tradingagents.database.db_service import log_event, _make_json_serializable
@@ -1051,7 +1141,7 @@ def phase2_master_data_ai():
                     payload = _make_json_serializable(payload)
                     ok = log_event("master_data_generated", payload)
                     if ok:
-                        st.success("✅ Master data summary saved to database!")
+                        st.success(f"✅ Master data summary saved to database! **Table:** `system_logs` | **Event:** `master_data_generated`")
                     else:
                         st.error("❌ Failed to save master data summary")
                 except Exception as e:
@@ -1080,74 +1170,326 @@ def phase2_master_data_ai():
             with col3:
                 doc_type = st.selectbox("Document Type", ["research", "earnings", "news", "analysis"])
             
-            if st.button("Upload & Analyze", type="primary", key="upload_analyze_phase2"):
+            if st.button("Analyze Document", type="primary", key="analyze_document"):
                 if symbol and title:
                     doc_manager = DocumentManager()
                     
-                    with st.spinner("Processing document..."):
-                        result = doc_manager.upload_document(
-                            uploaded_file, 
-                            uploaded_file.name, 
-                            title,
-                            document_type=doc_type,
-                            symbol=symbol
-                        )
+                    # Extract text from file without saving to DB
+                    with st.spinner("Extracting document text..."):
+                        file_extension = os.path.splitext(uploaded_file.name)[1]
+                        content_text = doc_manager._extract_text_from_stream(uploaded_file, file_extension)
                     
-                    if result["success"]:
-                        st.success("Document uploaded successfully!")
-                        st.balloons()
-                        
-                        # Perform AI analysis and persist RAG to Supabase
-                        with st.spinner("Analyzing with AI and storing RAG..."):
-                            documents = doc_manager.get_documents(symbol=symbol)
-                            if documents:
-                                latest_doc = documents[-1]
-                                doc_id = latest_doc.get("id")
+                    if content_text:
+                        # Perform AI analysis on extracted text (without saving to DB)
+                        with st.spinner("Analyzing with AI..."):
+                            # Create a temporary document ID for analysis
+                            temp_doc_id = f"temp_{datetime.now().timestamp()}"
+                            
+                            # Store content in session state for later saving
+                            # Store file bytes instead of the uploader object (not serializable)
+                            uploaded_file.seek(0)
+                            file_bytes = uploaded_file.read()
+                            uploaded_file.seek(0)  # Reset for potential display
+                            
+                            st.session_state.pending_document = {
+                                "file_bytes": file_bytes,
+                                "filename": uploaded_file.name,
+                                "title": title,
+                                "symbol": symbol,
+                                "document_type": doc_type,
+                                "content_text": content_text
+                            }
+                            
+                            # Analyze the document content directly (without needing a DB doc_id)
+                            # Extract signals from content first
+                            bullish_keywords = [
+                                "buy", "bullish", "positive", "growth", "outperform", "upgrade",
+                                "strong", "beat", "exceed", "increase", "rise", "gain"
+                            ]
+                            bearish_keywords = [
+                                "sell", "bearish", "negative", "decline", "underperform", "downgrade",
+                                "weak", "miss", "fall", "decrease", "drop", "loss"
+                            ]
+                            
+                            content_lower = content_text.lower()
+                            bullish_signals = [word for word in bullish_keywords if word in content_lower]
+                            bearish_signals = [word for word in bearish_keywords if word in content_lower]
+                            sentiment_score = len(bullish_signals) - len(bearish_signals)
+                            
+                            if sentiment_score > 0:
+                                overall_sentiment = "Bullish"
+                            elif sentiment_score < 0:
+                                overall_sentiment = "Bearish"
+                            else:
+                                overall_sentiment = "Neutral"
+                            
+                            signals = {
+                                "success": True,
+                                "bullish_signals": bullish_signals,
+                                "bearish_signals": bearish_signals,
+                                "sentiment_score": sentiment_score,
+                                "overall_sentiment": overall_sentiment,
+                                "confidence": min(abs(sentiment_score) * 2, 10)
+                            }
+                            
+                            # Analyze the document content directly using Groq
+                            try:
+                                from groq import Groq
+                                groq_key = os.getenv("GROQ_API_KEY", "") or os.getenv("GROK_API_KEY", "")
                                 
-                                if doc_id:
-                                    result_bundle = doc_manager.analyze_and_store(doc_id, symbol)
-                                    analysis = result_bundle.get("analysis", {})
-                                    signals = result_bundle.get("signals", {})
+                                # Debug: Check if key is loaded (show masked version)
+                                if groq_key:
+                                    # Mask the API key for display (show first 8 and last 4 chars)
+                                    masked_key = f"{groq_key[:8]}...{groq_key[-4:]}" if len(groq_key) > 12 else "***"
                                     
-                                    # Always display results, even if analysis failed
-                                    st.subheader("AI Analysis Results")
-                                    
-                                    # Display analysis results
-                                    col1, col2 = st.columns(2)
-                                    with col1:
-                                        st.write("**Document Analysis:**")
-                                        if analysis.get("success"):
-                                            st.write(analysis["analysis"])
-                                        else:
-                                            st.warning(f"AI analysis failed: {analysis.get('error', 'Unknown error')}")
-                                            details = analysis.get('details')
-                                            if details:
-                                                st.code(details)
-                                            st.info("💡 Set GROQ_API_KEY and ensure provider access is valid.")
-                                    
-                                    with col2:
-                                        st.write("**Trading Signals:**")
-                                        if signals.get("success"):
-                                            st.write(f"**Sentiment:** {signals['overall_sentiment']}")
-                                            st.write(f"**Confidence:** {signals['confidence']}/10")
-                                            st.write(f"**Bullish Signals:** {len(signals['bullish_signals'])}")
-                                            st.write(f"**Bearish Signals:** {len(signals['bearish_signals'])}")
-                                        else:
-                                            st.warning(f"Signal extraction failed: {signals.get('error', 'Unknown error')}")
-                                    
-                                    # Store analysis in session state
-                                    if "document_analyses" not in st.session_state:
-                                        st.session_state.document_analyses = []
-                                    st.session_state.document_analyses.append({
-                                        "symbol": symbol,
-                                        "title": title,
-                                        "analysis": analysis,
-                                        "signals": signals
-                                    })
+                                    # Validate key format (Groq keys typically start with 'gsk_')
+                                    if not groq_key.startswith('gsk_'):
+                                        analysis = {
+                                            "success": False,
+                                            "error": "Invalid API Key Format",
+                                            "details": f"GROQ_API_KEY should start with 'gsk_'. Found: {masked_key}. Please check your .env file and ensure you have a valid Groq API key from https://console.groq.com/"
+                                        }
+                                    else:
+                                        try:
+                                            client = Groq(api_key=groq_key)
+                                            analysis_prompt = f"""
+                                            Analyze the following research document for trading insights related to {symbol}.
+                                            
+                                            Document Content:
+                                            {content_text[:4000]}
+                                            
+                                            Please provide:
+                                            1. Key financial metrics mentioned
+                                            2. Bullish signals (positive indicators)
+                                            3. Bearish signals (negative indicators)
+                                            4. Overall sentiment (Bullish/Bearish/Neutral)
+                                            5. Confidence level (1-10)
+                                            6. Key risks mentioned
+                                            7. Investment recommendation (BUY/SELL/HOLD)
+                                            
+                                            Format your response as a structured analysis.
+                                            """
+                                            chat = client.chat.completions.create(
+                                                model="llama-3.1-8b-instant",
+                                                messages=[
+                                                    {"role": "system", "content": "You are a professional financial analyst."},
+                                                    {"role": "user", "content": analysis_prompt},
+                                                ],
+                                                temperature=0.2,
+                                            )
+                                            analysis_text = chat.choices[0].message.content if chat.choices else ""
+                                            analysis = {
+                                                "success": True,
+                                                "analysis": analysis_text,
+                                                "document_id": None,
+                                                "symbol": symbol,
+                                                "timestamp": datetime.now().isoformat()
+                                            }
+                                        except Exception as api_error:
+                                            error_str = str(api_error)
+                                            if "401" in error_str or "invalid_api_key" in error_str.lower() or "Invalid API Key" in error_str:
+                                                analysis = {
+                                                    "success": False,
+                                                    "error": "Invalid API Key",
+                                                    "details": f"The GROQ_API_KEY in your .env file appears to be invalid. Key format: {masked_key}. Please:\n1. Get a valid API key from https://console.groq.com/\n2. Update your .env file with: GROQ_API_KEY=gsk_your_actual_key_here\n3. Restart the application"
+                                                }
+                                            elif "403" in error_str or "permission" in error_str.lower() or "credits" in error_str.lower():
+                                                analysis = {
+                                                    "success": False,
+                                                    "error": "Permission/credits issue with Groq",
+                                                    "details": f"Your API key may have insufficient credits or access. Key: {masked_key}. Check your Groq account at https://console.groq.com/"
+                                                }
+                                            else:
+                                                analysis = {
+                                                    "success": False,
+                                                    "error": f"API Error: {error_str[:100]}",
+                                                    "details": error_str
+                                                }
+                                else:
+                                    analysis = {
+                                        "success": False,
+                                        "error": "No working provider. Set GROQ_API_KEY",
+                                        "details": "GROQ_API_KEY environment variable is not set. Please add it to your .env file: GROQ_API_KEY=gsk_your_key_here"
+                                    }
+                            except Exception as e:
+                                msg = str(e)
+                                if "401" in msg or "invalid_api_key" in msg.lower():
+                                    groq_key = os.getenv("GROQ_API_KEY", "") or os.getenv("GROK_API_KEY", "")
+                                    masked_key = f"{groq_key[:8]}...{groq_key[-4:]}" if groq_key and len(groq_key) > 12 else "Not set"
+                                    analysis = {
+                                        "success": False,
+                                        "error": "Invalid API Key",
+                                        "details": f"401 Unauthorized - Invalid API Key detected. Key format: {masked_key}. Please verify your GROQ_API_KEY in the .env file is correct. Get a key from https://console.groq.com/"
+                                    }
+                                elif "403" in msg or "permission" in msg.lower() or "credits" in msg.lower():
+                                    analysis = {
+                                        "success": False,
+                                        "error": "Permission/credits issue with Groq. Ensure GROQ_API_KEY has access.",
+                                        "details": msg
+                                    }
+                                else:
+                                    analysis = {
+                                        "success": False,
+                                        "error": str(e),
+                                        "details": msg
+                                    }
+                            
+                            # Store analysis results in session state
+                            st.session_state.pending_document["analysis"] = analysis
+                            st.session_state.pending_document["signals"] = signals
+                            
+                            # Display results
+                            st.subheader("AI Analysis Results")
+                            
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                st.write("**Document Analysis:**")
+                                if analysis.get("success"):
+                                    st.write(analysis.get("analysis", "Analysis completed"))
+                                else:
+                                    st.warning(f"AI analysis failed: {analysis.get('error', 'Unknown error')}")
+                                    details = analysis.get('details')
+                                    if details:
+                                        st.code(details)
+                                    st.info("💡 Set GROQ_API_KEY and ensure provider access is valid.")
+                            
+                            with col2:
+                                st.write("**Trading Signals:**")
+                                if signals.get("success"):
+                                    st.write(f"**Sentiment:** {signals['overall_sentiment']}")
+                                    st.write(f"**Confidence:** {signals['confidence']}/10")
+                                    st.write(f"**Bullish Signals:** {len(signals['bullish_signals'])}")
+                                    st.write(f"**Bearish Signals:** {len(signals['bearish_signals'])}")
+                                else:
+                                    st.warning(f"Signal extraction failed: {signals.get('error', 'Unknown error')}")
+                            
+                            st.success("✅ Document analyzed! Review the results above and click 'Save to Database' when ready.")
                     else:
-                        st.error(f"Upload failed: {result.get('error', 'Unknown error')}")
+                        st.error("Failed to extract text from document")
                 else:
                     st.warning("Please select a symbol and enter a title")
+            
+            # Save to database button (only show if analysis is complete)
+            if "pending_document" in st.session_state and st.session_state.pending_document:
+                st.markdown("---")
+                if st.button("💾 Save to Database", type="primary", key="save_document_to_db"):
+                    doc_manager = DocumentManager()
+                    pending = st.session_state.pending_document
+                    
+                    with st.spinner("Saving document to database..."):
+                        # Create a BytesIO object from stored bytes
+                        file_stream = io.BytesIO(pending["file_bytes"])
+                        
+                        result = doc_manager.upload_document(
+                            file_stream,
+                            pending["filename"],
+                            pending["title"],
+                            document_type=pending["document_type"],
+                            symbol=pending["symbol"]
+                        )
+                        
+                        if result["success"]:
+                            doc_id = result.get("document_id")
+                            if doc_id:
+                                # Update the document with analysis results and embedding
+                                try:
+                                    analysis = pending.get("analysis", {})
+                                    signals = pending.get("signals", {})
+                                    
+                                    # Generate embedding from content text
+                                    embedding_vector = doc_manager._generate_embedding(pending["content_text"])
+                                    
+                                    # Build update payload - only include fields that exist in schema
+                                    update_payload = {}
+                                    
+                                    # Always try to update embedding (embedding_vector column)
+                                    if embedding_vector is not None and len(embedding_vector) > 0:
+                                        update_payload["embedding_vector"] = embedding_vector
+                                        st.info(f"📊 Generated embedding vector ({len(embedding_vector)} dimensions)")
+                                    else:
+                                        st.warning("⚠️ Embedding vector not generated (Gemini API may not be configured)")
+                                    
+                                    # Try optional fields - handle gracefully if columns don't exist
+                                    optional_fields = {}
+                                    
+                                    if analysis.get("success"):
+                                        # Store analysis in file_content or metadata if ai_analysis_text doesn't exist
+                                        # Try ai_analysis_text first, fallback to appending to file_content
+                                        optional_fields["ai_analysis_text"] = analysis.get("analysis")
+                                    
+                                    if signals.get("success"):
+                                        optional_fields.update({
+                                            "overall_sentiment": signals.get("overall_sentiment"),
+                                            "signal_confidence": signals.get("confidence"),
+                                            "bullish_signals": signals.get("bullish_signals"),
+                                            "bearish_signals": signals.get("bearish_signals"),
+                                        })
+                                    
+                                    # Add timestamp if column exists
+                                    optional_fields["last_analyzed_at"] = datetime.now().isoformat()
+                                    
+                                    # Try to update with all fields
+                                    try:
+                                        full_payload = {**update_payload, **optional_fields}
+                                        doc_manager.supabase.table("research_documents").update(full_payload).eq("id", doc_id).execute()
+                                        st.info("✅ Document saved with analysis and embedding!")
+                                    except Exception as update_error:
+                                        # If full update fails, try just embedding (columns don't exist)
+                                        error_str = str(update_error)
+                                        if "PGRST204" in error_str or "Could not find" in error_str:
+                                            # Column doesn't exist, store everything in file_content
+                                            try:
+                                                # Only update embedding (embedding_vector should exist)
+                                                if embedding_vector is not None and len(embedding_vector) > 0:
+                                                    doc_manager.supabase.table("research_documents").update({
+                                                        "embedding_vector": embedding_vector
+                                                    }).eq("id", doc_id).execute()
+                                                    st.info(f"✅ Embedding vector saved ({len(embedding_vector)} dimensions)")
+                                                else:
+                                                    st.warning("⚠️ No embedding vector to save (Gemini API may not be configured)")
+                                                
+                                                # Store full analysis in file_content as JSON
+                                                current_doc = doc_manager.get_document_content(doc_id)
+                                                if current_doc:
+                                                    import json
+                                                    analysis_metadata = {
+                                                        "ai_analysis": analysis.get("analysis") if analysis.get("success") else None,
+                                                        "signals": signals if signals.get("success") else None,
+                                                        "analyzed_at": datetime.now().isoformat()
+                                                    }
+                                                    # Append analysis metadata to file_content as JSON
+                                                    analysis_json_str = json.dumps(analysis_metadata, indent=2)
+                                                    updated_content = current_doc + f"\n\n--- AI ANALYSIS METADATA ---\n{analysis_json_str}"
+                                                    doc_manager.supabase.table("research_documents").update({
+                                                        "file_content": updated_content
+                                                    }).eq("id", doc_id).execute()
+                                                
+                                                st.info("✅ Document saved with embedding! Analysis metadata stored in file_content (some columns not found in schema).")
+                                            except Exception as e2:
+                                                # If even embedding fails, at least document is saved
+                                                st.info("✅ Document saved! Some metadata couldn't be updated, but document is stored.")
+                                        else:
+                                            st.warning(f"⚠️ Document saved but analysis update failed: {error_str}")
+                                except Exception as e:
+                                    st.warning(f"⚠️ Document saved but analysis update failed: {e}")
+                            
+                            st.success("✅ Document saved to database successfully!")
+                            st.balloons()
+                            
+                            # Clear pending document
+                            del st.session_state.pending_document
+                            
+                            # Store in document analyses history
+                            if "document_analyses" not in st.session_state:
+                                st.session_state.document_analyses = []
+                            st.session_state.document_analyses.append({
+                                "symbol": pending["symbol"],
+                                "title": pending["title"],
+                                "analysis": pending.get("analysis", {}),
+                                "signals": pending.get("signals", {})
+                            })
+                        else:
+                            st.error(f"Failed to save document: {result.get('error', 'Unknown error')}")
         
         # Display existing analyses
         if "document_analyses" in st.session_state and st.session_state.document_analyses:
@@ -1184,13 +1526,15 @@ def phase2_master_data_ai():
                         st.subheader("Market Data")
                         market_data = profile.get("market_data", {})
                         if "error" not in market_data:
+                            data_source = market_data.get("source", "unknown")
+                            st.caption(f"Data source: {data_source}")
                             st.metric("Current Price", f"${market_data.get('current_price', 'N/A')}")
                             st.metric("30-day Change", f"{market_data.get('price_change_pct', 'N/A')}%")
                             st.metric("Volume", f"{market_data.get('volume', 'N/A'):,}")
                             st.metric("30-day High", f"${market_data.get('high_30d', 'N/A')}")
                             st.metric("30-day Low", f"${market_data.get('low_30d', 'N/A')}")
                         else:
-                            st.error("Market data unavailable")
+                            st.error(f"Market data unavailable: {market_data.get('error', 'Unknown error')}")
                     
                     with col2:
                         st.subheader("AI Analysis")
@@ -1204,7 +1548,12 @@ def phase2_master_data_ai():
                             st.subheader("Detailed Analysis")
                             st.write(ai_analysis.get("analysis_text", "No analysis available"))
                         else:
-                            st.error("AI analysis unavailable")
+                            error_msg = ai_analysis.get("error", "Unknown error")
+                            details = ai_analysis.get("details", "")
+                            st.error(f"AI analysis unavailable: {error_msg}")
+                            if details:
+                                with st.expander("Error Details"):
+                                    st.code(details)
                     
                     # Document insights
                     doc_insights = profile.get("document_insights", [])

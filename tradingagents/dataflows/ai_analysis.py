@@ -22,7 +22,7 @@ class AIResearchAnalyzer:
     
     def __init__(self):
         # Groq-only initialization
-        self.groq_key = os.getenv("GROQ_API_KEY", "")
+        self.groq_key = os.getenv("GROQ_API_KEY", "") or os.getenv("GROK_API_KEY", "")
         self.document_manager = DocumentManager()
         self.polygon_client = PolygonDataClient()
     
@@ -59,10 +59,10 @@ class AIResearchAnalyzer:
     def _get_market_data(self, symbol: str) -> Dict:
         """Get recent market data for analysis"""
         try:
-            # Get recent price data
+            # Try Polygon first
             recent_data = self.polygon_client.get_recent_data(symbol, days=30)
             
-            if recent_data and len(recent_data) > 0:
+            if recent_data is not None and len(recent_data) > 0:
                 latest = recent_data.iloc[-1]
                 first = recent_data.iloc[0]
                 
@@ -76,12 +76,65 @@ class AIResearchAnalyzer:
                     "volume": latest['volume'],
                     "high_30d": recent_data['high'].max(),
                     "low_30d": recent_data['low'].min(),
-                    "volatility": recent_data['close'].std()
+                    "volatility": recent_data['close'].std(),
+                    "source": "polygon"
                 }
-            else:
-                return {"error": "No market data available"}
+            
+            # Fallback to yfinance if Polygon fails
+            try:
+                import yfinance as yf
+                ticker = yf.Ticker(symbol)
+                hist = ticker.history(period="1mo")
+                
+                if hist is not None and len(hist) > 0:
+                    latest = hist.iloc[-1]
+                    first = hist.iloc[0]
+                    
+                    price_change = float(latest['Close']) - float(first['Close'])
+                    price_change_pct = (price_change / float(first['Close'])) * 100
+                    
+                    return {
+                        "current_price": float(latest['Close']),
+                        "price_change": price_change,
+                        "price_change_pct": price_change_pct,
+                        "volume": int(latest['Volume']),
+                        "high_30d": float(hist['High'].max()),
+                        "low_30d": float(hist['Low'].min()),
+                        "volatility": float(hist['Close'].std()),
+                        "source": "yfinance"
+                    }
+            except Exception as yf_error:
+                print(f"YFinance fallback failed for {symbol}: {yf_error}")
+            
+            return {"error": "No market data available from Polygon or YFinance"}
                 
         except Exception as e:
+            # Try yfinance fallback on exception too
+            try:
+                import yfinance as yf
+                ticker = yf.Ticker(symbol)
+                hist = ticker.history(period="1mo")
+                
+                if hist is not None and len(hist) > 0:
+                    latest = hist.iloc[-1]
+                    first = hist.iloc[0]
+                    
+                    price_change = float(latest['Close']) - float(first['Close'])
+                    price_change_pct = (price_change / float(first['Close'])) * 100
+                    
+                    return {
+                        "current_price": float(latest['Close']),
+                        "price_change": price_change,
+                        "price_change_pct": price_change_pct,
+                        "volume": int(latest['Volume']),
+                        "high_30d": float(hist['High'].max()),
+                        "low_30d": float(hist['Low'].min()),
+                        "volatility": float(hist['Close'].std()),
+                        "source": "yfinance"
+                    }
+            except:
+                pass
+            
             return {"error": f"Market data error: {str(e)}"}
     
     def _analyze_news_sentiment(self, symbol: str) -> Dict:
@@ -108,10 +161,10 @@ class AIResearchAnalyzer:
             if not self.groq_key:
                 return {"error": "AI analysis disabled - GROQ_API_KEY not configured"}
 
-            # Prepare context for AI analysis
-            context = f"""
-            Symbol: {symbol}
-            
+            # Prepare context for AI analysis - handle market_data errors gracefully
+            market_info = ""
+            if "error" not in market_data:
+                market_info = f"""
             Market Data:
             - Current Price: ${market_data.get('current_price', 'N/A')}
             - 30-day Change: {market_data.get('price_change_pct', 'N/A')}%
@@ -119,6 +172,14 @@ class AIResearchAnalyzer:
             - 30-day High: ${market_data.get('high_30d', 'N/A')}
             - 30-day Low: ${market_data.get('low_30d', 'N/A')}
             - Volatility: {market_data.get('volatility', 'N/A')}
+            """
+            else:
+                market_info = f"Market Data: {market_data.get('error', 'Not available')}"
+            
+            context = f"""
+            Symbol: {symbol}
+            
+            {market_info}
             
             Document Insights:
             {self._format_document_insights(doc_insights)}
@@ -149,27 +210,61 @@ class AIResearchAnalyzer:
             """
             
             # Groq generation
-            client = Groq(api_key=self.groq_key)
-            chat = client.chat.completions.create(
-                model="llama-3.1-70b-versatile",
-                messages=[
-                    {"role": "system", "content": "You are a professional financial analyst."},
-                    {"role": "user", "content": analysis_prompt},
-                ],
-                temperature=0.2,
-            )
-            response = chat.choices[0].message.content if chat.choices else ""
+            # Validate API key format
+            if not self.groq_key:
+                return {
+                    "error": "AI analysis disabled - GROQ_API_KEY not configured",
+                    "details": "Please set GROQ_API_KEY in your .env file"
+                }
             
-            return {
-                "analysis_text": response,
-                "overall_sentiment": self._extract_sentiment_from_analysis(response),
-                "recommendation": self._extract_recommendation(response),
-                "confidence": self._extract_confidence(response)
-            }
+            if not self.groq_key.startswith('gsk_'):
+                return {
+                    "error": "Invalid API Key Format",
+                    "details": "GROQ_API_KEY should start with 'gsk_'. Please check your .env file and ensure you have a valid Groq API key from https://console.groq.com/"
+                }
+            
+            try:
+                client = Groq(api_key=self.groq_key)
+                chat = client.chat.completions.create(
+                    model="llama-3.1-8b-instant",
+                    messages=[
+                        {"role": "system", "content": "You are a professional financial analyst."},
+                        {"role": "user", "content": analysis_prompt},
+                    ],
+                    temperature=0.2,
+                )
+                response = chat.choices[0].message.content if chat.choices else ""
+                
+                return {
+                    "analysis_text": response,
+                    "overall_sentiment": self._extract_sentiment_from_analysis(response),
+                    "recommendation": self._extract_recommendation(response),
+                    "confidence": self._extract_confidence(response)
+                }
+            except Exception as api_error:
+                error_str = str(api_error)
+                if "401" in error_str or "invalid_api_key" in error_str.lower() or "Invalid API Key" in error_str:
+                    masked_key = f"{self.groq_key[:8]}...{self.groq_key[-4:]}" if len(self.groq_key) > 12 else "***"
+                    return {
+                        "error": "Invalid API Key",
+                        "details": f"401 Unauthorized - The GROQ_API_KEY appears to be invalid. Key format: {masked_key}. Please:\n1. Get a valid API key from https://console.groq.com/\n2. Update your .env file: GROQ_API_KEY=gsk_your_actual_key_here\n3. Restart the application"
+                    }
+                elif "403" in error_str or "permission" in error_str.lower() or "credits" in error_str.lower():
+                    return {
+                        "error": "AI analysis error: Permission/credits issue with provider. Ensure GROQ_API_KEY has access.",
+                        "details": error_str
+                    }
+                else:
+                    return {"error": f"AI analysis error: {error_str}"}
             
         except Exception as e:
             msg = str(e)
-            if "403" in msg or "permission" in msg.lower() or "credits" in msg.lower():
+            if "401" in msg or "invalid_api_key" in msg.lower():
+                return {
+                    "error": "Invalid API Key",
+                    "details": f"401 Unauthorized - Please verify your GROQ_API_KEY in the .env file. Get a key from https://console.groq.com/"
+                }
+            elif "403" in msg or "permission" in msg.lower() or "credits" in msg.lower():
                 return {"error": "AI analysis error: Permission/credits issue with provider. Ensure GROQ_API_KEY has access.", "details": msg}
             return {"error": f"AI analysis error: {msg}"}
     
