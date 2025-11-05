@@ -503,11 +503,18 @@ def check_environment_variables():
     load_dotenv()
     
     st.info("🔍 Checking environment variables...")
+    # Support GROK_API_KEY alias -> GROQ_API_KEY for AI features
+    groq_key = os.getenv("GROQ_API_KEY")
+    grok_key = os.getenv("GROK_API_KEY")
+    if not groq_key and grok_key:
+        os.environ["GROQ_API_KEY"] = grok_key
+        groq_key = grok_key
     
     env_vars = {
         "POLYGON_API_KEY": os.getenv("POLYGON_API_KEY"),
         "SUPABASE_URL": os.getenv("SUPABASE_URL"),
-        "SUPABASE_KEY": os.getenv("SUPABASE_KEY")
+        "SUPABASE_KEY": os.getenv("SUPABASE_KEY"),
+        "GROQ_API_KEY": groq_key or ""
     }
     
     all_good = True
@@ -527,6 +534,7 @@ def check_environment_variables():
 POLYGON_API_KEY=your_polygon_api_key_here
 SUPABASE_URL=your_supabase_url_here
 SUPABASE_KEY=your_supabase_anon_key_here
+GROQ_API_KEY=your_groq_or_grok_api_key_here  # GROK_API_KEY also supported
         """)
     
     return all_good
@@ -622,29 +630,6 @@ def list_database_tables():
 def phase1_foundation_data():
     """Phase 1: Foundation & Data Infrastructure"""
     
-    # Database & Infrastructure Setup
-    st.markdown('<div class="feature-card">', unsafe_allow_html=True)
-    st.markdown("### Database & Infrastructure Setup")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("Initialize Database", use_container_width=True, key="init_database"):
-            if initialize_database():
-                st.success("Database initialized successfully!")
-                st.balloons()
-            else:
-                st.error("Database initialization failed!")
-    
-    with col2:
-        if st.button("Initialize Stocks", use_container_width=True, key="init_stocks"):
-            pipeline = DataIngestionPipeline()
-            if pipeline.initialize_stocks():
-                st.success("Stocks initialized successfully!")
-                st.balloons()
-            else:
-                st.error("Stock initialization failed!")
-            pipeline.close()
-    st.markdown('</div>', unsafe_allow_html=True)
     
     # Watchlist display
     st.markdown('<div class="feature-card">', unsafe_allow_html=True)
@@ -1005,59 +990,72 @@ def phase2_master_data_ai():
         # Get watchlist symbols
         symbols = get_watchlist_symbols()
         
+        # Compute dynamic document count
+        try:
+            doc_manager_tmp = DocumentManager()
+            all_docs_tmp = doc_manager_tmp.get_documents() or []
+            docs_count = len(all_docs_tmp)
+            doc_manager_tmp.close()
+        except Exception:
+            docs_count = 0
+
         col1, col2, col3 = st.columns(3)
         with col1:
             st.metric("Total Instruments", len(symbols))
         with col2:
             st.metric("AI Analysis Status", "Active")
         with col3:
-            st.metric("Documents Processed", "0")  # Will be updated dynamically
+            st.metric("Documents Processed", docs_count)
         
-        # Master data summary
-        if st.button("Generate Master Data Summary", type="primary", key="generate_master_data"):
+        # Master data summary (auto-generate on load; allow refresh)
+        regenerate = st.button("Generate/Refresh Master Data Summary", type="primary", key="generate_master_data")
+        if regenerate or "master_data_summary" not in st.session_state:
             with st.spinner("Generating comprehensive analysis..."):
                 summary = ai_analyzer.get_master_data_summary()
-                
-                if "error" not in summary:
-                    st.success("Master data analysis completed!")
-                    st.balloons()
-                    
-                    # Display summary metrics
-                    st.subheader("Analysis Summary")
-                    col1, col2, col3, col4 = st.columns(4)
-                    
-                    with col1:
-                        st.metric("Total Instruments", summary["total_instruments"])
-                    with col2:
-                        bullish_count = sum(1 for inst in summary["instruments"] 
-                                          if inst.get("ai_analysis", {}).get("overall_sentiment") == "Bullish")
-                        st.metric("Bullish Signals", bullish_count)
-                    with col3:
-                        bearish_count = sum(1 for inst in summary["instruments"] 
-                                          if inst.get("ai_analysis", {}).get("overall_sentiment") == "Bearish")
-                        st.metric("Bearish Signals", bearish_count)
-                    with col4:
-                        avg_confidence = np.mean([inst.get("confidence_score", 5) 
-                                                for inst in summary["instruments"]])
-                        st.metric("Avg Confidence", f"{avg_confidence:.1f}/10")
-                    
-                    # Store summary in session state
+                if isinstance(summary, dict) and "error" not in summary:
                     st.session_state.master_data_summary = summary
-                    
-                    # Save button for master data
-                    st.markdown("---")
-                    if st.button("💾 Save Master Data Summary to Database", key="save_master_data"):
-                        try:
-                            from tradingagents.database.db_service import log_event
-                            log_event("master_data_generated", {
-                                "total_instruments": summary.get("total_instruments", 0),
-                                "source": "phase2"
-                            })
-                            st.success("✅ Master data summary saved to database!")
-                        except Exception as e:
-                            st.error(f"❌ Failed to save: {str(e)}")
+                    st.success("Master data analysis completed!")
                 else:
-                    st.error(f"Error generating summary: {summary['error']}")
+                    st.error(f"Error generating summary: {summary.get('error','Unknown error') if isinstance(summary, dict) else 'Unknown error'}")
+        
+        if "master_data_summary" in st.session_state:
+            summary = st.session_state.master_data_summary
+            st.subheader("Analysis Summary")
+            col1s, col2s, col3s, col4s = st.columns(4)
+            with col1s:
+                st.metric("Total Instruments", summary.get("total_instruments", len(symbols)))
+            with col2s:
+                bullish_count = sum(1 for inst in summary.get("instruments", []) 
+                                   if inst.get("ai_analysis", {}).get("overall_sentiment") == "Bullish")
+                st.metric("Bullish Signals", bullish_count)
+            with col3s:
+                bearish_count = sum(1 for inst in summary.get("instruments", []) 
+                                   if inst.get("ai_analysis", {}).get("overall_sentiment") == "Bearish")
+                st.metric("Bearish Signals", bearish_count)
+            with col4s:
+                confs = [inst.get("confidence_score", inst.get("ai_analysis", {}).get("confidence", 5)) for inst in summary.get("instruments", [])]
+                avg_confidence = float(np.mean(confs)) if confs else 0.0
+                st.metric("Avg Confidence", f"{avg_confidence:.1f}/10")
+
+            # Save full summary payload to DB
+            st.markdown("---")
+            if st.button("💾 Save Master Data Summary to Database", key="save_master_data"):
+                try:
+                    from tradingagents.database.db_service import log_event, _make_json_serializable
+                    payload = {
+                        "summary": summary,
+                        "documents_processed": docs_count,
+                        "generated_at": datetime.now().isoformat(),
+                        "source": "phase2_master_data"
+                    }
+                    payload = _make_json_serializable(payload)
+                    ok = log_event("master_data_generated", payload)
+                    if ok:
+                        st.success("✅ Master data summary saved to database!")
+                    else:
+                        st.error("❌ Failed to save master data summary")
+                except Exception as e:
+                    st.error(f"❌ Failed to save: {str(e)}")
     
     with tab2:
         st.subheader("AI Document Analysis")
@@ -2550,6 +2548,264 @@ def phase4_session_management_execution():
         st.markdown('</div>', unsafe_allow_html=True)
 
 
+def phase5_results_analysis():
+    """Phase 5: Results & Analysis Modules - Trading journal, analysis, learning loop"""
+    # Initialize services (reuse Phase 4 services if available)
+    user_id = st.session_state.get("user_id", "default_user")
+    if 'session_manager' not in st.session_state:
+        st.session_state.session_manager = TradingSessionManager(user_id)
+    if 'trade_service' not in st.session_state:
+        st.session_state.trade_service = TradeExecutionService(user_id)
+
+    session_manager = st.session_state.session_manager
+    trade_service = st.session_state.trade_service
+
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "📊 Current Results Dashboard",
+        "❌ Failed Trade Analysis",
+        "📈 Historical Performance",
+        "🧠 Learning Feedback"
+    ])
+
+    with tab1:
+        st.markdown('<div class="feature-card">', unsafe_allow_html=True)
+        st.markdown("### 📊 Current Results Dashboard")
+
+        history = trade_service.get_trade_history(limit=500) or []
+        active = trade_service.get_active_trades() or []
+
+        closed_trades = [t for t in history if t.get('status') == 'closed']
+        winning_trades = [t for t in closed_trades if float(t.get('realized_pnl', 0)) > 0]
+        losing_trades = [t for t in closed_trades if float(t.get('realized_pnl', 0)) < 0]
+
+        total_realized = sum(float(t.get('realized_pnl', 0)) for t in closed_trades)
+        avg_win = np.mean([float(t.get('realized_pnl', 0)) for t in winning_trades]) if winning_trades else 0.0
+        avg_loss = np.mean([float(t.get('realized_pnl', 0)) for t in losing_trades]) if losing_trades else 0.0
+        win_rate = (len(winning_trades) / len(closed_trades) * 100) if closed_trades else 0.0
+
+        col_a, col_b, col_c, col_d = st.columns(4)
+        with col_a:
+            st.metric("Closed Trades", len(closed_trades))
+        with col_b:
+            st.metric("Win Rate", f"{win_rate:.1f}%")
+        with col_c:
+            st.metric("Avg Win", f"${avg_win:,.2f}")
+        with col_d:
+            st.metric("Avg Loss", f"${avg_loss:,.2f}")
+
+        col_e, col_f = st.columns(2)
+        with col_e:
+            st.metric("Realized P&L", f"${total_realized:,.2f}")
+        with col_f:
+            total_unrealized = sum(float(t.get('unrealized_pnl', 0)) for t in active)
+            st.metric("Unrealized P&L (Active)", f"${total_unrealized:,.2f}")
+
+        # Recent trades table
+        if history:
+            table = []
+            for t in history[:50]:
+                table.append({
+                    "Symbol": t.get('symbol', 'N/A'),
+                    "Type": t.get('trade_type', 'N/A'),
+                    "Qty": t.get('quantity', 0),
+                    "Entry": f"${float(t.get('entry_price', 0)):.2f}",
+                    "Exit": f"${float(t.get('exit_price', 0)):.2f}" if t.get('exit_price') else 'N/A',
+                    "Status": t.get('status', 'N/A'),
+                    "Realized P&L": f"${float(t.get('realized_pnl', t.get('unrealized_pnl', 0))):.2f}",
+                    "Entry Date": (t.get('entry_date') or '')[:19],
+                    "Exit Date": (t.get('exit_date') or '')[:19]
+                })
+            st.markdown("#### Recent Trades")
+            st.dataframe(pd.DataFrame(table), use_container_width=True, height=360)
+        else:
+            st.info("No trades recorded yet.")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    with tab2:
+        st.markdown('<div class="feature-card">', unsafe_allow_html=True)
+        st.markdown("### ❌ Failed Trade Analysis")
+        st.write("Tag losing trades with root causes and save for learning.")
+
+        history = trade_service.get_trade_history(limit=200) or []
+        losing_trades = [t for t in history if t.get('status') == 'closed' and float(t.get('realized_pnl', 0)) < 0]
+
+        if losing_trades:
+            options = [f"{t.get('symbol','N/A')} | {t.get('entry_date','')[:10]} → {t.get('exit_date','')[:10]} | P&L ${float(t.get('realized_pnl',0)):.2f}" for t in losing_trades]
+            idx = st.selectbox("Select a losing trade to analyze", list(range(len(options))), format_func=lambda i: options[i])
+
+            selected = losing_trades[idx]
+            col1, col2 = st.columns(2)
+            with col1:
+                reason = st.selectbox(
+                    "Primary Root Cause",
+                    [
+                        "stop_loss_hit",
+                        "late_entry",
+                        "false_breakout",
+                        "trend_reversal",
+                        "low_liquidity",
+                        "news_event",
+                        "execution_error",
+                        "other"
+                    ]
+                )
+                timeframe = st.selectbox("Timeframe Context", ["intraday", "swing", "multi-day"]) 
+                avoid_symbol = st.checkbox("Flag symbol for reduced priority")
+            with col2:
+                contributing = st.multiselect(
+                    "Contributing Factors",
+                    [
+                        "RSI_overbought",
+                        "ATR_too_low",
+                        "volume_dried_up",
+                        "below_sma20",
+                        "below_sma50",
+                        "gap_down",
+                        "market_weakness",
+                        "news_negative"
+                    ]
+                )
+                notes = st.text_area("Notes")
+
+            if st.button("💾 Save Failed Trade Analysis", type="primary"):
+                try:
+                    from tradingagents.database.db_service import log_event, _make_json_serializable
+                    payload = {
+                        "symbol": selected.get('symbol'),
+                        "entry_date": selected.get('entry_date'),
+                        "exit_date": selected.get('exit_date'),
+                        "entry_price": selected.get('entry_price'),
+                        "exit_price": selected.get('exit_price'),
+                        "realized_pnl": selected.get('realized_pnl'),
+                        "reason": reason,
+                        "timeframe": timeframe,
+                        "contributing": contributing,
+                        "notes": notes,
+                        "avoid_symbol": bool(avoid_symbol)
+                    }
+                    payload = _make_json_serializable(payload)
+                    ok = log_event("failed_trade_analysis", payload)
+                    if ok:
+                        st.success("Saved analysis.")
+                    else:
+                        st.error("Failed to save analysis.")
+                except Exception as e:
+                    st.error(f"Error saving analysis: {str(e)}")
+        else:
+            st.info("No losing trades found.")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    with tab3:
+        st.markdown('<div class="feature-card">', unsafe_allow_html=True)
+        st.markdown("### 📈 Historical Performance Tracking")
+
+        history = trade_service.get_trade_history(limit=1000) or []
+        if not history:
+            st.info("No history available.")
+        else:
+            # Equity curve (realized P&L cumulative)
+            df = pd.DataFrame([
+                {
+                    "date": pd.to_datetime(t.get('exit_date') or t.get('entry_date') or datetime.now().isoformat()),
+                    "pnl": float(t.get('realized_pnl', 0)) if t.get('status') == 'closed' else 0.0
+                }
+                for t in history
+            ]).sort_values("date")
+            df["equity"] = df["pnl"].cumsum()
+
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=df["date"], y=df["equity"], mode="lines", name="Equity"))
+            fig.update_layout(title="Equity Curve (Realized)", template='plotly_white', height=360)
+            st.plotly_chart(fig, use_container_width=True)
+
+            # Per-symbol performance
+            perf_rows = []
+            by_symbol = {}
+            for t in history:
+                sym = t.get('symbol', 'N/A')
+                by_symbol.setdefault(sym, []).append(t)
+            for sym, trades in by_symbol.items():
+                closed = [x for x in trades if x.get('status') == 'closed']
+                if not closed:
+                    continue
+                wins = [x for x in closed if float(x.get('realized_pnl', 0)) > 0]
+                losses = [x for x in closed if float(x.get('realized_pnl', 0)) < 0]
+                realized = sum(float(x.get('realized_pnl', 0)) for x in closed)
+                wr = (len(wins) / len(closed) * 100) if closed else 0
+                avg_pnl = realized / len(closed) if closed else 0
+                perf_rows.append({
+                    "Symbol": sym,
+                    "Trades": len(closed),
+                    "Win Rate %": round(wr, 1),
+                    "Realized P&L": round(realized, 2),
+                    "Avg P&L": round(avg_pnl, 2)
+                })
+            if perf_rows:
+                st.markdown("#### Per-Symbol Performance")
+                st.dataframe(pd.DataFrame(perf_rows).sort_values(["Win Rate %", "Realized P&L"], ascending=[False, False]), use_container_width=True, height=360)
+            else:
+                st.info("No closed trades to summarize.")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    with tab4:
+        st.markdown('<div class="feature-card">', unsafe_allow_html=True)
+        st.markdown("### 🧠 Learning Feedback Loop")
+        st.write("Data-driven suggestions to improve screening and risk parameters.")
+
+        history = trade_service.get_trade_history(limit=1000) or []
+        suggestions = []
+        # Suggest exclude or deprioritize symbols with negative expectancy and sufficient sample size
+        perf = {}
+        for t in history:
+            sym = t.get('symbol', 'N/A')
+            perf.setdefault(sym, {"n": 0, "realized": 0.0, "wins": 0})
+            if t.get('status') == 'closed':
+                perf[sym]["n"] += 1
+                pnl = float(t.get('realized_pnl', 0))
+                perf[sym]["realized"] += pnl
+                if pnl > 0:
+                    perf[sym]["wins"] += 1
+        for sym, stats in perf.items():
+            n = stats["n"]
+            if n >= 5:
+                expectancy = stats["realized"] / n if n else 0.0
+                wr = (stats["wins"] / n * 100) if n else 0.0
+                if expectancy < 0 and wr < 45:
+                    suggestions.append({
+                        "symbol": sym,
+                        "action": "deprioritize",
+                        "reason": f"Negative expectancy (${expectancy:.2f}/trade) and low win rate ({wr:.1f}%)."
+                    })
+
+        # Suggest tightening Phase 1 thresholds if high false breakouts (proxy: many small losses)
+        avg_loss = np.mean([float(t.get('realized_pnl', 0)) for t in history if t.get('status') == 'closed' and float(t.get('realized_pnl', 0)) < 0]) if history else 0
+        if avg_loss > -50:  # frequent small losses: tighten
+            suggestions.append({
+                "symbol": "global",
+                "action": "tighten_screening",
+                "reason": "Frequent small losses detected. Consider raising volume spike to 1.6x and RSI band to 45-60."
+            })
+
+        if suggestions:
+            st.markdown("#### Suggested Adjustments")
+            st.dataframe(pd.DataFrame(suggestions), use_container_width=True)
+
+            if st.button("💾 Apply Suggestions (log)", type="primary"):
+                try:
+                    from tradingagents.database.db_service import log_event, _make_json_serializable
+                    payload = {"suggestions": suggestions, "generated_at": datetime.now().isoformat()}
+                    payload = _make_json_serializable(payload)
+                    ok = log_event("learning_feedback_applied", payload)
+                    if ok:
+                        st.success("Suggestions logged. Review engine configs separately to apply.")
+                    else:
+                        st.error("Failed to log suggestions.")
+                except Exception as e:
+                    st.error(f"Error logging suggestions: {str(e)}")
+        else:
+            st.info("No suggestions at this time. Keep trading to collect more data.")
+        st.markdown('</div>', unsafe_allow_html=True)
+
 def main():
     st.markdown('<div class="section-header">AlphaAnalyst Trading AI Agent - Phase 1</div>', unsafe_allow_html=True)
     
@@ -2601,9 +2857,9 @@ def main():
     elif st.session_state.active_phase == phases[3]:
         phase4_session_management_execution()
     elif st.session_state.active_phase == phases[4]:
-        st.info("Phase 5: Results & Analysis Modules - Coming Soon!")
+        phase5_results_analysis()
     elif st.session_state.active_phase == phases[5]:
-        st.info("Phase 6: Advanced Features & Polish - Coming Soon!")
+        phase6_advanced_features()
     
     # Quick Stock Analysis (only for Phase 1)
     if st.session_state.active_phase == phases[0]:
@@ -2643,5 +2899,245 @@ def main():
         st.markdown('</div>', unsafe_allow_html=True)
     
                     
+def phase6_advanced_features():
+    """Phase 6: Advanced Features & Polish - Chatbot, search, performance, UI"""
+    user_id = st.session_state.get("user_id", "default_user")
+    if 'session_manager' not in st.session_state:
+        st.session_state.session_manager = TradingSessionManager(user_id)
+    if 'trade_service' not in st.session_state:
+        st.session_state.trade_service = TradeExecutionService(user_id)
+
+    session_manager = st.session_state.session_manager
+    trade_service = st.session_state.trade_service
+
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "🤖 Trading Chatbot",
+        "🔎 Advanced Search",
+        "⚙️ Performance Tools",
+        "🎨 UI & Preferences"
+    ])
+
+    with tab1:
+        st.markdown('<div class="feature-card">', unsafe_allow_html=True)
+        st.markdown("### 🤖 Trading Chatbot")
+
+        if "chat_messages" not in st.session_state:
+            st.session_state.chat_messages = [
+                {"role": "assistant", "content": "Hi! Ask me about symbols, recent analyses, or trades."}
+            ]
+
+        for msg in st.session_state.chat_messages:
+            with st.chat_message(msg["role"]):
+                st.write(msg["content"])
+
+        user_msg = st.chat_input("Ask about a symbol, strategy, or results...")
+        if user_msg:
+            st.session_state.chat_messages.append({"role": "user", "content": user_msg})
+            with st.chat_message("user"):
+                st.write(user_msg)
+
+            response_text = ""
+            try:
+                # Lightweight intent: extract a symbol token if present
+                import re
+                tokens = re.findall(r"[A-Z]{2,6}(?:\\.NS)?", user_msg.upper())
+                symbol = tokens[0] if tokens else None
+
+                # Try AIResearchAnalyzer profile if symbol exists
+                if symbol:
+                    analyzer = AIResearchAnalyzer()
+                    profile = analyzer.analyze_instrument_profile(symbol)
+                    analyzer.close()
+                    ai = profile.get("ai_analysis", {}) if isinstance(profile, dict) else {}
+                    md = profile.get("market_data", {}) if isinstance(profile, dict) else {}
+                    if ai and "error" not in ai:
+                        response_text += f"Symbol: {symbol}\n"
+                        response_text += f"Sentiment: {ai.get('overall_sentiment','N/A')} | Confidence: {ai.get('confidence','N/A')}/10\n"
+                        if md and "error" not in md:
+                            response_text += f"Price: ${md.get('current_price','N/A')} | 30d Δ: {md.get('price_change_pct','N/A')}%\n"
+                        analysis_text = ai.get('analysis_text') or ai.get('analysis')
+                        if analysis_text:
+                            response_text += f"\nKey Points:\n{analysis_text[:600]}"  # concise
+                    else:
+                        # Fallback to quick price via yfinance
+                        try:
+                            info, _ = get_stock_data(symbol)
+                            price = info.get("regularMarketPrice") or info.get("currentPrice") or info.get("previousClose")
+                            response_text += f"{symbol} current price: ${price}\n(Enable GROQ_API_KEY or GROK_API_KEY for deeper AI insights.)"
+                        except Exception:
+                            response_text = f"I couldn't analyze {symbol} right now. Try again later."
+                else:
+                    # Non-symbol general question: summarize recent system state
+                    recent = []
+                    if 'phase1_results' in st.session_state:
+                        df = st.session_state.phase1_results
+                        if hasattr(df, 'to_dict'):
+                            passed = df[df['Pass'] == '✅']['Symbol'].tolist() if 'Pass' in df.columns else []
+                            recent.append(f"Phase 1 passed: {', '.join(passed[:10])}{'...' if len(passed)>10 else ''}")
+                    if 'phase2_results' in st.session_state:
+                        res = st.session_state.phase2_results
+                        recent.append(f"Latest fire test score: {res.get('score','N/A')}/{res.get('max_score','N/A')}")
+                    if 'document_analyses' in st.session_state:
+                        recent.append(f"Recent document analyses: {len(st.session_state.document_analyses)}")
+                    response_text = "\n".join(recent) if recent else "I can help with symbols (e.g., AAPL) or summarize recent analyses."
+
+                # Log chat event
+                try:
+                    from tradingagents.database.db_service import log_event, _make_json_serializable
+                    payload = _make_json_serializable({"q": user_msg, "a": response_text[:1500]})
+                    log_event("chatbot_interaction", payload)
+                except Exception:
+                    pass
+
+            except Exception as e:
+                response_text = f"Error: {str(e)}"
+
+            st.session_state.chat_messages.append({"role": "assistant", "content": response_text})
+            with st.chat_message("assistant"):
+                st.write(response_text)
+
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    with tab2:
+        st.markdown('<div class="feature-card">', unsafe_allow_html=True)
+        st.markdown("### 🔎 Advanced Search & Filtering")
+
+        colf1, colf2 = st.columns(2)
+        with colf1:
+            st.markdown("#### Trades Search")
+            symbol = st.text_input("Symbol filter (optional)")
+            status = st.selectbox("Status", ["any", "open", "closed"], index=0)
+            min_pnl = st.number_input("Min Realized P&L", value=float(0))
+            max_pnl = st.number_input("Max Realized P&L", value=float(1_000_000))
+            start_date = st.date_input("Start date", value=None)
+            end_date = st.date_input("End date", value=None)
+            if st.button("Search Trades", key="search_trades"):
+                trades = trade_service.get_trade_history(limit=1000) or []
+                filtered = []
+                for t in trades:
+                    if symbol and t.get('symbol','').upper() != symbol.upper():
+                        continue
+                    if status != "any":
+                        if status == "open" and t.get('status') == 'closed':
+                            continue
+                        if status == "closed" and t.get('status') != 'closed':
+                            continue
+                    realized = float(t.get('realized_pnl', 0)) if t.get('status') == 'closed' else 0.0
+                    if realized < min_pnl or realized > max_pnl:
+                        continue
+                    dt = t.get('exit_date') or t.get('entry_date')
+                    if start_date and dt:
+                        try:
+                            d = pd.to_datetime(dt).date()
+                            if d < start_date:
+                                continue
+                        except Exception:
+                            pass
+                    if end_date and dt:
+                        try:
+                            d = pd.to_datetime(dt).date()
+                            if d > end_date:
+                                continue
+                        except Exception:
+                            pass
+                    filtered.append(t)
+                if filtered:
+                    rows = []
+                    for t in filtered[:300]:
+                        rows.append({
+                            "Symbol": t.get('symbol','N/A'),
+                            "Status": t.get('status','N/A'),
+                            "Realized P&L": float(t.get('realized_pnl', t.get('unrealized_pnl', 0)) or 0),
+                            "Entry": t.get('entry_date','')[:19],
+                            "Exit": (t.get('exit_date') or '')[:19]
+                        })
+                    st.dataframe(pd.DataFrame(rows), use_container_width=True, height=360)
+                else:
+                    st.info("No matching trades.")
+
+        with colf2:
+            st.markdown("#### Research Documents Search")
+            try:
+                doc_manager = DocumentManager()
+                doc_symbol = st.text_input("Symbol filter (optional)", key="doc_symbol")
+                keyword = st.text_input("Keyword contains (optional)")
+                if st.button("Search Documents", key="search_docs"):
+                    docs = doc_manager.get_documents(symbol=doc_symbol if doc_symbol else None) or []
+                    results = []
+                    for d in docs:
+                        content = d.get("file_content", "") or ""
+                        title = d.get("file_name", "") or ""
+                        if keyword and keyword.lower() not in (content.lower() + " " + title.lower()):
+                            continue
+                        results.append({
+                            "File": title,
+                            "Symbol": d.get("symbol","N/A"),
+                            "Snippet": (content[:160] + "...") if len(content) > 160 else content,
+                            "Uploaded": (d.get("uploaded_at") or d.get("created_at") or "")[:19]
+                        })
+                    if results:
+                        st.dataframe(pd.DataFrame(results), use_container_width=True, height=360)
+                    else:
+                        st.info("No matching documents.")
+                doc_manager.close()
+            except Exception as e:
+                st.error(f"Document search unavailable: {str(e)}")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    with tab3:
+        st.markdown('<div class="feature-card">', unsafe_allow_html=True)
+        st.markdown("### ⚙️ Performance & Optimization")
+
+        @st.cache_data(ttl=300)
+        def cached_price_snapshot(symbols):
+            data = []
+            for sym in symbols:
+                try:
+                    info, _ = get_stock_data(sym)
+                    price = info.get("regularMarketPrice") or info.get("currentPrice") or info.get("previousClose")
+                    data.append({"Symbol": sym, "Price": price})
+                except Exception:
+                    data.append({"Symbol": sym, "Price": None})
+            return pd.DataFrame(data)
+
+        colp1, colp2 = st.columns(2)
+        with colp1:
+            if st.button("🧹 Clear Cache", key="clear_cache"):
+                try:
+                    st.cache_data.clear()
+                    st.success("Cache cleared.")
+                except Exception as e:
+                    st.error(f"Could not clear cache: {str(e)}")
+        with colp2:
+            if st.button("⚡ Prefetch Watchlist Prices", key="prefetch_prices"):
+                symbols = get_watchlist_symbols()
+                df = cached_price_snapshot(symbols)
+                st.success(f"Prefetched {len(df)} prices (cached 5 minutes)")
+                st.dataframe(df, use_container_width=True, height=300)
+
+        st.markdown("#### Tips")
+        st.write("- Use cached snapshots for watchlist.\n- Reduce table sizes with compact mode.\n- Close heavy tabs when not in use.")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    with tab4:
+        st.markdown('<div class="feature-card">', unsafe_allow_html=True)
+        st.markdown("### 🎨 UI & Preferences")
+        compact = st.checkbox("Compact table mode", value=st.session_state.get("ui_compact", False))
+        st.session_state.ui_compact = compact
+        st.info("Compact mode reduces table heights and whitespace across views.")
+
+        # Apply lightweight styling adjustments
+        if compact:
+            st.markdown(
+                """
+                <style>
+                .block-container { padding-top: 0.5rem; padding-bottom: 0.5rem; }
+                .stDataFrame { font-size: 0.9rem; }
+                </style>
+                """,
+                unsafe_allow_html=True
+            )
+        st.markdown('</div>', unsafe_allow_html=True)
+
 if __name__ == "__main__":
     main()
