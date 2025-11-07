@@ -4,6 +4,7 @@ Handles all CRUD operations for the trading application tables
 """
 from typing import Dict, List, Optional, Any
 from datetime import datetime
+import math
 import numpy as np
 import pandas as pd
 from .config import get_supabase
@@ -25,7 +26,10 @@ def _make_json_serializable(obj):
     
     # Check specific numpy float types
     if isinstance(obj, (np.floating, np.float64, np.float32, np.float16)):
-        return float(obj)
+        value = float(obj)
+        if math.isnan(value) or math.isinf(value):
+            return None
+        return value
     
     # Check for numpy bool_ (must check as numpy.generic subclass)
     if type(obj).__name__ == 'bool_' or isinstance(obj, np.bool_):
@@ -42,7 +46,15 @@ def _make_json_serializable(obj):
         return obj.to_dict()
     if isinstance(obj, pd.Timestamp):
         return obj.isoformat()
+    if isinstance(obj, pd.Timedelta):
+        return obj.total_seconds()
     
+    # Handle plain Python floats (to catch NaN/inf)
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+
     # Handle dictionaries (recursive)
     if isinstance(obj, dict):
         return {key: _make_json_serializable(value) for key, value in obj.items()}
@@ -98,6 +110,16 @@ def list_all_tables() -> List[Dict[str, str]]:
             "name": "data_health",
             "description": "Data quality and health monitoring",
             "columns": ["symbol", "data_fetch_status", "last_updated", "health_score"]
+        },
+        {
+            "name": "master_data",
+            "description": "Master data analysis with RAG embeddings for semantic search",
+            "columns": ["id", "symbol", "content_text", "embedding_vector", "full_data", "generated_at", "analysis_timestamp"]
+        },
+        {
+            "name": "instrument_profiles",
+            "description": "Instrument-level profiles saved with RAG embeddings",
+            "columns": ["id", "symbol", "profile_text", "embedding_vector", "profile_data", "generated_at", "analysis_timestamp", "source"]
         }
     ]
     return tables
@@ -503,3 +525,350 @@ def get_data_health(symbol: Optional[str] = None) -> List[Dict]:
         print(f"Error getting data health: {e}")
         return []
 
+
+# ============================================================================
+# MASTER DATA TABLE OPERATIONS (for RAG storage)
+# ============================================================================
+
+def save_master_data_with_rag(
+    symbol: str,
+    content_text: str,
+    embedding_vector: Optional[List[float]],
+    full_data: Dict,
+    analysis_timestamp: Optional[str] = None
+) -> Optional[Dict]:
+    """
+    Save master data for a single instrument with embedding for RAG retrieval.
+    
+    Args:
+        symbol: Stock symbol
+        content_text: Text representation of master data for embedding
+        embedding_vector: Generated embedding vector (list of floats)
+        full_data: Complete master data JSON object
+        analysis_timestamp: Timestamp from the analysis (optional)
+    
+    Returns:
+        Created record or None if failed
+    """
+    supabase = get_supabase()
+    if not supabase:
+        raise ValueError("Supabase client not configured. Check SUPABASE_URL and SUPABASE_KEY environment variables.")
+    
+    try:
+        # Convert numpy/pandas types to JSON-serializable types
+        serializable_full_data = _make_json_serializable(full_data)
+        
+        analysis_ts = analysis_timestamp or datetime.now().isoformat()
+        payload = {
+            "symbol": symbol.upper(),
+            "content_text": content_text,
+            "embedding_vector": embedding_vector if embedding_vector else None,
+            "full_data": serializable_full_data,
+            "generated_at": datetime.now().isoformat(),
+            "analysis_timestamp": analysis_ts
+        }
+        
+        # Try to find existing record with same symbol and analysis_timestamp
+        try:
+            existing = supabase.table("master_data")\
+                .select("id")\
+                .eq("symbol", symbol.upper())\
+                .eq("analysis_timestamp", analysis_ts)\
+                .limit(1)\
+                .execute()
+            
+            if existing.data and len(existing.data) > 0:
+                # Update existing record
+                record_id = existing.data[0]["id"]
+                result = supabase.table("master_data")\
+                    .update(payload)\
+                    .eq("id", record_id)\
+                    .execute()
+            else:
+                # Insert new record
+                result = supabase.table("master_data").insert(payload).execute()
+        except Exception as upsert_error:
+            # If check fails, just try insert (will create duplicate if exists)
+            result = supabase.table("master_data").insert(payload).execute()
+        
+        if result.data and len(result.data) > 0:
+            return result.data[0]
+        else:
+            raise ValueError(f"Insert/update returned no data. Response: {result}")
+    except Exception as e:
+        # If table doesn't exist, provide helpful error
+        if "relation" in str(e).lower() or "does not exist" in str(e).lower():
+            print(f"Error: master_data table does not exist. Please create it first.")
+            raise ValueError(
+                "master_data table does not exist. Please run the SQL migration to create it:\n"
+                "CREATE TABLE master_data (\n"
+                "  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,\n"
+                "  symbol text NOT NULL,\n"
+                "  content_text text,\n"
+                "  embedding_vector jsonb,\n"
+                "  full_data jsonb,\n"
+                "  generated_at timestamp with time zone DEFAULT now(),\n"
+                "  analysis_timestamp timestamp with time zone\n"
+                ");"
+            )
+        print(f"Error saving master data for {symbol}: {e}")
+        raise
+
+
+def save_instrument_profile_with_rag(
+    symbol: str,
+    profile_text: str,
+    embedding_vector: Optional[List[float]],
+    profile_data: Dict,
+    analysis_timestamp: Optional[str] = None,
+    source: str = "instrument_profile"
+) -> Optional[Dict]:
+    """Save individual instrument profile with RAG embedding."""
+
+    supabase = get_supabase()
+    if not supabase:
+        raise ValueError("Supabase client not configured. Check SUPABASE_URL and SUPABASE_KEY environment variables.")
+
+    serializable_data = _make_json_serializable(profile_data)
+    analysis_ts = analysis_timestamp or datetime.now().isoformat()
+    payload = {
+        "symbol": symbol.upper(),
+        "profile_text": profile_text,
+        "embedding_vector": embedding_vector if embedding_vector else None,
+        "profile_data": serializable_data,
+        "generated_at": datetime.now().isoformat(),
+        "analysis_timestamp": analysis_ts,
+        "source": source
+    }
+
+    def _attempt_save(data: Dict[str, Any]) -> Optional[Dict]:
+        existing = supabase.table("instrument_profiles") \
+            .select("id") \
+            .eq("symbol", symbol.upper()) \
+            .eq("analysis_timestamp", analysis_ts) \
+            .limit(1) \
+            .execute()
+
+        if existing.data:
+            record_id = existing.data[0]["id"]
+            result = supabase.table("instrument_profiles") \
+                .update(data) \
+                .eq("id", record_id) \
+                .select("*") \
+                .execute()
+        else:
+            result = supabase.table("instrument_profiles") \
+                .insert(data) \
+                .select("*") \
+                .execute()
+
+        if result.data:
+            return result.data[0]
+        return None
+
+    try:
+        saved = _attempt_save(payload)
+        if saved:
+            return saved
+    except Exception as e:
+        error_msg = str(e).lower()
+        if "column" in error_msg and "source" in error_msg:
+            payload.pop("source", None)
+            saved = _attempt_save(payload)
+            if saved:
+                return saved
+        if "relation" in error_msg or "does not exist" in error_msg:
+            raise ValueError(
+                "instrument_profiles table does not exist. Please run the SQL migration to create it:\n"
+                "CREATE TABLE instrument_profiles (\n"
+                "  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,\n"
+                "  symbol text NOT NULL,\n"
+                "  profile_text text,\n"
+                "  embedding_vector jsonb,\n"
+                "  profile_data jsonb,\n"
+                "  generated_at timestamp with time zone DEFAULT now(),\n"
+                "  analysis_timestamp timestamp with time zone\n"
+                ");"
+            ) from e
+        raise
+
+    raise ValueError("Insert/update returned no data. Please check Supabase logs for instrument_profiles.")
+
+
+def save_volume_screening_with_rag(
+    screening_results: Dict,
+    summary_text: str,
+    embedding_vector: Optional[List[float]] = None,
+    run_metadata: Optional[Dict[str, Any]] = None
+) -> Optional[Dict]:
+    """Persist volume screening runs with optional RAG embedding."""
+
+    supabase = get_supabase()
+    if not supabase:
+        raise ValueError("Supabase client not configured. Check SUPABASE_URL and SUPABASE_KEY environment variables.")
+
+    payload = {
+        "run_timestamp": datetime.now().isoformat(),
+        "summary_text": summary_text,
+        "embedding_vector": embedding_vector if embedding_vector else None,
+        "screening_results": _make_json_serializable(screening_results),
+        "metadata": _make_json_serializable(run_metadata or {})
+    }
+
+    try:
+        result = supabase.table("volume_screening_runs").insert(payload).select("*").execute()
+        if result.data:
+            return result.data[0]
+        raise ValueError(f"Insert returned no data. Response: {result}")
+    except Exception as e:
+        if "relation" in str(e).lower() or "does not exist" in str(e).lower():
+            raise ValueError(
+                "volume_screening_runs table does not exist. Please run the SQL migration to create it:\n"
+                "CREATE TABLE volume_screening_runs (\n"
+                "  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,\n"
+                "  run_timestamp timestamp with time zone DEFAULT now(),\n"
+                "  summary_text text,\n"
+                "  embedding_vector jsonb,\n"
+                "  screening_results jsonb,\n"
+                "  metadata jsonb\n"
+                ");"
+            ) from e
+        raise
+
+
+def save_fire_test_with_rag(
+    symbol: str,
+    fire_result: Dict[str, Any],
+    summary_text: str,
+    embedding_vector: Optional[List[float]] = None,
+    run_metadata: Optional[Dict[str, Any]] = None
+) -> Optional[Dict]:
+    """Persist a Phase-2 Fire Test run with optional RAG embedding."""
+
+    supabase = get_supabase()
+    if not supabase:
+        raise ValueError("Supabase client not configured. Check SUPABASE_URL and SUPABASE_KEY environment variables.")
+
+    payload = {
+        "symbol": symbol.upper(),
+        "run_timestamp": datetime.now().isoformat(),
+        "summary_text": summary_text,
+        "embedding_vector": embedding_vector if embedding_vector else None,
+        "fire_result": _make_json_serializable(fire_result),
+        "metadata": _make_json_serializable(run_metadata or {})
+    }
+
+    try:
+        result = supabase.table("fire_test_runs").insert(payload).select("*").execute()
+        if result.data:
+            return result.data[0]
+        raise ValueError(f"Insert returned no data. Response: {result}")
+    except Exception as e:
+        if "relation" in str(e).lower() or "does not exist" in str(e).lower():
+            raise ValueError(
+                "fire_test_runs table does not exist. Please run the SQL migration to create it:\n"
+                "CREATE TABLE fire_test_runs (\n"
+                "  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,\n"
+                "  symbol text NOT NULL,\n"
+                "  run_timestamp timestamptz DEFAULT now(),\n"
+                "  summary_text text,\n"
+                "  embedding_vector jsonb,\n"
+                "  fire_result jsonb,\n"
+                "  metadata jsonb\n"
+                ");"
+            ) from e
+        raise
+
+def get_master_data(
+    symbol: Optional[str] = None,
+    limit: int = 100
+) -> List[Dict]:
+    """Get master data records, optionally filtered by symbol"""
+    supabase = get_supabase()
+    if not supabase:
+        return []
+    
+    try:
+        query = supabase.table("master_data").select("*")
+        
+        if symbol:
+            query = query.eq("symbol", symbol.upper())
+        
+        query = query.order("generated_at", desc=True).limit(limit)
+        result = query.execute()
+        return result.data if result.data else []
+    except Exception as e:
+        # If table doesn't exist, return empty list
+        if "relation" in str(e).lower() or "does not exist" in str(e).lower():
+            return []
+        print(f"Error getting master data: {e}")
+        return []
+
+
+def get_instrument_profiles(
+    symbol: Optional[str] = None,
+    limit: int = 100
+) -> List[Dict]:
+    """Get instrument profile records, optionally filtered by symbol."""
+
+    supabase = get_supabase()
+    if not supabase:
+        return []
+
+    try:
+        query = supabase.table("instrument_profiles").select("*")
+
+        if symbol:
+            query = query.eq("symbol", symbol.upper())
+
+        query = query.order("generated_at", desc=True).limit(limit)
+        result = query.execute()
+        return result.data if result.data else []
+    except Exception as e:
+        if "relation" in str(e).lower() or "does not exist" in str(e).lower():
+            return []
+        print(f"Error getting instrument profiles: {e}")
+        return []
+
+
+def get_latest_master_data(symbol: str) -> Optional[Dict]:
+    """Get the latest master data for a symbol"""
+    supabase = get_supabase()
+    if not supabase:
+        return None
+    
+    try:
+        result = supabase.table("master_data")\
+            .select("*")\
+            .eq("symbol", symbol.upper())\
+            .order("generated_at", desc=True)\
+            .limit(1)\
+            .execute()
+        return result.data[0] if result.data else None
+    except Exception as e:
+        if "relation" in str(e).lower() or "does not exist" in str(e).lower():
+            return None
+        print(f"Error getting latest master data for {symbol}: {e}")
+        return None
+
+
+def get_latest_instrument_profile(symbol: str) -> Optional[Dict]:
+    """Get the latest instrument profile for a symbol."""
+
+    supabase = get_supabase()
+    if not supabase:
+        return None
+
+    try:
+        result = supabase.table("instrument_profiles") \
+            .select("*") \
+            .eq("symbol", symbol.upper()) \
+            .order("generated_at", desc=True) \
+            .limit(1) \
+            .execute()
+        return result.data[0] if result.data else None
+    except Exception as e:
+        if "relation" in str(e).lower() or "does not exist" in str(e).lower():
+            return None
+        print(f"Error getting latest instrument profile for {symbol}: {e}")
+        return None

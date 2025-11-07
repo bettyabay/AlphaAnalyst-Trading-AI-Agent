@@ -367,6 +367,169 @@ class AIResearchAnalyzer:
         except Exception as e:
             return {"error": str(e)}
     
+    def save_master_data_summary_with_rag(self, summary: Dict) -> Dict:
+        """
+        Save master data summary to database with embeddings for RAG retrieval.
+        Saves each instrument as a separate row in the master_data table.
+        
+        Args:
+            summary: Master data summary dictionary from get_master_data_summary()
+        
+        Returns:
+            Dictionary with success status and details
+        """
+        try:
+            from ..database.db_service import save_master_data_with_rag
+            from datetime import datetime
+            
+            if "error" in summary:
+                return {"success": False, "error": summary.get("error")}
+            
+            instruments = summary.get("instruments", [])
+            analysis_timestamp = summary.get("analysis_timestamp", datetime.now().isoformat())
+            
+            saved_count = 0
+            failed_count = 0
+            errors = []
+            
+            for instrument in instruments:
+                try:
+                    symbol = instrument.get("symbol")
+                    if not symbol:
+                        failed_count += 1
+                        errors.append(f"Missing symbol in instrument profile")
+                        continue
+                    
+                    # Convert to text for embedding
+                    content_text = self._master_data_to_text(instrument)
+                    
+                    # Generate embedding using document manager
+                    embedding_vector = self.document_manager._generate_embedding(content_text)
+                    
+                    # Save to database
+                    result = save_master_data_with_rag(
+                        symbol=symbol,
+                        content_text=content_text,
+                        embedding_vector=embedding_vector,
+                        full_data=instrument,
+                        analysis_timestamp=analysis_timestamp
+                    )
+                    
+                    if result:
+                        saved_count += 1
+                    else:
+                        failed_count += 1
+                        errors.append(f"Failed to save {symbol}: No result returned")
+                        
+                except Exception as e:
+                    failed_count += 1
+                    error_msg = str(e)
+                    errors.append(f"Failed to save {instrument.get('symbol', 'Unknown')}: {error_msg}")
+                    # Continue with other instruments even if one fails
+                    continue
+            
+            return {
+                "success": saved_count > 0,
+                "saved_count": saved_count,
+                "failed_count": failed_count,
+                "total_instruments": len(instruments),
+                "errors": errors[:10] if errors else [],  # Limit error messages
+                "analysis_timestamp": analysis_timestamp
+            }
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+    
+    def _master_data_to_text(self, instrument_profile: Dict) -> str:
+        """Convert instrument profile to text format for embedding generation"""
+        try:
+            symbol = instrument_profile.get("symbol", "Unknown")
+            ai_analysis = instrument_profile.get("ai_analysis", {})
+            market_data = instrument_profile.get("market_data", {})
+            doc_insights = instrument_profile.get("document_insights", [])
+            news_sentiment = instrument_profile.get("news_sentiment", {})
+            
+            # Build comprehensive text representation
+            text_parts = [
+                f"Master Data Analysis for {symbol}",
+                f"Analysis Timestamp: {instrument_profile.get('analysis_timestamp', 'N/A')}",
+                f"Confidence Score: {instrument_profile.get('confidence_score', 'N/A')}/10",
+                ""
+            ]
+            
+            # Market Data Section
+            if "error" not in market_data:
+                text_parts.extend([
+                    "Market Data:",
+                    f"  Current Price: ${market_data.get('current_price', 'N/A')}",
+                    f"  30-day Price Change: {market_data.get('price_change_pct', 'N/A')}%",
+                    f"  Volume: {market_data.get('volume', 'N/A')}",
+                    f"  30-day High: ${market_data.get('high_30d', 'N/A')}",
+                    f"  30-day Low: ${market_data.get('low_30d', 'N/A')}",
+                    f"  Volatility: {market_data.get('volatility', 'N/A')}",
+                    f"  Data Source: {market_data.get('source', 'N/A')}",
+                    ""
+                ])
+            else:
+                text_parts.append(f"Market Data: {market_data.get('error', 'Not available')}\n")
+            
+            # AI Analysis Section
+            if "error" not in ai_analysis:
+                text_parts.extend([
+                    "AI Analysis:",
+                    f"  Overall Sentiment: {ai_analysis.get('overall_sentiment', 'N/A')}",
+                    f"  Recommendation: {ai_analysis.get('recommendation', 'N/A')}",
+                    f"  Confidence: {ai_analysis.get('confidence', 'N/A')}/10",
+                    ""
+                ])
+                if ai_analysis.get("analysis_text"):
+                    # Truncate analysis text to avoid embedding size limits
+                    analysis_text = ai_analysis.get('analysis_text', '')
+                    if len(analysis_text) > 1000:
+                        analysis_text = analysis_text[:1000] + "..."
+                    text_parts.append(f"  Analysis Text: {analysis_text}")
+                    text_parts.append("")
+            else:
+                text_parts.append(f"AI Analysis: {ai_analysis.get('error', 'Not available')}\n")
+            
+            # Document Insights Section
+            if doc_insights:
+                text_parts.append("Document Insights:")
+                for idx, insight in enumerate(doc_insights, 1):
+                    signals = insight.get("signals", {})
+                    if signals.get("success"):
+                        text_parts.append(
+                            f"  Document {idx} ({insight.get('filename', 'Unknown')}): "
+                            f"Sentiment: {signals.get('overall_sentiment', 'N/A')}, "
+                            f"Confidence: {signals.get('confidence', 'N/A')}/10, "
+                            f"Bullish Signals: {len(signals.get('bullish_signals', []))}, "
+                            f"Bearish Signals: {len(signals.get('bearish_signals', []))}"
+                        )
+                text_parts.append("")
+            else:
+                text_parts.append("Document Insights: No documents available\n")
+            
+            # News Sentiment Section
+            if news_sentiment.get("news_count", 0) > 0:
+                text_parts.extend([
+                    "News Sentiment:",
+                    f"  Sentiment Score: {news_sentiment.get('sentiment_score', 'N/A')}",
+                    f"  News Count: {news_sentiment.get('news_count', 0)}",
+                    f"  Positive News: {news_sentiment.get('positive_news', 0)}",
+                    f"  Negative News: {news_sentiment.get('negative_news', 0)}",
+                    f"  Neutral News: {news_sentiment.get('neutral_news', 0)}",
+                    ""
+                ])
+            
+            return "\n".join(text_parts)
+        except Exception as e:
+            # Fallback: return JSON string representation
+            import json
+            return json.dumps(instrument_profile, indent=2, default=str)
+    
     def close(self):
         """Close connections"""
         self.document_manager.close()

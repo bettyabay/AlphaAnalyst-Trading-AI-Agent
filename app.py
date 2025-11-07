@@ -646,7 +646,7 @@ def phase1_foundation_data():
         {"Symbol": symbol, "Company": name} 
         for symbol, name in WATCHLIST_STOCKS.items()
     ])
-    st.dataframe(watchlist_df, use_container_width=True)
+    st.dataframe(watchlist_df, width='stretch')
     st.markdown('</div>', unsafe_allow_html=True)
     
     # Data ingestion
@@ -655,7 +655,7 @@ def phase1_foundation_data():
     col1, col2 = st.columns(2)
     
     with col1:
-        if st.button("Ingest All Historical Data", use_container_width=True, key="ingest_all_data"):
+        if st.button("Ingest All Historical Data", width='stretch', key="ingest_all_data"):
             pipeline = DataIngestionPipeline()
             
             # Create progress tracking
@@ -724,7 +724,7 @@ def phase1_foundation_data():
                 {"Symbol": symbol, "Status": "✅ Success" if success else "⚠️ Issues"}
                 for symbol, success in results.items()
             ])
-            st.dataframe(results_df, use_container_width=True)
+            st.dataframe(results_df, width='stretch')
             
             # Clear progress indicators
             progress_bar.empty()
@@ -732,7 +732,7 @@ def phase1_foundation_data():
 
     # New: 5-minute intraday ingestion (past 2 years)
     with col1:
-        if st.button("Ingest All Historical 5-min Data (2 years)", use_container_width=True, key="ingest_all_5min"):
+        if st.button("Ingest All Historical 5-min Data (2 years)", width='stretch', key="ingest_all_5min"):
             pipeline = DataIngestionPipeline()
             progress_bar = st.progress(0)
             status_text = st.empty()
@@ -775,13 +775,13 @@ def phase1_foundation_data():
                 {"Symbol": symbol, "Status": "✅ Success" if success else "⚠️ Issues"}
                 for symbol, success in results_5min.items()
             ])
-            st.dataframe(results_df, use_container_width=True)
+            st.dataframe(results_df, width='stretch')
 
             progress_bar.empty()
             status_text.empty()
     
     with col2:
-        if st.button("Check Data Status", use_container_width=True, key="main_data_status"):
+        if st.button("Check Data Status", width='stretch', key="main_data_status"):
             sb = get_supabase()
             if sb:
                 # Supabase path: compute counts per symbol from market_data
@@ -801,7 +801,7 @@ def phase1_foundation_data():
                         "Completion %": f"{min(100, (count/1260)*100):.1f}%"  # 5 years = 1260 trading days
                     })
                 status_df = pd.DataFrame(rows)
-                st.dataframe(status_df, use_container_width=True)
+                st.dataframe(status_df, width='stretch')
 
                 # Also show 5-min data counts if table exists
                 rows_5min = []
@@ -826,7 +826,7 @@ def phase1_foundation_data():
                     })
                 status_df_5min = pd.DataFrame(rows_5min)
                 st.subheader("5-minute data status")
-                st.dataframe(status_df_5min, use_container_width=True)
+                st.dataframe(status_df_5min, width='stretch')
             else:
                 pipeline = DataIngestionPipeline()
                 status = pipeline.get_data_completion_status()
@@ -840,7 +840,7 @@ def phase1_foundation_data():
                     }
                     for symbol, info in status.items()
                 ])
-                st.dataframe(status_df, use_container_width=True)
+                st.dataframe(status_df, width='stretch')
     st.markdown('</div>', unsafe_allow_html=True)
     
     # Document management
@@ -943,7 +943,7 @@ def phase1_foundation_data():
         
         if display_docs:
             doc_df = pd.DataFrame(display_docs)
-            st.dataframe(doc_df, use_container_width=True)
+            st.dataframe(doc_df, width='stretch')
             
             # Add document actions
             st.markdown("#### Document Actions")
@@ -998,24 +998,37 @@ def phase2_master_data_ai():
         # Get watchlist symbols
         symbols = get_watchlist_symbols()
         
-        # Compute dynamic document count
+        # Compute dynamic document count from research_documents table
         try:
             doc_manager_tmp = DocumentManager()
             all_docs_tmp = doc_manager_tmp.get_documents() or []
             docs_count = len(all_docs_tmp)
             doc_manager_tmp.close()
-        except Exception:
+        except Exception as e:
             docs_count = 0
+            print(f"Error counting documents: {e}")
 
         col1, col2, col3 = st.columns(3)
         with col1:
             st.metric("Total Instruments", len(symbols))
         with col2:
-            st.metric("AI Analysis Status", "Active")
+            # AI Analysis Status: "Active" if GROQ_API_KEY is configured, "Inactive" otherwise
+            groq_key = os.getenv("GROQ_API_KEY", "") or os.getenv("GROK_API_KEY", "")
+            ai_status = "Active" if groq_key and groq_key.startswith('gsk_') else "Inactive"
+            st.metric("AI Analysis Status", ai_status)
         with col3:
+            # Documents Processed: Count from research_documents table
             st.metric("Documents Processed", docs_count)
         
         # Master data summary (only generate when button is clicked)
+        st.info("""
+        **How Master Data is Generated:**
+        1. Click "Generate/Refresh Master Data Summary" button below
+        2. System calls LLM (Groq) to analyze all 19 instruments
+        3. For each instrument: analyzes market data, document insights, and generates AI sentiment
+        4. Results stored in session state (temporary, lost on page refresh)
+        5. Click "💾 Save Master Data" button to permanently save to `master_data` table with RAG embeddings
+        """)
         regenerate = st.button("Generate/Refresh Master Data Summary", type="primary", key="generate_master_data")
         if regenerate:
             with st.spinner("Generating comprehensive analysis..."):
@@ -1033,14 +1046,29 @@ def phase2_master_data_ai():
             with col1s:
                 st.metric("Total Instruments", summary.get("total_instruments", len(symbols)))
             with col2s:
+                # Bullish Signals Calculation:
+                # 1. For each instrument, LLM (Groq/Llama-3.1-8b-instant) generates analysis text
+                # 2. _extract_sentiment_from_analysis() searches LLM response for "bullish" keyword
+                # 3. If found → returns "Bullish", else checks for "bearish" → "Bearish", else → "Neutral"
+                # 4. Counts all instruments where overall_sentiment == "Bullish"
                 bullish_count = sum(1 for inst in summary.get("instruments", []) 
                                    if inst.get("ai_analysis", {}).get("overall_sentiment") == "Bullish")
                 st.metric("Bullish Signals", bullish_count)
             with col3s:
+                # Bearish Signals Calculation:
+                # 1. For each instrument, LLM (Groq/Llama-3.1-8b-instant) generates analysis text
+                # 2. _extract_sentiment_from_analysis() searches LLM response for "bearish" keyword
+                # 3. If found → returns "Bearish", else checks for "bullish" → "Bullish", else → "Neutral"
+                # 4. Counts all instruments where overall_sentiment == "Bearish"
                 bearish_count = sum(1 for inst in summary.get("instruments", []) 
                                    if inst.get("ai_analysis", {}).get("overall_sentiment") == "Bearish")
                 st.metric("Bearish Signals", bearish_count)
             with col4s:
+                # Avg Confidence Calculation:
+                # For each instrument, gets confidence from:
+                # - confidence_score (calculated from doc_insights + news_sentiment) OR
+                # - ai_analysis.confidence (extracted from LLM response via regex: "confidence: X")
+                # Then calculates: mean([all confidence values])
                 confs = [inst.get("confidence_score", inst.get("ai_analysis", {}).get("confidence", 5)) for inst in summary.get("instruments", [])]
                 avg_confidence = float(np.mean(confs)) if confs else 0.0
                 st.metric("Avg Confidence", f"{avg_confidence:.1f}/10")
@@ -1051,22 +1079,37 @@ def phase2_master_data_ai():
                 st.markdown("""
                 ### Calculation Methodology:
                 
-                **1. Bullish Signals:**
-                - Counts instruments where AI analysis returns `overall_sentiment == "Bullish"`
-                - Sentiment is extracted from AI-generated analysis text by searching for keywords like "bullish", "positive", "buy", etc.
-                - If AI analysis fails or returns "Neutral"/"Bearish", it's not counted
+                **1. Bullish Signals (e.g., 10):**
+                - **Step-by-Step**:
+                  1. For each of 19 instruments, LLM (Groq/Llama-3.1-8b-instant) is called
+                  2. LLM receives prompt asking for "Overall Assessment (Bullish/Bearish/Neutral)"
+                  3. LLM generates analysis text response
+                  4. `_extract_sentiment_from_analysis()` searches response for keyword "bullish"
+                  5. If "bullish" found → `overall_sentiment = "Bullish"`, else checks "bearish" → "Bearish", else → "Neutral"
+                  6. **Final Count**: Sum of instruments where `overall_sentiment == "Bullish"`
+                - **Example**: 10 instruments have "bullish" in LLM response → **Bullish Signals = 10**
+                - **Code**: `app.py` lines 1044-1046, extraction in `ai_analysis.py` lines 290-298
                 
                 **2. Bearish Signals:**
-                - Counts instruments where AI analysis returns `overall_sentiment == "Bearish"`
-                - Sentiment is extracted from AI-generated analysis text by searching for keywords like "bearish", "negative", "sell", etc.
+                - **Source**: LLM (Groq/Llama-3.1-8b-instant) analysis response
+                - **Process**: 
+                  1. LLM is called with prompt (see `_generate_comprehensive_analysis()` in `ai_analysis.py`)
+                  2. LLM response text is analyzed by `_extract_sentiment_from_analysis()`
+                  3. If response contains "bearish" keyword → returns "Bearish"
+                  4. Counts instruments where `ai_analysis.overall_sentiment == "Bearish"`
+                - **LLM Prompt Location**: `tradingagents/dataflows/ai_analysis.py` lines 192-210
+                - **Sentiment Extraction**: `tradingagents/dataflows/ai_analysis.py` lines 290-298
                 - If AI analysis fails or returns "Neutral"/"Bullish", it's not counted
                 
-                **3. Average Confidence:**
-                - Calculated as: `mean([confidence_score for each instrument])`
-                - Each instrument's confidence comes from either:
-                  - `confidence_score` field (calculated from document insights and news sentiment)
-                  - OR `ai_analysis.confidence` field (extracted from AI response text, default 5 if not found)
-                - Confidence range: 1-10 (10 = highest confidence)
+                **3. Average Confidence (e.g., 3.7/10):**
+                - **Step-by-Step**:
+                  1. For each instrument, get confidence from:
+                     - **Option A**: `confidence_score` = mean([doc_insights confidence, news_count/10])
+                     - **Option B**: `ai_analysis.confidence` = regex extract "confidence: X" from LLM text (default 5)
+                  2. For each instrument: `confidence = confidence_score OR ai_analysis.confidence OR 5`
+                  3. **Final Calculation**: `mean([confidence for all 19 instruments])`
+                - **Example**: Confidences [3,4,3,4,4,3,4,3,4,3,4,3,4,3,4,3,4,3,4] → **Avg = 3.7/10**
+                - **Code**: `app.py` lines 1055-1057, calculation in `ai_analysis.py` lines 319-346
                 
                 **4. Why You Might See 0 Signals:**
                 - AI analysis may have failed (no GROQ_API_KEY or API error)
@@ -1076,6 +1119,7 @@ def phase2_master_data_ai():
                 
                 # Show detailed breakdown per instrument
                 st.markdown("### 📈 Per-Instrument Breakdown:")
+                st.caption("**Sentiment Source**: Extracted from LLM (Groq) response text via `_extract_sentiment_from_analysis()`. Looks for 'bullish' or 'bearish' keywords in the LLM analysis text.")
                 instruments = summary.get("instruments", [])
                 
                 # Create a summary table
@@ -1083,6 +1127,7 @@ def phase2_master_data_ai():
                 for inst in instruments:
                     symbol = inst.get("symbol", "Unknown")
                     ai_analysis = inst.get("ai_analysis", {})
+                    # Sentiment comes from: LLM response → _extract_sentiment_from_analysis() → overall_sentiment field
                     sentiment = ai_analysis.get("overall_sentiment", "N/A")
                     confidence = inst.get("confidence_score", ai_analysis.get("confidence", "N/A"))
                     has_error = "error" in ai_analysis
@@ -1098,7 +1143,11 @@ def phase2_master_data_ai():
                 
                 if breakdown_data:
                     df_breakdown = pd.DataFrame(breakdown_data)
-                    st.dataframe(df_breakdown, use_container_width=True, hide_index=True)
+                    # Ensure proper types for Arrow serialization
+                    for col in df_breakdown.columns:
+                        if df_breakdown[col].dtype == 'object':
+                            df_breakdown[col] = df_breakdown[col].astype(str)
+                    st.dataframe(df_breakdown, width='stretch', hide_index=True)
                     
                     # Summary statistics
                     st.markdown("### 📊 Summary Statistics:")
@@ -1126,29 +1175,97 @@ def phase2_master_data_ai():
                             st.write(f"- Max: {max(confs):.1f}/10")
                             st.write(f"- Median: {np.median(confs):.1f}/10")
 
-            # Save full summary payload to DB
+            # Save master data to database with RAG embeddings
             st.markdown("---")
-            st.info("💾 Master data summary will be saved to the **`system_logs`** table with event type `master_data_generated`")
-            if st.button("💾 Save Master Data Summary to Database", key="save_master_data"):
-                try:
-                    from tradingagents.database.db_service import log_event, _make_json_serializable
-                    payload = {
-                        "summary": summary,
-                        "documents_processed": docs_count,
-                        "generated_at": datetime.now().isoformat(),
-                        "source": "phase2_master_data"
-                    }
-                    payload = _make_json_serializable(payload)
-                    ok = log_event("master_data_generated", payload)
-                    if ok:
-                        st.success(f"✅ Master data summary saved to database! **Table:** `system_logs` | **Event:** `master_data_generated`")
-                    else:
-                        st.error("❌ Failed to save master data summary")
-                except Exception as e:
-                    st.error(f"❌ Failed to save: {str(e)}")
+            st.info("💾 Save master data to the **`master_data`** table with RAG embeddings for semantic search.")
+            
+            if st.button("💾 Save Master Data", type="primary", key="save_master_data_rag"):
+                with st.spinner("💾 Saving master data to database with embeddings..."):
+                    try:
+                        save_result = ai_analyzer.save_master_data_summary_with_rag(summary)
+                        if save_result.get("success"):
+                            saved_count = save_result.get("saved_count", 0)
+                            failed_count = save_result.get("failed_count", 0)
+                            if failed_count == 0:
+                                st.success(f"✅ Master data saved to `master_data` table with RAG embeddings! ({saved_count} instruments)")
+                            else:
+                                st.warning(f"⚠️ Master data partially saved: {saved_count} succeeded, {failed_count} failed. Check errors below.")
+                                if save_result.get("errors"):
+                                    with st.expander("View Errors"):
+                                        for error in save_result.get("errors", [])[:5]:
+                                            st.error(error)
+                        else:
+                            error_msg = save_result.get("error", "Unknown error")
+                            # Check if it's a table missing error
+                            if "does not exist" in error_msg.lower():
+                                st.error(f"❌ Database table missing: {error_msg}")
+                                st.info("💡 Please create the `master_data` table first. See the SQL migration below.")
+                                with st.expander("📋 SQL Migration for master_data table"):
+                                    st.code("""
+CREATE TABLE master_data (
+  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  symbol text NOT NULL,
+  content_text text,
+  embedding_vector jsonb,
+  full_data jsonb,
+  generated_at timestamp with time zone DEFAULT now(),
+  analysis_timestamp timestamp with time zone
+);
+
+-- Optional: Create index for faster queries
+CREATE INDEX idx_master_data_symbol ON master_data(symbol);
+CREATE INDEX idx_master_data_generated_at ON master_data(generated_at DESC);
+                                    """, language="sql")
+                            else:
+                                st.error(f"❌ Failed to save master data: {error_msg}")
+                    except Exception as e:
+                        st.error(f"❌ Error saving master data: {str(e)}")
     
     with tab2:
         st.subheader("AI Document Analysis")
+        
+        # Explanation about embeddings and pgvector
+        with st.expander("📖 About Embeddings & Vector Storage", expanded=False):
+            st.markdown("""
+            ### **Embedding Storage:**
+            
+            **Where Embeddings Are Stored:**
+            - **Documents**: `research_documents.embedding_vector` (JSONB column)
+            - **Master Data**: `master_data.embedding_vector` (JSONB column)
+            - **Format**: Stored as JSONB array of floats: `[0.123, -0.456, ...]`
+            
+            **Do You Need pgvector?**
+            - **Current Setup**: Using **JSONB** to store embeddings (works fine for storage)
+            - **pgvector Extension**: NOT required for basic storage, but **recommended for similarity search**
+            
+            **pgvector Benefits:**
+            - ✅ Fast similarity search using cosine distance
+            - ✅ Indexed vector operations (much faster than JSONB)
+            - ✅ Built-in functions: `<=>` (cosine distance), `<->` (L2 distance)
+            
+            **Without pgvector (Current):**
+            - ✅ Embeddings are stored and can be retrieved
+            - ⚠️ Similarity search requires loading all vectors into Python
+            - ⚠️ Slower for large datasets (no vector indexes)
+            
+            **To Enable pgvector (Optional):**
+            1. Run in Supabase SQL Editor:
+               ```sql
+               CREATE EXTENSION IF NOT EXISTS vector;
+               ALTER TABLE research_documents 
+                 ADD COLUMN embedding_vector_pgvector vector(768);
+               ALTER TABLE master_data 
+                 ADD COLUMN embedding_vector_pgvector vector(768);
+               ```
+            2. Update code to use `vector` type instead of `jsonb`
+            3. Use `<=>` operator for similarity search
+            
+            **Current Status:**
+            - ✅ Embeddings are generated (Gemini API)
+            - ✅ Embeddings are saved to JSONB columns
+            - ⚠️ Similarity search uses Python (not optimized)
+            - 💡 Consider pgvector for production RAG queries
+            """)
         
         # Document upload with enhanced processing
         st.write("Upload research documents for AI analysis:")
@@ -1407,7 +1524,11 @@ def phase2_master_data_ai():
                                         update_payload["embedding_vector"] = embedding_vector
                                         st.info(f"📊 Generated embedding vector ({len(embedding_vector)} dimensions)")
                                     else:
-                                        st.warning("⚠️ Embedding vector not generated (Gemini API may not be configured)")
+                                        gemini_key = os.getenv("GEMINI_API_KEY", "")
+                                        if not gemini_key:
+                                            st.warning("⚠️ Embedding vector not generated. Please set GEMINI_API_KEY in your .env file to enable embeddings.")
+                                        else:
+                                            st.warning("⚠️ Embedding vector not generated. Check console for error details.")
                                     
                                     # Try optional fields - handle gracefully if columns don't exist
                                     optional_fields = {}
@@ -1446,7 +1567,11 @@ def phase2_master_data_ai():
                                                     }).eq("id", doc_id).execute()
                                                     st.info(f"✅ Embedding vector saved ({len(embedding_vector)} dimensions)")
                                                 else:
-                                                    st.warning("⚠️ No embedding vector to save (Gemini API may not be configured)")
+                                                    gemini_key = os.getenv("GEMINI_API_KEY", "")
+                                                    if not gemini_key:
+                                                        st.warning("⚠️ No embedding vector to save. Set GEMINI_API_KEY in .env file to enable embeddings.")
+                                                    else:
+                                                        st.warning("⚠️ No embedding vector to save. Check console for error details.")
                                                 
                                                 # Store full analysis in file_content as JSON
                                                 current_doc = doc_manager.get_document_content(doc_id)
@@ -1508,6 +1633,64 @@ def phase2_master_data_ai():
     with tab3:
         st.subheader("Instrument Profiles")
         
+        # Explanation of data sources
+        with st.expander("📖 How Instrument Profiles Work - Data Sources Explained", expanded=False):
+            st.markdown("""
+            ### **Data Flow & Sources:**
+            
+            **1. Market Data** (`profile['market_data']`):
+            - **Source**: Polygon.io API (primary) or yfinance (fallback)
+            - **Method**: `_get_market_data()` in `ai_analysis.py` lines 59-138
+            - **Data Retrieved**: 
+              - Last 30 days of OHLCV data
+              - Calculates: current_price, price_change_pct, volume, high_30d, low_30d, volatility
+            - **Location**: `tradingagents/dataflows/ai_analysis.py` → `_get_market_data()`
+            
+            **2. Document Insights** (`profile['document_insights']`):
+            - **Source**: `research_documents` table in Supabase
+            - **Method**: `document_manager.get_document_insights(symbol)` 
+            - **Data Retrieved**:
+              - All documents uploaded for this symbol
+              - Extracts: filename, signals (bullish/bearish keywords), sentiment, confidence
+            - **Location**: `tradingagents/dataflows/document_manager.py` → `get_document_insights()`
+            
+            **3. News Sentiment** (`profile['news_sentiment']`):
+            - **Source**: Placeholder (not yet implemented with real news API)
+            - **Method**: `_analyze_news_sentiment()` in `ai_analysis.py` lines 140-154
+            - **Returns**: Default structure with sentiment_score=0, news_count=0
+            - **Location**: `tradingagents/dataflows/ai_analysis.py` → `_analyze_news_sentiment()`
+            
+            **4. AI Analysis** (`profile['ai_analysis']`):
+            - **Source**: LLM (Groq/Llama-3.1-8b-instant)
+            - **Method**: `_generate_comprehensive_analysis()` in `ai_analysis.py` lines 156-269
+            - **Input**: Combines market_data + doc_insights + news_sentiment
+            - **LLM Prompt**: See `ai_analysis.py` lines 192-210
+            - **Output**: 
+              - `analysis_text`: Full LLM response
+              - `overall_sentiment`: Extracted from text ("Bullish"/"Bearish"/"Neutral")
+              - `recommendation`: Extracted from text ("BUY"/"SELL"/"HOLD")
+              - `confidence`: Extracted from text (1-10)
+            - **Location**: `tradingagents/dataflows/ai_analysis.py` → `_generate_comprehensive_analysis()`
+            
+            **5. Confidence Score** (`profile['confidence_score']`):
+            - **Source**: Calculated from doc_insights + news_sentiment
+            - **Method**: `_calculate_confidence_score()` in `ai_analysis.py` lines 319-346
+            - **Formula**: `mean([doc_insights confidence scores, news_count/10])`
+            - **Location**: `tradingagents/dataflows/ai_analysis.py` → `_calculate_confidence_score()`
+            
+            ### **Complete Flow:**
+            1. User clicks "Generate Profile" → calls `analyze_instrument_profile(symbol)`
+            2. System fetches: Market Data (Polygon) + Document Insights (DB) + News Sentiment (placeholder)
+            3. All data combined into prompt → sent to LLM (Groq)
+            4. LLM generates comprehensive analysis text
+            5. System extracts sentiment, recommendation, confidence from LLM response
+            6. Profile displayed in UI with all components
+            7. When you click **"Save Instrument Profile"**, the profile is stored in Supabase table `instrument_profiles` with:
+               - `profile_text` (LLM-ready text for embeddings)
+               - `embedding_vector` (Gemini-generated RAG vector)
+               - `profile_data` (full JSON payload for later retrieval)
+            """)
+        
         # Select symbol for detailed analysis
         selected_symbol = st.selectbox("Select Instrument for Analysis", symbols)
         
@@ -1516,6 +1699,7 @@ def phase2_master_data_ai():
                 profile = ai_analyzer.analyze_instrument_profile(selected_symbol)
                 
                 if "error" not in profile:
+                    st.session_state.current_profile = profile  # Store for saving
                     st.success(f"Profile generated for {selected_symbol}")
                     st.balloons()
                     
@@ -1524,6 +1708,7 @@ def phase2_master_data_ai():
                     
                     with col1:
                         st.subheader("Market Data")
+                        st.caption("**Source**: Polygon.io API (30-day historical data) → `_get_market_data()`")
                         market_data = profile.get("market_data", {})
                         if "error" not in market_data:
                             data_source = market_data.get("source", "unknown")
@@ -1538,6 +1723,7 @@ def phase2_master_data_ai():
                     
                     with col2:
                         st.subheader("AI Analysis")
+                        st.caption("**Source**: LLM (Groq/Llama-3.1-8b-instant) → `_generate_comprehensive_analysis()`")
                         ai_analysis = profile.get("ai_analysis", {})
                         if "error" not in ai_analysis:
                             st.write("**Overall Assessment:**", ai_analysis.get("overall_sentiment", "N/A"))
@@ -1559,6 +1745,7 @@ def phase2_master_data_ai():
                     doc_insights = profile.get("document_insights", [])
                     if doc_insights:
                         st.subheader("Document Insights")
+                        st.caption(f"**Source**: `research_documents` table → {len(doc_insights)} document(s) found for {selected_symbol}")
                         for insight in doc_insights:
                             with st.expander(f"📄 {insight.get('filename', 'Unknown')}"):
                                 signals = insight.get("signals", {})
@@ -1567,17 +1754,156 @@ def phase2_master_data_ai():
                                     st.write(f"**Confidence:** {signals.get('confidence', 'N/A')}/10")
                                     st.write(f"**Bullish Signals:** {', '.join(signals.get('bullish_signals', []))}")
                                     st.write(f"**Bearish Signals:** {', '.join(signals.get('bearish_signals', []))}")
+                    else:
+                        st.info(f"No documents found for {selected_symbol} in `research_documents` table")
+                    
+                    # Save profile to database with RAG
+                    st.markdown("---")
+                    st.info("💾 Save this instrument profile to `instrument_profiles` table with RAG embeddings for semantic search.")
+                    if st.button("💾 Save Instrument Profile to Database (RAG)", type="primary", key="save_instrument_profile"):
+                        with st.spinner("💾 Saving instrument profile with embeddings..."):
+                            try:
+                                from tradingagents.database.db_service import save_instrument_profile_with_rag
+                                
+                                # Convert profile to text for embedding
+                                content_text = ai_analyzer._master_data_to_text(profile)
+                                
+                                # Generate embedding
+                                embedding_vector = ai_analyzer.document_manager._generate_embedding(content_text)
+                                
+                                # Save to database
+                                result = save_instrument_profile_with_rag(
+                                    symbol=selected_symbol,
+                                    profile_text=content_text,
+                                    embedding_vector=embedding_vector,
+                                    profile_data=profile,
+                                    analysis_timestamp=profile.get("analysis_timestamp")
+                                )
+                                
+                                if result:
+                                    # Show detailed confirmation
+                                    st.success("✅ **Instrument Profile Saved Successfully!**")
+                                    st.info(f"""
+                                    **📊 Saved to Database:**
+                                    - **Table**: `instrument_profiles`
+                                    - **Symbol**: {selected_symbol}
+                                    - **Storage Type**: RAG (Retrieval-Augmented Generation)
+                                    - **Record ID**: {result.get('id', 'N/A')}
+                                    - **Analysis Timestamp**: {result.get('analysis_timestamp', 'N/A')}
+                                    - **Generated At**: {result.get('generated_at', 'N/A')}
+                                    
+                                    **🔍 What Was Saved:**
+                                    - Full instrument profile (market data, AI analysis, document insights)
+                                    - Text representation for semantic search
+                                    - Embedding vector for RAG queries
+                                    - Complete JSON data in `profile_data` column
+                                    """)
+                                    
+                                    if embedding_vector:
+                                        st.success(f"📊 **Embedding Vector Generated**: {len(embedding_vector)} dimensions (stored in `embedding_vector` JSONB column)")
+                                    else:
+                                        gemini_key = os.getenv("GEMINI_API_KEY", "")
+                                        if not gemini_key:
+                                            st.warning("⚠️ **Embedding vector not generated**. Set `GEMINI_API_KEY` in `.env` file to enable RAG embeddings.")
+                                        else:
+                                            st.warning("⚠️ **Embedding vector not generated**. Check console for error details.")
+                                    
+                                    st.balloons()
+                                else:
+                                    st.error("❌ Failed to save instrument profile to `instrument_profiles` table")
+                            except Exception as e:
+                                error_msg = str(e)
+                                if "does not exist" in error_msg.lower() or "instrument_profiles" in error_msg.lower():
+                                    st.error(f"❌ Database table missing: {error_msg}")
+                                    st.info("💡 Please create the `instrument_profiles` table first (see SQL migration below).")
+                                else:
+                                    st.error(f"❌ Error saving profile: {error_msg}")
+                                    import traceback
+                                    st.code(traceback.format_exc())
                 else:
                     st.error(f"Error generating profile: {profile['error']}")
     
     with tab4:
         st.subheader("Research Insights Dashboard")
         
+        # Explanation of how insights are extracted
+        with st.expander("📖 How Research Insights Are Extracted - Data Flow Explained", expanded=False):
+            st.markdown("""
+            ### **Data Source & Extraction Process:**
+            
+            **All insights are dynamically extracted from `st.session_state.master_data_summary`** - NOT hardcoded!
+            
+            **1. Portfolio Overview:**
+            - **Source**: `master_data_summary["instruments"]` (list of 19 instrument profiles)
+            - **Extraction Method**: Iterates through each instrument in the summary
+            - **Data Retrieved**:
+              ```python
+              for inst in summary["instruments"]:
+                  ai_analysis = inst.get("ai_analysis", {})
+                  # Extracts:
+                  - Symbol: inst["symbol"]
+                  - Sentiment: ai_analysis.get("overall_sentiment", "N/A")
+                  - Recommendation: ai_analysis.get("recommendation", "N/A")
+                  - Confidence: ai_analysis.get("confidence", "N/A")
+                  - Documents: len(inst.get("document_insights", []))
+              ```
+            - **Location**: `app.py` lines 1903-1912
+            - **Origin of Data**:
+              - `overall_sentiment`: Extracted from LLM response text via `_extract_sentiment_from_analysis()` (looks for "bullish"/"bearish" keywords) → `ai_analysis.py` line 290-298
+              - `recommendation`: Extracted from LLM response text via `_extract_recommendation()` (looks for "BUY"/"SELL"/"HOLD" keywords) → `ai_analysis.py` line 300-308
+              - `confidence`: Extracted from LLM response text via `_extract_confidence()` (extracts number 1-10 using regex) → `ai_analysis.py` line 310-317
+            - **NOT Hardcoded**: All values come from LLM analysis stored in `master_data_summary`
+            
+            **2. Sentiment Distribution:**
+            - **Source**: `insights_df["Sentiment"]` column (from Portfolio Overview dataframe)
+            - **Extraction Method**: `pandas.value_counts()` - counts occurrences of each sentiment value
+            - **Calculation**:
+              ```python
+              sentiment_counts = insights_df["Sentiment"].value_counts()
+              # Returns: {"Bullish": 8, "Bearish": 5, "Neutral": 6}
+              ```
+            - **Location**: `app.py` lines 1923-1935
+            - **Dynamic**: Automatically counts whatever sentiment values exist (Bullish/Bearish/Neutral/N/A)
+            - **NOT Hardcoded**: Distribution changes based on actual LLM responses
+            
+            **3. Recommendation Distribution:**
+            - **Source**: `insights_df["Recommendation"]` column (from Portfolio Overview dataframe)
+            - **Extraction Method**: `pandas.value_counts()` - counts occurrences of each recommendation value
+            - **Calculation**:
+              ```python
+              rec_counts = insights_df["Recommendation"].value_counts()
+              # Returns: {"BUY": 10, "HOLD": 6, "SELL": 3}
+              ```
+            - **Location**: `app.py` lines 1940-1952
+            - **Dynamic**: Automatically counts whatever recommendation values exist (BUY/SELL/HOLD/N/A)
+            - **NOT Hardcoded**: Distribution changes based on actual LLM responses
+            
+            ### **Complete Data Flow:**
+            1. User clicks "Generate/Refresh Master Data Summary"
+            2. System calls `ai_analyzer.get_master_data_summary()` → analyzes all 19 instruments
+            3. For each instrument:
+               - Fetches market data (Polygon API)
+               - Fetches document insights (from `research_documents` table)
+               - Calls LLM (Groq) with combined context
+               - Extracts sentiment, recommendation, confidence from LLM response
+            4. All results stored in `st.session_state.master_data_summary`
+            5. Research Insights tab reads from this session state
+            6. Portfolio Overview: Extracts data from `summary["instruments"]` list
+            7. Sentiment/Recommendation Distribution: Counts values using `pandas.value_counts()`
+            
+            ### **Key Points:**
+            - ✅ **NOT Hardcoded**: All values come from LLM analysis
+            - ✅ **Dynamic**: Changes based on actual market data and LLM responses
+            - ✅ **Real-time**: Reflects current analysis when master data is regenerated
+            - ✅ **Data Source**: `st.session_state.master_data_summary` (generated by clicking "Generate Master Data Summary")
+            """)
+        
         # Overall insights summary
         if "master_data_summary" in st.session_state:
             summary = st.session_state.master_data_summary
             
             st.subheader("Portfolio Overview")
+            st.caption("**Source**: Extracted from `master_data_summary['instruments']` → Each instrument's `ai_analysis` dict (from LLM responses)")
             
             # Create insights dataframe
             insights_data = []
@@ -1593,19 +1919,49 @@ def phase2_master_data_ai():
             
             if insights_data:
                 insights_df = pd.DataFrame(insights_data)
-                st.dataframe(insights_df, use_container_width=True)
+                # Ensure proper types for Arrow serialization
+                for col in insights_df.columns:
+                    if insights_df[col].dtype == 'object':
+                        insights_df[col] = insights_df[col].astype(str)
+                st.dataframe(insights_df, width='stretch')
                 
                 # Sentiment distribution
                 st.subheader("Sentiment Distribution")
+                st.caption("**Source**: Counts sentiment values from Portfolio Overview using `pandas.value_counts()` → NOT hardcoded, dynamically calculated from LLM responses")
                 sentiment_counts = insights_df["Sentiment"].value_counts()
-                st.bar_chart(sentiment_counts)
+                if len(sentiment_counts) > 0:
+                    st.bar_chart(sentiment_counts)
+                    # Show breakdown
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Bullish", sentiment_counts.get("Bullish", 0))
+                    with col2:
+                        st.metric("Bearish", sentiment_counts.get("Bearish", 0))
+                    with col3:
+                        st.metric("Neutral", sentiment_counts.get("Neutral", 0))
+                else:
+                    st.info("No sentiment data available")
                 
                 # Recommendation distribution
                 st.subheader("Recommendation Distribution")
+                st.caption("**Source**: Counts recommendation values from Portfolio Overview using `pandas.value_counts()` → NOT hardcoded, dynamically calculated from LLM responses")
                 rec_counts = insights_df["Recommendation"].value_counts()
-                st.bar_chart(rec_counts)
+                if len(rec_counts) > 0:
+                    st.bar_chart(rec_counts)
+                    # Show breakdown
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("BUY", rec_counts.get("BUY", 0))
+                    with col2:
+                        st.metric("HOLD", rec_counts.get("HOLD", 0))
+                    with col3:
+                        st.metric("SELL", rec_counts.get("SELL", 0))
+                else:
+                    st.info("No recommendation data available")
+            else:
+                st.warning("No insights data available in master_data_summary")
         else:
-            st.info("Generate master data summary first to see research insights")
+            st.info("💡 **Generate master data summary first** to see research insights. Click 'Generate/Refresh Master Data Summary' in the Master Data Dashboard tab.")
     
     # Close AI analyzer
     ai_analyzer.close()
@@ -1871,7 +2227,7 @@ def phase3_trading_engine_core():
         
         col1, col2 = st.columns([3, 1])
         with col1:
-            if st.button("🚀 Run Volume Screening", type="primary", key="run_phase1_screening", use_container_width=True):
+            if st.button("🚀 Run Volume Screening", type="primary", key="run_phase1_screening", width='stretch'):
                 with st.spinner("Screening watchlist for volume spikes..."):
                     screening_df = st.session_state.volume_screener.screen_watchlist(symbols)
                     
@@ -1882,7 +2238,7 @@ def phase3_trading_engine_core():
                     st.success(f"✅ Screening complete! Found {len(screening_df[screening_df['Pass'] == '✅'])} candidates")
                     
                     # Display results
-                    st.dataframe(screening_df, use_container_width=True, height=400)
+                    st.dataframe(screening_df, width='stretch', height=400)
                     
                     # Show passed symbols
                     passed_symbols = screening_df[screening_df['Pass'] == '✅']['Symbol'].tolist()
@@ -1897,38 +2253,64 @@ def phase3_trading_engine_core():
                     st.markdown("---")
                     if st.button("💾 Save Screening Results to Database", key="save_screening_results"):
                         try:
-                            from tradingagents.database.db_service import log_event
-                            from tradingagents.database.config import get_supabase
                             from datetime import datetime
-                            
-                            # Check database connection first
+                            from tradingagents.database.config import get_supabase
+                            from tradingagents.database.db_service import (
+                                _make_json_serializable,
+                                save_volume_screening_with_rag
+                            )
+
                             supabase = get_supabase()
                             if not supabase:
                                 st.error("❌ Database not configured! Please set SUPABASE_URL and SUPABASE_KEY in your .env file")
                             else:
-                                # Prepare data and convert to JSON-serializable
-                                from tradingagents.database.db_service import _make_json_serializable
-                                
-                                screening_data = {
+                                # Build summary text for RAG embedding
+                                summary_sections = [
+                                    f"Volume Screening Run: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+                                    f"Total Symbols Screened: {len(screening_df)}",
+                                    f"Passed Symbols ({len(passed_symbols)}): {', '.join(passed_symbols) if passed_symbols else 'None'}"
+                                ]
+                                summary_sections.append("Top Results:")
+                                top_rows = screening_df.head(10).to_dict('records')
+                                for row in top_rows:
+                                    summary_sections.append(
+                                        f"- {row['Symbol']}: VolSpike={row['VolSpike']}, AvgVol20={row['AvgVol20']}, RSI={row['RSI']}, Pass={row['Pass']}"
+                                    )
+                                summary_text = "\n".join(summary_sections)
+
+                                # Generate embedding via DocumentManager
+                                doc_manager = DocumentManager()
+                                try:
+                                    embedding_vector = doc_manager._generate_embedding(summary_text)
+                                finally:
+                                    doc_manager.close()
+
+                                screening_payload = {
                                     "total_screened": int(len(screening_df)),
                                     "passed_count": int(len(passed_symbols)),
                                     "failed_count": int(len(screening_df) - len(passed_symbols)),
                                     "passed_symbols": list(passed_symbols),
-                                    "screening_results": screening_df.to_dict('records'),  # Full results
-                                    "timestamp": datetime.now().isoformat(),
-                                    "source": "phase3_tab1"
+                                    "screening_results": screening_df.to_dict('records')
                                 }
-                                
-                                # Convert all numpy/pandas types
-                                screening_data = _make_json_serializable(screening_data)
-                                
-                                # Save to system_logs table with detailed results
-                                result = log_event("volume_screening_completed", screening_data)
-                                
+
+                                metadata = {
+                                    "watchlist_size": len(symbols),
+                                    "run_source": "phase3_tab1",
+                                    "generated_by": "volume_screening_engine"
+                                }
+
+                                result = save_volume_screening_with_rag(
+                                    screening_results=_make_json_serializable(screening_payload),
+                                    summary_text=summary_text,
+                                    embedding_vector=embedding_vector,
+                                    run_metadata=metadata
+                                )
+
                                 if result:
-                                    st.success("✅ Screening results saved to database! (Saved to system_logs table)")
+                                    st.success("✅ Screening results saved to `volume_screening_runs` with RAG embedding!")
+                                    st.balloons()
                                 else:
-                                    st.error("❌ Failed to save - check console for details")
+                                    st.error("❌ Failed to save screening results")
                         except Exception as e:
                             st.error(f"❌ Error saving: {str(e)}")
                             import traceback
@@ -1942,10 +2324,7 @@ def phase3_trading_engine_core():
                     del st.session_state.phase1_passed
                 st.rerun()
         
-        # Show cached results if available
-        if 'phase1_results' in st.session_state:
-            st.markdown("#### 📋 Previous Screening Results")
-            st.dataframe(st.session_state.phase1_results, use_container_width=True)
+        # Removed Previous Screening Results section per request
         
         st.markdown('</div>', unsafe_allow_html=True)
     
@@ -1981,7 +2360,7 @@ def phase3_trading_engine_core():
         
         col1, col2 = st.columns([3, 1])
         with col1:
-            if st.button("🔥 Run 7-Stage Fire Test", type="primary", key="run_phase2_firetest", use_container_width=True):
+            if st.button("🔥 Run 7-Stage Fire Test", type="primary", key="run_phase2_firetest", width='stretch'):
                 with st.spinner(f"Running comprehensive analysis for {selected_symbol}..."):
                     fire_result = st.session_state.fire_tester.run_fire_test(selected_symbol)
                     
@@ -2016,7 +2395,7 @@ def phase3_trading_engine_core():
                             })
                         
                         stages_df = pd.DataFrame(stages_data)
-                        st.dataframe(stages_df, use_container_width=True)
+                        st.dataframe(stages_df, width='stretch')
                         
                         # Visual stage status
                         st.markdown("#### 📈 Stage Performance")
@@ -2034,34 +2413,45 @@ def phase3_trading_engine_core():
                         st.markdown("---")
                         if st.button("💾 Save Phase 2 Analysis to Database", key="save_phase2_analysis"):
                             try:
-                                from tradingagents.database.db_service import log_event
                                 from tradingagents.database.config import get_supabase
+                                from tradingagents.database.db_service import (
+                                    _make_json_serializable,
+                                    save_fire_test_with_rag
+                                )
                                 
                                 # Check database connection first
                                 supabase = get_supabase()
                                 if not supabase:
                                     st.error("❌ Database not configured! Please set SUPABASE_URL and SUPABASE_KEY in your .env file")
                                 else:
-                                    # Prepare data and convert to JSON-serializable
-                                    from tradingagents.database.db_service import _make_json_serializable
-                                    
-                                    fire_test_data = {
-                                        "symbol": selected_symbol,
-                                        "score": int(fire_result["score"]),
-                                        "max_score": int(fire_result["max_score"]),
-                                        "score_percentage": float(round(score_ratio * 100, 2)),
-                                        "stages": fire_result["stages"],
-                                        "timestamp": fire_result.get("timestamp"),
-                                        "source": "phase3_tab2"
-                                    }
-                                    
-                                    # Convert all numpy/pandas types
-                                    fire_test_data = _make_json_serializable(fire_test_data)
-                                    
-                                    result = log_event("phase2_fire_test_completed", fire_test_data)
-                                    
-                                    if result:
-                                        st.success("✅ Phase 2 Deep Analysis saved to database!")
+                                    # Build summary text for RAG
+                                    summary_lines = [
+                                        f"Fire Test for {selected_symbol}",
+                                        f"Score: {fire_result['score']} / {fire_result['max_score']} ({score_ratio*100:.1f}%)"
+                                    ]
+                                    for stg in fire_result.get("stages", [])[:10]:
+                                        status = "PASS" if stg.get("pass") else "FAIL"
+                                        summary_lines.append(f"- {stg.get('name')}: {status} | {stg.get('detail','')}")
+                                    summary_text = "\n".join(summary_lines)
+
+                                    # Generate embedding using DocumentManager
+                                    doc_manager = DocumentManager()
+                                    try:
+                                        embedding_vector = doc_manager._generate_embedding(summary_text)
+                                    finally:
+                                        doc_manager.close()
+
+                                    saved = save_fire_test_with_rag(
+                                        symbol=selected_symbol,
+                                        fire_result=_make_json_serializable(fire_result),
+                                        summary_text=summary_text,
+                                        embedding_vector=embedding_vector,
+                                        run_metadata={"source": "phase3_tab2"}
+                                    )
+
+                                    if saved:
+                                        st.success("✅ Phase 2 Deep Analysis saved to `fire_test_runs` with RAG embedding!")
+                                        st.balloons()
                                     else:
                                         st.error("❌ Failed to save - check console for details")
                             except Exception as e:
@@ -2572,7 +2962,7 @@ def phase4_session_management_execution():
                 st.warning("⚠️ No active session. Create a new session to start trading.")
         
         with col2:
-            if st.button("🆕 New Session", key="new_session", use_container_width=True):
+            if st.button("🆕 New Session", key="new_session", width='stretch'):
                 session_name = st.text_input("Session Name", value=f"Session {datetime.now().strftime('%Y-%m-%d %H:%M')}", key="session_name_input")
                 notes = st.text_area("Notes (optional)", key="session_notes_input")
                 if st.button("✅ Create", key="create_session_confirm"):
@@ -2585,7 +2975,7 @@ def phase4_session_management_execution():
                         st.error(f"❌ Error creating session: {str(e)}")
             
             if active_session and active_session.get('id') != "default_session":
-                if st.button("🔒 Close Session", key="close_session", use_container_width=True):
+                if st.button("🔒 Close Session", key="close_session", width='stretch'):
                     st.session_state.show_close_session_form = True
                 
                 if st.session_state.get('show_close_session_form', False):
@@ -2619,7 +3009,7 @@ def phase4_session_management_execution():
                 }
                 for s in sessions
             ])
-            st.dataframe(sessions_df, use_container_width=True)
+            st.dataframe(sessions_df, width='stretch')
         else:
             st.info("No previous sessions found.")
         
@@ -2632,7 +3022,7 @@ def phase4_session_management_execution():
         # Refresh button
         col_refresh, col_info = st.columns([1, 3])
         with col_refresh:
-            if st.button("🔄 Refresh", key="refresh_trades", use_container_width=True):
+            if st.button("🔄 Refresh", key="refresh_trades", width='stretch'):
                 st.rerun()
         
         with col_info:
@@ -2707,7 +3097,7 @@ def phase4_session_management_execution():
                         close_notes = st.text_input("Close Notes (optional)", key=f"close_notes_{symbol}")
                     
                     with col_close2:
-                        if st.button(f"✅ Close {symbol}", key=f"close_{symbol}", type="primary", use_container_width=True):
+                        if st.button(f"✅ Close {symbol}", key=f"close_{symbol}", type="primary", width='stretch'):
                             try:
                                 result = trade_service.close_trade(symbol, exit_price, close_quantity, close_notes)
                                 if result:
@@ -2808,7 +3198,7 @@ def phase4_session_management_execution():
         
         # Execute button
         st.markdown("---")
-        if st.button("⚡ Execute Trade", type="primary", key="execute_trade_button", use_container_width=True):
+        if st.button("⚡ Execute Trade", type="primary", key="execute_trade_button", width='stretch'):
             try:
                 # Validate inputs
                 if not symbol:
@@ -2890,7 +3280,7 @@ def phase4_session_management_execution():
             
             if history_data:
                 history_df = pd.DataFrame(history_data)
-                st.dataframe(history_df, use_container_width=True, height=400)
+                st.dataframe(history_df, width='stretch', height=400)
         else:
             st.info("📭 No trade history found.")
         
@@ -2965,7 +3355,7 @@ def phase5_results_analysis():
                     "Exit Date": (t.get('exit_date') or '')[:19]
                 })
             st.markdown("#### Recent Trades")
-            st.dataframe(pd.DataFrame(table), use_container_width=True, height=360)
+            st.dataframe(pd.DataFrame(table), width='stretch', height=360)
         else:
             st.info("No trades recorded yet.")
         st.markdown('</div>', unsafe_allow_html=True)
@@ -3065,7 +3455,7 @@ def phase5_results_analysis():
             fig = go.Figure()
             fig.add_trace(go.Scatter(x=df["date"], y=df["equity"], mode="lines", name="Equity"))
             fig.update_layout(title="Equity Curve (Realized)", template='plotly_white', height=360)
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width='stretch')
 
             # Per-symbol performance
             perf_rows = []
@@ -3091,7 +3481,7 @@ def phase5_results_analysis():
                 })
             if perf_rows:
                 st.markdown("#### Per-Symbol Performance")
-                st.dataframe(pd.DataFrame(perf_rows).sort_values(["Win Rate %", "Realized P&L"], ascending=[False, False]), use_container_width=True, height=360)
+                st.dataframe(pd.DataFrame(perf_rows).sort_values(["Win Rate %", "Realized P&L"], ascending=[False, False]), width='stretch', height=360)
             else:
                 st.info("No closed trades to summarize.")
         st.markdown('</div>', unsafe_allow_html=True)
@@ -3137,7 +3527,7 @@ def phase5_results_analysis():
 
         if suggestions:
             st.markdown("#### Suggested Adjustments")
-            st.dataframe(pd.DataFrame(suggestions), use_container_width=True)
+            st.dataframe(pd.DataFrame(suggestions), width='stretch')
 
             if st.button("💾 Apply Suggestions (log)", type="primary"):
                 try:
@@ -3156,7 +3546,7 @@ def phase5_results_analysis():
         st.markdown('</div>', unsafe_allow_html=True)
 
 def main():
-    st.markdown('<div class="section-header">AlphaAnalyst Trading AI Agent - Phase 1</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-header">AlphaAnalyst Trading AI Agent</div>', unsafe_allow_html=True)
     
     # Phase selector buttons
     phases = [
@@ -3173,24 +3563,24 @@ def main():
     st.markdown('<div class="phase-nav">', unsafe_allow_html=True)
     row1 = st.columns(3)
     with row1[0]:
-        if st.button(phases[0], use_container_width=True, key="phase_1"):
+        if st.button(phases[0], width='stretch', key="phase_1"):
             st.session_state.active_phase = phases[0]
     with row1[1]:
-        if st.button(phases[1], use_container_width=True, key="phase_2"):
+        if st.button(phases[1], width='stretch', key="phase_2"):
             st.session_state.active_phase = phases[1]
     with row1[2]:
-        if st.button(phases[2], use_container_width=True, key="phase_3"):
+        if st.button(phases[2], width='stretch', key="phase_3"):
             st.session_state.active_phase = phases[2]
     
     row2 = st.columns(3)
     with row2[0]:
-        if st.button(phases[3], use_container_width=True, key="phase_4"):
+        if st.button(phases[3], width='stretch', key="phase_4"):
             st.session_state.active_phase = phases[3]
     with row2[1]:
-        if st.button(phases[4], use_container_width=True, key="phase_5"):
+        if st.button(phases[4], width='stretch', key="phase_5"):
             st.session_state.active_phase = phases[4]
     with row2[2]:
-        if st.button(phases[5], use_container_width=True, key="phase_6"):
+        if st.button(phases[5], width='stretch', key="phase_6"):
             st.session_state.active_phase = phases[5]
     st.markdown('</div>', unsafe_allow_html=True)
     
@@ -3216,7 +3606,7 @@ def main():
         st.markdown("### Quick Stock Analysis")
         stock_input = st.text_input("Enter Company Name", help="e.g., APPLE, TCS")
         
-        if st.button("Analyze", use_container_width=True, key="legacy_analyze"):
+        if st.button("Analyze", width='stretch', key="legacy_analyze"):
             if not stock_input:
                 st.error("Please enter a stock name")
                 return
@@ -3237,7 +3627,7 @@ def main():
                             st.markdown(f'<div class="metric-card"><div class="metric-value">{info.get("recommendationKey", "N/A").title()}</div><div class="metric-label">Recommendation</div></div>', unsafe_allow_html=True)
                         
                         st.markdown('<div class="chart-container">', unsafe_allow_html=True)
-                        st.plotly_chart(create_price_chart(hist, symbol), use_container_width=True)
+                        st.plotly_chart(create_price_chart(hist, symbol), width='stretch')
                         st.markdown('</div>', unsafe_allow_html=True)
                         
                         if 'longBusinessSummary' in info:
@@ -3400,7 +3790,7 @@ def phase6_advanced_features():
                             "Entry": t.get('entry_date','')[:19],
                             "Exit": (t.get('exit_date') or '')[:19]
                         })
-                    st.dataframe(pd.DataFrame(rows), use_container_width=True, height=360)
+                    st.dataframe(pd.DataFrame(rows), width='stretch', height=360)
                 else:
                     st.info("No matching trades.")
 
@@ -3425,7 +3815,7 @@ def phase6_advanced_features():
                             "Uploaded": (d.get("uploaded_at") or d.get("created_at") or "")[:19]
                         })
                     if results:
-                        st.dataframe(pd.DataFrame(results), use_container_width=True, height=360)
+                        st.dataframe(pd.DataFrame(results), width='stretch', height=360)
                     else:
                         st.info("No matching documents.")
                 doc_manager.close()
@@ -3462,7 +3852,7 @@ def phase6_advanced_features():
                 symbols = get_watchlist_symbols()
                 df = cached_price_snapshot(symbols)
                 st.success(f"Prefetched {len(df)} prices (cached 5 minutes)")
-                st.dataframe(df, use_container_width=True, height=300)
+                st.dataframe(df, width='stretch', height=300)
 
         st.markdown("#### Tips")
         st.write("- Use cached snapshots for watchlist.\n- Reduce table sizes with compact mode.\n- Close heavy tabs when not in use.")

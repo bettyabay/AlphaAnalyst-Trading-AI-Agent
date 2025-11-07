@@ -37,7 +37,11 @@ class DocumentManager:
             if gemini_key:
                 genai.configure(api_key=gemini_key)
                 self.gemini_client = genai
+            else:
+                print("⚠️ GEMINI_API_KEY not found in environment. Embeddings will not be generated.")
+                self.gemini_client = None
         except Exception as e:
+            print(f"⚠️ Failed to initialize Gemini client: {e}")
             self.gemini_client = None
     
     def _extract_text_from_stream(self, file_content: BinaryIO, file_extension: str) -> str:
@@ -227,21 +231,81 @@ class DocumentManager:
             return f"Unable to extract text from {file_extension} format"
     
     def _generate_embedding(self, text: str) -> Optional[List[float]]:
-        """Generate embedding vector for text"""
+        """Generate embedding vector for text using Gemini"""
         if not text:
             return None
         # Gemini-only embeddings
         if self.gemini_client:
             try:
-                model = self.gemini_client.GenerativeModel("text-embedding-004")
-                resp = model.embed_content(text)
-                vec = resp.get("embedding", {}).get("values") if isinstance(resp, dict) else getattr(resp, "embedding", None)
-                if hasattr(vec, "values"):
-                    return list(vec.values)
-                if isinstance(vec, list):
+                import google.generativeai as genai
+                
+                # Gemini embedding API has a limit of ~20,000 characters (roughly 20KB)
+                # Truncate text if too long, keeping the most important parts
+                MAX_TEXT_LENGTH = 20000  # Conservative limit to avoid 400 errors
+                original_length = len(text)
+                if original_length > MAX_TEXT_LENGTH:
+                    # Keep first part (summary) and last part (details)
+                    # This preserves key information while staying under limit
+                    first_part = text[:MAX_TEXT_LENGTH // 2]
+                    last_part = text[-(MAX_TEXT_LENGTH // 2):]
+                    truncated_text = first_part + "\n\n[... truncated ...]\n\n" + last_part
+                    text = truncated_text[:MAX_TEXT_LENGTH]
+                    print(f"⚠️ Text truncated from {original_length} to {len(text)} chars for embedding")
+                
+                # Use genai.embed_content() directly, not through GenerativeModel
+                resp = genai.embed_content(
+                    model="models/text-embedding-004",
+                    content=text,
+                    task_type="retrieval_document"  # or "retrieval_query" for queries
+                )
+                
+                # Extract embedding from response - handle different response formats
+                vec = None
+                
+                # Case 1: Response is a list (direct embedding values)
+                if isinstance(resp, list):
+                    vec = resp
+                
+                # Case 2: Response is a dict with 'embedding' key
+                elif isinstance(resp, dict):
+                    embedding_obj = resp.get("embedding")
+                    if embedding_obj:
+                        # If embedding is a dict with 'values' key
+                        if isinstance(embedding_obj, dict):
+                            vec = embedding_obj.get("values", [])
+                        # If embedding is a list directly
+                        elif isinstance(embedding_obj, list):
+                            vec = embedding_obj
+                        # If embedding has a 'values' attribute
+                        elif hasattr(embedding_obj, "values"):
+                            vec = list(embedding_obj.values)
+                
+                # Case 3: Response has 'embedding' attribute
+                elif hasattr(resp, "embedding"):
+                    embedding_obj = resp.embedding
+                    if isinstance(embedding_obj, list):
+                        vec = embedding_obj
+                    elif isinstance(embedding_obj, dict):
+                        vec = embedding_obj.get("values", [])
+                    elif hasattr(embedding_obj, "values"):
+                        vec = list(embedding_obj.values)
+                
+                # Validate and return
+                if isinstance(vec, list) and len(vec) > 0:
                     return vec
+                else:
+                    print(f"⚠️ Unexpected embedding response format: {type(resp)}. Response: {resp}")
+                    return None
             except Exception as e:
-                print(f"Embedding (Gemini) failed: {e}")
+                error_msg = str(e)
+                if "400" in error_msg and "payload size" in error_msg.lower():
+                    print(f"⚠️ Embedding failed: Text too large ({len(text)} chars). Gemini limit is ~20KB. Consider truncating content.")
+                else:
+                    print(f"Embedding (Gemini) failed: {e}")
+                import traceback
+                print(traceback.format_exc())
+        else:
+            print("⚠️ Gemini API not configured. Set GEMINI_API_KEY in .env file")
         # No embedding available
         return None
     

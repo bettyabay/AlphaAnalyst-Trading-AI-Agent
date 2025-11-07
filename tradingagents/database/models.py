@@ -60,6 +60,25 @@ SUPABASE_TABLES = {
         "last_updated": "timestamp with time zone",
         "health_score": "numeric"
     },
+    "master_data": {
+        "id": "uuid (auto-generated)",
+        "symbol": "text",
+        "content_text": "text",
+        "embedding_vector": "jsonb",
+        "full_data": "jsonb",
+        "generated_at": "timestamp with time zone",
+        "analysis_timestamp": "timestamp with time zone"
+    },
+    "instrument_profiles": {
+        "id": "uuid (auto-generated)",
+        "symbol": "text",
+        "profile_text": "text",
+        "embedding_vector": "jsonb",
+        "profile_data": "jsonb",
+        "generated_at": "timestamp with time zone",
+        "analysis_timestamp": "timestamp with time zone",
+        "source": "text"
+    },
     "trading_sessions": {
         "id": "uuid (auto-generated)",
         "user_id": "uuid",

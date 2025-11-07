@@ -34,31 +34,61 @@ class PolygonDataClient:
             print(f"Error fetching stock details for {symbol}: {e}")
             return {}
     
-    def get_historical_data(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
-        """Get historical price data for a symbol"""
+    def get_historical_data(self, symbol: str, start_date: str, end_date: str, max_retries: int = 5) -> pd.DataFrame:
+        """Get historical price data for a symbol with rate limiting"""
         url = f"{self.base_url}/v2/aggs/ticker/{symbol}/range/1/day/{start_date}/{end_date}"
         params = {"apikey": self.api_key, "adjusted": "true", "sort": "asc"}
         
-        try:
-            response = requests.get(url, params=params)
-            response.raise_for_status()
-            data = response.json()
-            
-            if data.get("results"):
-                df = pd.DataFrame(data["results"])
-                df["timestamp"] = pd.to_datetime(df["t"], unit="ms")
-                df = df.rename(columns={
-                    "o": "open", "h": "high", "l": "low", 
-                    "c": "close", "v": "volume"
-                })
-                return df[["timestamp", "open", "high", "low", "close", "volume"]]
-            else:
-                print(f"No data returned for {symbol}. Response: {data}")
-                return pd.DataFrame()
+        for attempt in range(max_retries):
+            try:
+                # Rate limiting: ensure minimum time between requests
+                elapsed = time.time() - self.last_request_time
+                if elapsed < self.min_request_interval:
+                    time.sleep(self.min_request_interval - elapsed)
                 
-        except Exception as e:
-            print(f"Error fetching historical data for {symbol}: {e}")
-            return pd.DataFrame()
+                response = requests.get(url, params=params)
+                self.last_request_time = time.time()
+                
+                # Handle rate limiting (429 status code)
+                if response.status_code == 429:
+                    wait_time = min(2 ** attempt, 60)  # Exponential backoff, max 60s
+                    if attempt < max_retries - 1:
+                        print(f"Rate limited (429) for {symbol}. Waiting {wait_time}s before retry {attempt + 1}/{max_retries}...")
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        print(f"Rate limit exceeded for {symbol} after {max_retries} attempts")
+                        return pd.DataFrame()  # Return empty DataFrame instead of raising
+                
+                response.raise_for_status()
+                data = response.json()
+                
+                if data.get("results"):
+                    df = pd.DataFrame(data["results"])
+                    df["timestamp"] = pd.to_datetime(df["t"], unit="ms")
+                    df = df.rename(columns={
+                        "o": "open", "h": "high", "l": "low", 
+                        "c": "close", "v": "volume"
+                    })
+                    return df[["timestamp", "open", "high", "low", "close", "volume"]]
+                else:
+                    print(f"No data returned for {symbol}. Response: {data}")
+                    return pd.DataFrame()
+                    
+            except requests.exceptions.HTTPError as e:
+                if "429" in str(e) and attempt < max_retries - 1:
+                    wait_time = min(2 ** attempt, 60)
+                    print(f"HTTP 429 error for {symbol}. Waiting {wait_time}s before retry {attempt + 1}/{max_retries}...")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    print(f"Error fetching historical data for {symbol}: {e}")
+                    return pd.DataFrame()
+            except Exception as e:
+                print(f"Error fetching historical data for {symbol}: {e}")
+                return pd.DataFrame()
+        
+        return pd.DataFrame()  # Return empty if all retries failed
 
     def get_intraday_data(self, symbol: str, start_date: str, end_date: str, multiplier: int = 5, timespan: str = "minute", max_retries: int = 5) -> pd.DataFrame:
         """Get intraday (e.g. 5-min) aggregated price data for a symbol
