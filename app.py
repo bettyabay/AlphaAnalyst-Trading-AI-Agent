@@ -7,6 +7,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 import os
 import io
+from uuid import uuid4
 
 # Load environment variables early
 load_dotenv()
@@ -2924,7 +2925,10 @@ def phase4_session_management_execution():
     """Phase 4: Session Management & Execution - Trade tracking and execution"""
     
     # Initialize services
-    user_id = st.session_state.get("user_id", "default_user")
+    # Ensure a valid UUID user_id is present (fixes DB uuid type errors)
+    if ("user_id" not in st.session_state) or (st.session_state.get("user_id") in [None, "", "default_user"]):
+        st.session_state.user_id = str(uuid4())
+    user_id = st.session_state.user_id
     
     if 'session_manager' not in st.session_state:
         st.session_state.session_manager = TradingSessionManager(user_id)
@@ -2969,7 +2973,20 @@ def phase4_session_management_execution():
                     try:
                         session = session_manager.create_session(session_name, notes)
                         if session:
-                            st.success("✅ New session created!")
+                            # Confirmation and DB log
+                            st.success("✅ Session created and saved to database!")
+                            try:
+                                from tradingagents.database.db_service import log_event, _make_json_serializable
+                                payload = _make_json_serializable({
+                                    "session_id": session.get("id"),
+                                    "session_name": session.get("session_name", session_name),
+                                    "start_date": session.get("start_date"),
+                                    "status": session.get("status", "active"),
+                                    "notes": notes
+                                })
+                                log_event("session_created", payload)
+                            except Exception:
+                                pass
                             st.rerun()
                     except Exception as e:
                         st.error(f"❌ Error creating session: {str(e)}")
@@ -2986,7 +3003,19 @@ def phase4_session_management_execution():
                             try:
                                 session_manager.close_session(active_session['id'], close_notes)
                                 st.session_state.show_close_session_form = False
-                                st.success("✅ Session closed!")
+                                st.success("✅ Session closed and saved to database!")
+                                try:
+                                    from tradingagents.database.db_service import log_event, _make_json_serializable
+                                    payload = _make_json_serializable({
+                                        "session_id": active_session.get("id"),
+                                        "session_name": active_session.get("session_name"),
+                                        "end_date": datetime.now().isoformat(),
+                                        "status": "closed",
+                                        "close_notes": close_notes
+                                    })
+                                    log_event("session_closed", payload)
+                                except Exception:
+                                    pass
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"❌ Error closing session: {str(e)}")
