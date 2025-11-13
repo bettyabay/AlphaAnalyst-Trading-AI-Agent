@@ -36,53 +36,102 @@ class DataIngestionPipeline:
             print(f"Error initializing stocks: {e}")
             return False
     
-    def ingest_historical_data(self, symbol: str, days_back: int = 1825, interval: str = "daily", chunk_days: int = 7, max_retries: int = 5) -> bool:
-        """Ingest historical data for a symbol, with chunked fetching and retry/backoff for 5-min data.
+    def ingest_historical_data(
+        self,
+        symbol: str,
+        days_back: int = 1825,
+        interval: str = "daily",
+        chunk_days: int = 7,
+        max_retries: int = 5,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None
+    ) -> bool:
+        """Ingest historical data for a symbol, with chunked fetching and retry/backoff for intraday data.
 
-        interval: 'daily' (default) or '5min' to ingest 5-minute bars into a separate table.
-        chunk_days: number of days per API call chunk (for 5min data)
+        interval: 'daily' (default), '5min' to ingest 5-minute bars, or '1min' to ingest 1-minute bars.
+        chunk_days: number of days per API call chunk (for intraday data)
         max_retries: max retries per chunk
+        start_date: optional explicit start datetime (inclusive)
+        end_date: optional explicit end datetime (inclusive)
         """
         try:
             if not self.supabase:
                 print("Supabase not configured. Cannot ingest data.")
                 return False
 
-            end_date = datetime.now()
-            start_date = end_date - timedelta(days=days_back)
+            def _normalize_date(value, default):
+                if value is None:
+                    return default
+                if isinstance(value, datetime):
+                    return value
+                if isinstance(value, str):
+                    try:
+                        return datetime.fromisoformat(value)
+                    except ValueError:
+                        try:
+                            return datetime.strptime(value, "%Y-%m-%d")
+                        except ValueError:
+                            raise ValueError(f"Invalid date format: {value}")
+                raise ValueError(f"Unsupported date type: {type(value)}")
+
+            try:
+                end_date = _normalize_date(end_date, datetime.now())
+                start_date = _normalize_date(start_date, end_date - timedelta(days=days_back))
+            except ValueError as date_error:
+                print(f"Invalid date provided: {date_error}")
+                return False
+
+            # Work with date boundaries only (midnight UTC naive)
+            end_date = end_date.replace(hour=0, minute=0, second=0, microsecond=0)
+            start_date = start_date.replace(hour=0, minute=0, second=0, microsecond=0)
+
+            if start_date > end_date:
+                print(f"Start date {start_date} is after end date {end_date}. Cannot ingest.")
+                return False
 
             if interval in ("5min", "5-minute", "5m"):
                 target_table = "market_data_5min"
+                multiplier = 5
+            elif interval in ("1min", "1-minute", "1m"):
+                target_table = "market_data_1min"
+                multiplier = 1
+            else:
+                target_table = None
+                multiplier = None
+            
+            if target_table and multiplier:
                 chunk_delta = timedelta(days=chunk_days)
                 chunk_start = start_date
                 all_success = True
                 total_inserted = 0
                 total_skipped = 0
-                
+
                 # Track existing timestamps per chunk (only load what we need, when we need it)
-                # This avoids loading all 57K records upfront
+                # This avoids loading all records upfront
                 existing_timestamps_cache = set()
-                
-                while chunk_start < end_date:
-                    chunk_end = min(chunk_start + chunk_delta, end_date)
+
+                while chunk_start <= end_date:
+                    chunk_end = min(chunk_start + chunk_delta - timedelta(days=1), end_date)
+                    if chunk_end < chunk_start:
+                        chunk_end = chunk_start
+
                     start_str = chunk_start.strftime("%Y-%m-%d")
                     end_str = chunk_end.strftime("%Y-%m-%d")
-                    
+
                     # Check existing records ONLY for this specific chunk date range
-                    # This is much faster than checking all 57K records
                     chunk_existing_timestamps = set()
                     try:
-                        # Query only timestamps in this chunk's date range (much smaller dataset)
+                        # Query only timestamps in this chunk's date range (exclusive upper bound)
                         chunk_start_iso = chunk_start.isoformat()
-                        chunk_end_iso = chunk_end.isoformat()
-                        
+                        chunk_end_exclusive = (chunk_end + timedelta(days=1)).isoformat()
+
                         result = self.supabase.table(target_table)\
                             .select("timestamp")\
                             .eq("symbol", symbol)\
                             .gte("timestamp", chunk_start_iso)\
-                            .lt("timestamp", chunk_end_iso)\
+                            .lt("timestamp", chunk_end_exclusive)\
                             .execute()
-                        
+
                         if result.data:
                             for record in result.data:
                                 ts = record.get("timestamp")
@@ -92,11 +141,11 @@ class DataIngestionPipeline:
                                     existing_timestamps_cache.add(ts_normalized)  # Cache for later chunks
                     except Exception as e:
                         print(f"Warning: Could not check existing records for {symbol} chunk {start_str} to {end_str}: {e}")
-                    
+
                     attempt = 0
                     while attempt < max_retries:
                         try:
-                            data = self.polygon_client.get_intraday_data(symbol, start_str, end_str, multiplier=5, max_retries=max_retries)
+                            data = self.polygon_client.get_intraday_data(symbol, start_str, end_str, multiplier=multiplier, max_retries=max_retries)
                             if data.empty:
                                 # Check if dates are in the future (no need to print for future dates)
                                 try:
@@ -106,17 +155,17 @@ class DataIngestionPipeline:
                                     if start_dt <= now and end_dt <= now:
                                         # Past dates with no data - might be weekend/holiday
                                         print(f"No trading data for {symbol} {start_str} to {end_str} (likely weekend/holiday)")
-                                except:
+                                except Exception:
                                     print(f"No data for {symbol} {start_str} to {end_str}")
                                 break  # Don't retry empty data
-                            
+
                             # Prepare rows and filter duplicates using chunk-specific existing timestamps
                             rows = []
                             new_rows = []
                             for _, row in data.iterrows():
                                 timestamp_iso = row["timestamp"].isoformat()
                                 timestamp_normalized = timestamp_iso.split('+')[0].split('Z')[0]
-                                
+
                                 row_data = {
                                     "symbol": symbol,
                                     "timestamp": timestamp_iso,
@@ -128,14 +177,14 @@ class DataIngestionPipeline:
                                     "source": "polygon"
                                 }
                                 rows.append(row_data)
-                                
+
                                 # Check both chunk-specific cache and global cache
                                 if timestamp_normalized not in chunk_existing_timestamps and timestamp_normalized not in existing_timestamps_cache:
                                     new_rows.append(row_data)
                                     # Add to both caches to avoid duplicates
                                     chunk_existing_timestamps.add(timestamp_normalized)
                                     existing_timestamps_cache.add(timestamp_normalized)
-                            
+
                             # Bulk insert only new records (batch if too many to avoid timeouts)
                             if new_rows:
                                 batch_size = 5000  # Insert in batches to avoid timeout
@@ -175,7 +224,7 @@ class DataIngestionPipeline:
                             else:
                                 total_skipped += len(rows)
                                 print(f"All {len(rows)} records for {symbol} {start_str} to {end_str} already exist, skipping")
-                            
+
                             break  # Success, break retry loop
                         except Exception as e:
                             # Check if it's a rate limit error that should stop processing
@@ -202,8 +251,8 @@ class DataIngestionPipeline:
                                 if attempt >= max_retries:
                                     print(f"Max retries reached for {symbol} {start_str} to {end_str}. Skipping chunk.")
                                     all_success = False
-                    chunk_start = chunk_end
-                
+                    chunk_start = chunk_end + timedelta(days=1)
+
                 print(f"Completed {symbol}: Inserted {total_inserted} new records, skipped {total_skipped} duplicates")
                 return all_success
             else:

@@ -17,6 +17,30 @@ SUPABASE_TABLES = {
         "source": "text",
         "created_at": "timestamp with time zone"
     },
+    "market_data_1min": {
+        "id": "bigint (auto-increment)",
+        "symbol": "text",
+        "timestamp": "timestamp with time zone",
+        "open": "numeric",
+        "high": "numeric",
+        "low": "numeric",
+        "close": "numeric",
+        "volume": "bigint",
+        "source": "text",
+        "created_at": "timestamp with time zone"
+    },
+    "market_data_5min": {
+        "id": "bigint (auto-increment)",
+        "symbol": "text",
+        "timestamp": "timestamp with time zone",
+        "open": "numeric",
+        "high": "numeric",
+        "low": "numeric",
+        "close": "numeric",
+        "volume": "bigint",
+        "source": "text",
+        "created_at": "timestamp with time zone"
+    },
     "documents": {
         "id": "uuid (auto-generated)",
         "symbol": "text",

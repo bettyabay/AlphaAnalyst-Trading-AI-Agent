@@ -780,6 +780,64 @@ def phase1_foundation_data():
 
             progress_bar.empty()
             status_text.empty()
+
+    # New: 1-minute intraday ingestion (Aug-Oct 2025)
+    with col1:
+        if st.button("Ingest 1-min Data (Aug-Oct 2025)", width='stretch', key="ingest_all_1min"):
+            pipeline = DataIngestionPipeline()
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+
+            symbols = get_watchlist_symbols()
+            results_1min = {}
+            start_range = datetime(2025, 8, 1)
+            end_range = datetime(2025, 10, 31)
+
+            for i, symbol in enumerate(symbols):
+                status_text.text(f"Processing 1-min {symbol}... ({i+1}/{len(symbols)})")
+                progress_bar.progress((i + 1) / len(symbols))
+
+                # Ingest 3 months of 1-min data (Aug-Oct 2025)
+                result = pipeline.ingest_historical_data(
+                    symbol,
+                    interval='1min',
+                    chunk_days=3,
+                    start_date=start_range,
+                    end_date=end_range
+                )
+                results_1min[symbol] = result
+
+                if result:
+                    st.success(f"✅ 1-min {symbol} processed successfully (Aug-Oct 2025)")
+                else:
+                    st.warning(f"⚠️ 1-min {symbol} had issues (check console for details)")
+
+            pipeline.close()
+
+            success_count = sum(1 for success in results_1min.values() if success)
+            failed_count = len(results_1min) - success_count
+
+            if success_count > 0:
+                st.success(f"✅ Successfully processed 1-min data (Aug-Oct 2025) for {success_count}/{len(results_1min)} stocks")
+                st.balloons()
+            else:
+                st.error(f"❌ Failed to process 1-min data for all {len(results_1min)} stocks")
+
+            if failed_count > 0:
+                st.warning(f"⚠️ {failed_count} stocks had issues for 1-min ingestion")
+                failed_stocks = [symbol for symbol, success in results_1min.items() if not success]
+                st.write("Stocks with issues:", ", ".join(failed_stocks))
+
+            # Show detailed results
+            st.subheader("1-min Detailed Results (Aug-Oct 2025)")
+            results_df = pd.DataFrame([
+                {"Symbol": symbol, "Status": "✅ Success" if success else "⚠️ Issues"}
+                for symbol, success in results_1min.items()
+            ])
+            st.dataframe(results_df, width='stretch')
+
+            progress_bar.empty()
+            status_text.empty()
     
     with col2:
         if st.button("Check Data Status", width='stretch', key="main_data_status"):
@@ -828,6 +886,31 @@ def phase1_foundation_data():
                 status_df_5min = pd.DataFrame(rows_5min)
                 st.subheader("5-minute data status")
                 st.dataframe(status_df_5min, width='stretch')
+
+                # Also show 1-min data counts if table exists
+                rows_1min = []
+                for symbol in WATCHLIST_STOCKS.keys():
+                    try:
+                        resp1 = sb.table("market_data_1min").select("timestamp").eq("symbol", symbol).limit(1).execute()
+                        # If query succeeds, get count via RPC or select
+                        try:
+                            resp1c = sb.rpc("get_symbol_stats_1min", {"p_symbol": symbol}).execute()
+                            data1 = resp1c.data if hasattr(resp1c, "data") else []
+                            count1 = len(data1) if isinstance(data1, list) else 0
+                        except Exception:
+                            resp1all = sb.table("market_data_1min").select("timestamp").eq("symbol", symbol).execute()
+                            data1all = resp1all.data if hasattr(resp1all, "data") else []
+                            count1 = len(data1all) if isinstance(data1all, list) else 0
+                    except Exception:
+                        count1 = 0
+                    rows_1min.append({
+                        "Symbol": symbol,
+                        "Records (1min)": count1,
+                        "Latest Timestamp": "-"
+                    })
+                status_df_1min = pd.DataFrame(rows_1min)
+                st.subheader("1-minute data status")
+                st.dataframe(status_df_1min, width='stretch')
             else:
                 pipeline = DataIngestionPipeline()
                 status = pipeline.get_data_completion_status()
