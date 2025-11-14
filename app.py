@@ -1026,10 +1026,80 @@ def phase1_foundation_data():
             })
         
         if display_docs:
-            doc_df = pd.DataFrame(display_docs)
-            st.dataframe(doc_df, width='stretch')
+            # Custom table with download buttons
+            st.markdown("#### Documents Table")
+            
+            # Table header
+            header_cols = st.columns([0.5, 2, 1, 2, 1.5, 1, 1.2])
+            with header_cols[0]:
+                st.write("**ID**")
+            with header_cols[1]:
+                st.write("**File Name**")
+            with header_cols[2]:
+                st.write("**Symbol**")
+            with header_cols[3]:
+                st.write("**Content Preview**")
+            with header_cols[4]:
+                st.write("**Created**")
+            with header_cols[5]:
+                st.write("**Size**")
+            with header_cols[6]:
+                st.write("**Download**")
+            
+            st.markdown("---")
+            
+            # Table rows with download buttons
+            for i, (display_doc, doc) in enumerate(zip(display_docs, filtered_docs)):
+                row_cols = st.columns([0.5, 2, 1, 2, 1.5, 1, 1.2])
+                
+                with row_cols[0]:
+                    st.write(display_doc["ID"])
+                with row_cols[1]:
+                    st.write(display_doc["File Name"])
+                with row_cols[2]:
+                    st.write(display_doc["Symbol"])
+                with row_cols[3]:
+                    st.write(display_doc["Content Preview"])
+                with row_cols[4]:
+                    st.write(display_doc["Created"])
+                with row_cols[5]:
+                    st.write(display_doc["Size"])
+                with row_cols[6]:
+                    # Get file content and determine file type
+                    file_content = doc.get("file_content", "")
+                    file_name = doc.get("file_name", f"document_{i+1}")
+                    
+                    # Since documents are stored as extracted text content,
+                    # we'll download as text files but preserve original filename
+                    # If original was PDF/DOCX, download as .txt with original name prefix
+                    if file_name.lower().endswith(('.pdf', '.docx', '.doc')):
+                        # Change extension to .txt since we only have text content
+                        base_name = file_name.rsplit('.', 1)[0] if '.' in file_name else file_name
+                        download_filename = f"{base_name}.txt"
+                    elif not file_name.lower().endswith('.txt'):
+                        # Add .txt extension if missing
+                        download_filename = f"{file_name}.txt"
+                    else:
+                        download_filename = file_name
+                    
+                    # Always use text/plain MIME type since we have text content
+                    mime_type = "text/plain"
+                    
+                    # Create download button
+                    st.download_button(
+                        label="⬇️ Download",
+                        data=file_content.encode('utf-8') if isinstance(file_content, str) else file_content,
+                        file_name=download_filename,
+                        mime=mime_type,
+                        key=f"download_doc_{i}_{doc.get('id', i)}"
+                    )
+                
+                # Add separator between rows (optional visual separator)
+                if i < len(display_docs) - 1:
+                    st.markdown("<hr style='margin: 0.5rem 0;'>", unsafe_allow_html=True)
             
             # Add document actions
+            st.markdown("---")
             st.markdown("#### Document Actions")
             selected_doc_idx = st.selectbox(
                 "Select Document for Actions", 
