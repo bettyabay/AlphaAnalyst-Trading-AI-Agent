@@ -10,6 +10,7 @@ import yfinance as yf
 
 from ...dataflows.ai_analysis import AIResearchAnalyzer
 from ...dataflows.document_manager import DocumentManager
+from ...dataflows.market_data_service import fetch_ohlcv, period_to_days
 
 
 class VolumeScreeningEngine:
@@ -36,24 +37,15 @@ class VolumeScreeningEngine:
     
     def _fetch_history(self, symbol: str, period: str = "3mo", interval: str = "1d") -> Optional[pd.DataFrame]:
         """Fetch historical data"""
-        try:
-            data = yf.download(symbol, period=period, interval=interval, progress=False)
-            if data is None or data.empty:
-                return None
-            
-            # Handle MultiIndex columns (yfinance returns MultiIndex with symbol name as second level)
-            if isinstance(data.columns, pd.MultiIndex):
-                data = data.droplevel(1, axis=1)
-            
-            # Ensure required columns exist
-            required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
-            for col in required_cols:
-                if col not in data.columns:
-                    return None
-            
-            return data
-        except Exception:
+        lookback = period_to_days(period, default=180)
+        data = fetch_ohlcv(symbol, interval=interval, lookback_days=lookback)
+        if data is None or data.empty:
             return None
+        required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+        for col in required_cols:
+            if col not in data.columns:
+                return None
+        return data
     
     def screen_symbol(self, symbol: str) -> Dict:
         """Screen a single symbol for volume spike criteria"""
@@ -187,24 +179,15 @@ class FireTestingEngine:
     
     def _fetch_history(self, symbol: str, period: str = "6mo", interval: str = "1d") -> Optional[pd.DataFrame]:
         """Fetch historical data"""
-        try:
-            data = yf.download(symbol, period=period, interval=interval, progress=False)
-            if data is None or data.empty:
-                return None
-            
-            # Handle MultiIndex columns (yfinance returns MultiIndex with symbol name as second level)
-            if isinstance(data.columns, pd.MultiIndex):
-                data = data.droplevel(1, axis=1)
-            
-            # Ensure required columns exist
-            required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
-            for col in required_cols:
-                if col not in data.columns:
-                    return None
-            
-            return data
-        except Exception:
+        lookback = period_to_days(period, default=180)
+        data = fetch_ohlcv(symbol, interval=interval, lookback_days=lookback)
+        if data is None or data.empty:
             return None
+        required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+        for col in required_cols:
+            if col not in data.columns:
+                return None
+        return data
     
     def _get_col_series(self, df: pd.DataFrame, col_name: str) -> Optional[pd.Series]:
         """Safely extract column series from DataFrame"""

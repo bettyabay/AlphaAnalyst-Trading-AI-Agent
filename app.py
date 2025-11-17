@@ -23,6 +23,11 @@ from tradingagents.dataflows.ingestion_pipeline import DataIngestionPipeline
 from tradingagents.dataflows.document_manager import DocumentManager
 from tradingagents.config.watchlist import WATCHLIST_STOCKS, get_watchlist_symbols
 from tradingagents.dataflows.polygon_integration import PolygonDataClient
+from tradingagents.dataflows.market_data_service import (
+    fetch_ohlcv,
+    get_latest_price,
+    period_to_days
+)
 
 # Phase 2 imports
 from tradingagents.dataflows.ai_analysis import AIResearchAnalyzer
@@ -187,6 +192,24 @@ st.markdown("""
         color: white !important;
     }
     
+    /* Small download buttons */
+    button[data-testid*="baseButton-secondary"] {
+        padding: 0.2rem 0.4rem !important;
+        font-size: 0.75rem !important;
+        min-width: 2rem !important;
+        height: 1.8rem !important;
+        line-height: 1 !important;
+    }
+    
+    /* Specifically target download buttons */
+    .stDownloadButton > button {
+        padding: 0.2rem 0.4rem !important;
+        font-size: 0.75rem !important;
+        min-width: 2rem !important;
+        height: 1.8rem !important;
+        line-height: 1 !important;
+    }
+    
     /* Tabs */
     .stTabs [data-baseweb="tab-list"] {
         background: rgba(255, 255, 255, 0.1);
@@ -327,9 +350,26 @@ def initialize_agents():
 
 def get_stock_data(symbol):
     try:
-        stock = yf.Ticker(symbol)
-        info = stock.info
-        hist = stock.history(period="1y")
+        hist = fetch_ohlcv(symbol, interval="1d", lookback_days=365)
+        if hist is None or hist.empty:
+            st.error(f"No stored historical data for {symbol}. Please run the ingestion pipeline.")
+            return None, None
+        
+        latest_close = float(hist["Close"].iloc[-1])
+        first_close = float(hist["Close"].iloc[0])
+        price_change_pct = ((latest_close - first_close) / first_close) * 100 if first_close else 0.0
+        avg_volume = float(hist["Volume"].tail(20).mean()) if "Volume" in hist.columns else 0.0
+        
+        info = {
+            "symbol": symbol.upper(),
+            "currentPrice": latest_close,
+            "priceChangePct": price_change_pct,
+            "recommendationKey": "Neutral",
+            "forwardPE": None,
+            "averageVolume": avg_volume,
+            "fiftyTwoWeekHigh": float(hist["Close"].max()),
+            "fiftyTwoWeekLow": float(hist["Close"].min()),
+        }
         return info, hist
     except Exception as e:
         st.error(f"Error fetching data: {str(e)}")
@@ -1026,98 +1066,62 @@ def phase1_foundation_data():
             })
         
         if display_docs:
-            # Custom table with download buttons
-            st.markdown("#### Documents Table")
-            
-            # Table header
-            header_cols = st.columns([0.5, 2, 1, 2, 1.5, 1, 1.2])
-            with header_cols[0]:
-                st.write("**ID**")
-            with header_cols[1]:
-                st.write("**File Name**")
-            with header_cols[2]:
-                st.write("**Symbol**")
-            with header_cols[3]:
-                st.write("**Content Preview**")
-            with header_cols[4]:
-                st.write("**Created**")
-            with header_cols[5]:
-                st.write("**Size**")
-            with header_cols[6]:
-                st.write("**Download**")
-            
-            st.markdown("---")
-            
-            # Table rows with download buttons
-            for i, (display_doc, doc) in enumerate(zip(display_docs, filtered_docs)):
-                row_cols = st.columns([0.5, 2, 1, 2, 1.5, 1, 1.2])
-                
-                with row_cols[0]:
-                    st.write(display_doc["ID"])
-                with row_cols[1]:
-                    st.write(display_doc["File Name"])
-                with row_cols[2]:
-                    st.write(display_doc["Symbol"])
-                with row_cols[3]:
-                    st.write(display_doc["Content Preview"])
-                with row_cols[4]:
-                    st.write(display_doc["Created"])
-                with row_cols[5]:
-                    st.write(display_doc["Size"])
-                with row_cols[6]:
-                    # Get file content and determine file type
-                    file_content = doc.get("file_content", "")
-                    file_name = doc.get("file_name", f"document_{i+1}")
-                    
-                    # Since documents are stored as extracted text content,
-                    # we'll download as text files but preserve original filename
-                    # If original was PDF/DOCX, download as .txt with original name prefix
-                    if file_name.lower().endswith(('.pdf', '.docx', '.doc')):
-                        # Change extension to .txt since we only have text content
-                        base_name = file_name.rsplit('.', 1)[0] if '.' in file_name else file_name
-                        download_filename = f"{base_name}.txt"
-                    elif not file_name.lower().endswith('.txt'):
-                        # Add .txt extension if missing
-                        download_filename = f"{file_name}.txt"
-                    else:
-                        download_filename = file_name
-                    
-                    # Always use text/plain MIME type since we have text content
-                    mime_type = "text/plain"
-                    
-                    # Create download button
-                    st.download_button(
-                        label="⬇️ Download",
-                        data=file_content.encode('utf-8') if isinstance(file_content, str) else file_content,
-                        file_name=download_filename,
-                        mime=mime_type,
-                        key=f"download_doc_{i}_{doc.get('id', i)}"
-                    )
-                
-                # Add separator between rows (optional visual separator)
-                if i < len(display_docs) - 1:
-                    st.markdown("<hr style='margin: 0.5rem 0;'>", unsafe_allow_html=True)
-            
-            # Add document actions
-            st.markdown("---")
-            st.markdown("#### Document Actions")
+            # Compact dropdown instead of bulky table
+            st.markdown("#### Documents")
             selected_doc_idx = st.selectbox(
-                "Select Document for Actions", 
+                "Select Document",
                 range(len(filtered_docs)),
-                format_func=lambda x: f"#{x+1} - {display_docs[x]['File Name']}",
-                key="doc_actions"
+                format_func=lambda x: display_docs[x]["File Name"],
+                key="doc_dropdown",
             )
-            
+
+            selected_doc = filtered_docs[selected_doc_idx]
+            selected_display = display_docs[selected_doc_idx]
+
+            # Summary line
+            st.write(
+                f"**File:** {selected_display['File Name']}  |  "
+                f"**Symbol:** {selected_display['Symbol']}  |  "
+                f"**Created:** {selected_display['Created']}  |  "
+                f"**Size:** {selected_display['Size']}"
+            )
+            st.caption(selected_display["Content Preview"])
+
+            # Download button for selected document
+            file_content = selected_doc.get("file_content", "")
+            file_name = selected_doc.get("file_name", f"document_{selected_doc_idx+1}")
+
+            if file_name.lower().endswith(('.pdf', '.docx', '.doc')):
+                base_name = file_name.rsplit('.', 1)[0] if '.' in file_name else file_name
+                download_filename = f"{base_name}.txt"
+            elif not file_name.lower().endswith('.txt'):
+                download_filename = f"{file_name}.txt"
+            else:
+                download_filename = file_name
+
+            st.download_button(
+                label="⬇️ Download",
+                data=file_content.encode('utf-8') if isinstance(file_content, str) else file_content,
+                file_name=download_filename,
+                mime="text/plain",
+                key=f"download_doc_selected_{selected_doc.get('id', selected_doc_idx)}",
+                use_container_width=False,
+            )
+
+            # Actions
+            st.markdown("---")
             col1, col2 = st.columns(2)
             with col1:
                 if st.button("📄 View Full Content", key="view_content"):
-                    selected_doc = filtered_docs[selected_doc_idx]
                     st.subheader(f"Content: {selected_doc.get('file_name', 'Unknown')}")
-                    st.text_area("Document Content", selected_doc.get("file_content", ""), height=300)
-            
+                    st.text_area(
+                        "Document Content",
+                        selected_doc.get("file_content", ""),
+                        height=300,
+                    )
+
             with col2:
                 if st.button("🗑️ Delete Document", key="delete_doc"):
-                    selected_doc = filtered_docs[selected_doc_idx]
                     doc_id = selected_doc.get("id")
                     if doc_id and doc_manager.delete_document(doc_id):
                         st.success("Document deleted successfully!")
@@ -1793,7 +1797,7 @@ CREATE INDEX idx_master_data_generated_at ON master_data(generated_at DESC);
             ### **Data Flow & Sources:**
             
             **1. Market Data** (`profile['market_data']`):
-            - **Source**: Polygon.io API (primary) or yfinance (fallback)
+            - **Source**: Supabase tables (`market_data`, `market_data_5min`, `market_data_1min`) populated by the ingestion pipeline
             - **Method**: `_get_market_data()` in `ai_analysis.py` lines 59-138
             - **Data Retrieved**: 
               - Last 30 days of OHLCV data
@@ -1834,7 +1838,7 @@ CREATE INDEX idx_master_data_generated_at ON master_data(generated_at DESC);
             
             ### **Complete Flow:**
             1. User clicks "Generate Profile" → calls `analyze_instrument_profile(symbol)`
-            2. System fetches: Market Data (Polygon) + Document Insights (DB) + News Sentiment (placeholder)
+            2. System fetches: Market Data (Supabase tables) + Document Insights (DB) + News Sentiment (placeholder)
             3. All data combined into prompt → sent to LLM (Groq)
             4. LLM generates comprehensive analysis text
             5. System extracts sentiment, recommendation, confidence from LLM response
@@ -1862,7 +1866,7 @@ CREATE INDEX idx_master_data_generated_at ON master_data(generated_at DESC);
                     
                     with col1:
                         st.subheader("Market Data")
-                        st.caption("**Source**: Polygon.io API (30-day historical data) → `_get_market_data()`")
+                        st.caption("**Source**: Supabase (`market_data`) - 30-day historical data ingested via Polygon/DB pipelines → `_get_market_data()`")
                         market_data = profile.get("market_data", {})
                         if "error" not in market_data:
                             data_source = market_data.get("source", "unknown")
@@ -2140,18 +2144,11 @@ def _calc_atr(df, period=14):
     return atr
 
 def _fetch_history(symbol, period="6mo", interval="1d"):
-    try:
-        data = yf.download(symbol, period=period, interval=interval, progress=False)
-        if data is None or data.empty:
-            return None
-        
-        # Handle MultiIndex columns (yfinance returns MultiIndex with symbol name as second level)
-        if isinstance(data.columns, pd.MultiIndex):
-            data = data.droplevel(1, axis=1)
-        
-        return data
-    except Exception:
+    lookback_days = period_to_days(period, default=180)
+    data = fetch_ohlcv(symbol, interval=interval, lookback_days=lookback_days)
+    if data is None or data.empty:
         return None
+    return data
 
 def run_volume_screening(symbols):
     rows = []
@@ -3334,19 +3331,22 @@ def phase4_session_management_execution():
             trade_type = st.selectbox("Trade Type", ["LONG", "SHORT"], key="execute_type")
         
         with col_exec2:
-            # Get current price
-            try:
-                ticker = yf.Ticker(symbol)
-                info = ticker.info
-                current_price = info.get("regularMarketPrice") or info.get("currentPrice") or info.get("previousClose", 0)
-                st.info(f"💵 **Current Price**: ${current_price:.2f}")
-            except Exception:
-                current_price = 0
-                st.warning("⚠️ Could not fetch current price")
+            price_snapshot = get_latest_price(symbol)
+            if price_snapshot and price_snapshot.get("price") is not None:
+                current_price = float(price_snapshot["price"])
+                label = price_snapshot.get("interval", "1d")
+                st.info(f"💵 **Current Price ({label})**: ${current_price:.2f}")
+            else:
+                current_price = 0.0
+                st.warning("⚠️ Could not find a stored price for this symbol. Ingest data first.")
             
-            entry_price = st.number_input("Entry Price", min_value=0.0, step=0.01, 
-                                          value=float(current_price) if current_price else 0.0, 
-                                          key="execute_entry_price")
+            entry_price = st.number_input(
+                "Entry Price",
+                min_value=0.0,
+                step=0.01,
+                value=float(current_price) if current_price else 0.0,
+                key="execute_entry_price"
+            )
             
             # Risk parameters
             st.markdown("#### 🛡️ Risk Management (Optional)")
@@ -3880,12 +3880,12 @@ def phase6_advanced_features():
                         if analysis_text:
                             response_text += f"\nKey Points:\n{analysis_text[:600]}"  # concise
                     else:
-                        # Fallback to quick price via yfinance
-                        try:
-                            info, _ = get_stock_data(symbol)
-                            price = info.get("regularMarketPrice") or info.get("currentPrice") or info.get("previousClose")
-                            response_text += f"{symbol} current price: ${price}\n(Enable GROQ_API_KEY or GROK_API_KEY for deeper AI insights.)"
-                        except Exception:
+                        # Fallback to stored historical price
+                        info, _ = get_stock_data(symbol)
+                        if info and info.get("currentPrice") is not None:
+                            price = float(info.get("currentPrice"))
+                            response_text += f"{symbol} latest stored price: ${price:.2f}\n(Enable GROQ_API_KEY or GROK_API_KEY for deeper AI insights.)"
+                        else:
                             response_text = f"I couldn't analyze {symbol} right now. Try again later."
                 else:
                     # Non-symbol general question: summarize recent system state

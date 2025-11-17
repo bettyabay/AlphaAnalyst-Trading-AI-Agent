@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from .document_manager import DocumentManager
-from .polygon_integration import PolygonDataClient
+from .market_data_service import fetch_ohlcv
 from groq import Groq
 
 
@@ -24,7 +24,6 @@ class AIResearchAnalyzer:
         # Groq-only initialization
         self.groq_key = os.getenv("GROQ_API_KEY", "") or os.getenv("GROK_API_KEY", "")
         self.document_manager = DocumentManager()
-        self.polygon_client = PolygonDataClient()
     
     def analyze_instrument_profile(self, symbol: str) -> Dict:
         """Create comprehensive AI analysis of an instrument"""
@@ -59,82 +58,27 @@ class AIResearchAnalyzer:
     def _get_market_data(self, symbol: str) -> Dict:
         """Get recent market data for analysis"""
         try:
-            # Try Polygon first
-            recent_data = self.polygon_client.get_recent_data(symbol, days=30)
-            
-            if recent_data is not None and len(recent_data) > 0:
-                latest = recent_data.iloc[-1]
-                first = recent_data.iloc[0]
-                
-                price_change = latest['close'] - first['close']
-                price_change_pct = (price_change / first['close']) * 100
-                
-                return {
-                    "current_price": latest['close'],
-                    "price_change": price_change,
-                    "price_change_pct": price_change_pct,
-                    "volume": latest['volume'],
-                    "high_30d": recent_data['high'].max(),
-                    "low_30d": recent_data['low'].min(),
-                    "volatility": recent_data['close'].std(),
-                    "source": "polygon"
-                }
-            
-            # Fallback to yfinance if Polygon fails
-            try:
-                import yfinance as yf
-                ticker = yf.Ticker(symbol)
-                hist = ticker.history(period="1mo")
-                
-                if hist is not None and len(hist) > 0:
-                    latest = hist.iloc[-1]
-                    first = hist.iloc[0]
-                    
-                    price_change = float(latest['Close']) - float(first['Close'])
-                    price_change_pct = (price_change / float(first['Close'])) * 100
-                    
-                    return {
-                        "current_price": float(latest['Close']),
-                        "price_change": price_change,
-                        "price_change_pct": price_change_pct,
-                        "volume": int(latest['Volume']),
-                        "high_30d": float(hist['High'].max()),
-                        "low_30d": float(hist['Low'].min()),
-                        "volatility": float(hist['Close'].std()),
-                        "source": "yfinance"
-                    }
-            except Exception as yf_error:
-                print(f"YFinance fallback failed for {symbol}: {yf_error}")
-            
-            return {"error": "No market data available from Polygon or YFinance"}
-                
+            recent_data = fetch_ohlcv(symbol, interval="1d", lookback_days=40)
+            if recent_data is None or recent_data.empty:
+                return {"error": "No stored market data in Supabase. Please ingest data first."}
+
+            latest = recent_data.iloc[-1]
+            first = recent_data.iloc[0]
+
+            price_change = float(latest['Close']) - float(first['Close'])
+            price_change_pct = (price_change / float(first['Close'])) * 100 if float(first['Close']) else 0.0
+
+            return {
+                "current_price": float(latest['Close']),
+                "price_change": price_change,
+                "price_change_pct": price_change_pct,
+                "volume": int(latest['Volume']) if 'Volume' in recent_data.columns else None,
+                "high_30d": float(recent_data['High'].max()),
+                "low_30d": float(recent_data['Low'].min()),
+                "volatility": float(recent_data['Close'].std()),
+                "source": "supabase_market_data"
+            }
         except Exception as e:
-            # Try yfinance fallback on exception too
-            try:
-                import yfinance as yf
-                ticker = yf.Ticker(symbol)
-                hist = ticker.history(period="1mo")
-                
-                if hist is not None and len(hist) > 0:
-                    latest = hist.iloc[-1]
-                    first = hist.iloc[0]
-                    
-                    price_change = float(latest['Close']) - float(first['Close'])
-                    price_change_pct = (price_change / float(first['Close'])) * 100
-                    
-                    return {
-                        "current_price": float(latest['Close']),
-                        "price_change": price_change,
-                        "price_change_pct": price_change_pct,
-                        "volume": int(latest['Volume']),
-                        "high_30d": float(hist['High'].max()),
-                        "low_30d": float(hist['Low'].min()),
-                        "volatility": float(hist['Close'].std()),
-                        "source": "yfinance"
-                    }
-            except:
-                pass
-            
             return {"error": f"Market data error: {str(e)}"}
     
     def _analyze_news_sentiment(self, symbol: str) -> Dict:

@@ -2,11 +2,11 @@
 Phase 4: Session Management & Trade Execution
 Manages trading sessions, active trades, and enforces concurrency limits
 """
-import yfinance as yf
 from typing import Dict, List, Optional, Any
-from datetime import datetime, timedelta
+from datetime import datetime
 from ...database.config import get_supabase
 from ...database.db_service import log_event, _make_json_serializable
+from ...dataflows.market_data_service import get_latest_price
 
 
 class TradingSessionManager:
@@ -434,14 +434,13 @@ class TradeExecutionService:
     
     def _get_current_price(self, symbol: str) -> Optional[float]:
         """Get current price for a symbol"""
-        try:
-            ticker = yf.Ticker(symbol)
-            info = ticker.info
-            price = info.get("regularMarketPrice") or info.get("currentPrice") or info.get("previousClose")
-            return float(price) if price else None
-        except Exception as e:
-            print(f"Error getting current price for {symbol}: {e}")
-            return None
+        snapshot = get_latest_price(symbol)
+        if snapshot and snapshot.get("price") is not None:
+            try:
+                return float(snapshot["price"])
+            except (TypeError, ValueError):
+                return None
+        return None
     
     def _get_trade_record(self, symbol: str) -> Optional[Dict]:
         """Get trade record from database"""
