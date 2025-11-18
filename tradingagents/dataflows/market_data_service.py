@@ -115,6 +115,11 @@ def fetch_ohlcv(
     supabase = get_supabase()
     if not supabase:
         return pd.DataFrame()
+    
+    # Debug logging (can be disabled in production)
+    import os
+    if os.getenv("DEBUG_DB_QUERIES", "false").lower() == "true":
+        print(f"🔍 [DB] fetch_ohlcv({symbol}, interval={interval}, lookback_days={lookback_days})")
 
     table = config["table"]
     time_field = config["time_field"]
@@ -166,6 +171,12 @@ def fetch_ohlcv(
         df.index = pd.to_datetime(df.index)
         df.index.name = "Date" if is_date else "Timestamp"
         df = df.dropna(subset=["Open", "High", "Low", "Close"])
+        
+        # Debug logging
+        import os
+        if os.getenv("DEBUG_DB_QUERIES", "false").lower() == "true":
+            print(f"✅ [DB] Retrieved {len(df)} records from {table} for {symbol}")
+        
         return df
     except Exception as exc:
         print(f"Error fetching OHLCV for {symbol} ({interval}): {exc}")

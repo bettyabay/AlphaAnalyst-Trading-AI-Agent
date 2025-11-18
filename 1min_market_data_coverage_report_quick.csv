@@ -1,0 +1,20 @@
+Symbol,Stock Name,Earliest Date,Latest Date,Date Range (Days),Has Data
+COIN,"Coinbase Global, Inc.",2025-08-01,2025-10-31,91,Yes
+TSLA,"Tesla, Inc.",2025-08-01,2025-10-31,91,Yes
+NVDA,NVIDIA Corporation,2025-08-01,2025-10-31,91,Yes
+AVGO,Broadcom Inc.,2025-08-01,2025-10-31,91,Yes
+PLTR,Palantir Technologies Inc.,2025-08-01,2025-10-31,91,Yes
+LRCX,Lam Research Corporation,2025-08-01,2025-10-31,91,Yes
+CRWD,"CrowdStrike Holdings, Inc.",2025-08-01,2025-10-31,91,Yes
+HOOD,"Robinhood Markets, Inc.",2025-08-01,2025-10-31,91,Yes
+APP,AppLovin Corporation,2025-08-01,2025-10-31,91,Yes
+MU,"Micron Technology, Inc.",2025-08-01,2025-10-31,91,Yes
+SNPS,"Synopsys, Inc.",2025-08-01,2025-10-31,91,Yes
+CDNS,"Cadence Design Systems, Inc.",2025-08-01,2025-10-31,91,Yes
+VST,Vistra Corp.,2025-08-01,2025-10-31,91,Yes
+DASH,"DoorDash, Inc.",No data,No data,0,No
+DELL,Dell Technologies Inc.,No data,No data,0,No
+NOW,"ServiceNow, Inc.",No data,No data,0,No
+PANW,"Palo Alto Networks, Inc.",No data,No data,0,No
+AXON,"Axon Enterprise, Inc.",No data,No data,0,No
+URI,"United Rentals, Inc.",No data,No data,0,No

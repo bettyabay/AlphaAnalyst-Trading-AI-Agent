@@ -1,5 +1,5 @@
 """
-Utility script to check 5-minute market data coverage for all stocks in the watchlist.
+Utility script to check 1-minute market data coverage for all stocks in the watchlist.
 Shows which stocks have data, date ranges, and record counts.
 """
 import os
@@ -14,9 +14,9 @@ from tradingagents.config.watchlist import WATCHLIST_STOCKS, get_watchlist_symbo
 load_dotenv()
 
 
-def get_market_data_coverage(symbol: str, supabase) -> Dict:
+def get_1min_market_data_coverage(symbol: str, supabase) -> Dict:
     """
-    Get market data coverage statistics for a single symbol.
+    Get 1-minute market data coverage statistics for a single symbol.
     
     Returns:
         Dictionary with symbol, record_count, earliest_date, latest_date, 
@@ -24,8 +24,7 @@ def get_market_data_coverage(symbol: str, supabase) -> Dict:
     """
     try:
         # Get min and max timestamps for this symbol
-        # Using aggregate query to get both in one call
-        result = supabase.table("market_data_5min")\
+        result = supabase.table("market_data_1min")\
             .select("timestamp")\
             .eq("symbol", symbol)\
             .order("timestamp", desc=False)\
@@ -36,7 +35,7 @@ def get_market_data_coverage(symbol: str, supabase) -> Dict:
         if result.data and len(result.data) > 0:
             earliest_timestamp = result.data[0].get("timestamp")
         
-        result = supabase.table("market_data_5min")\
+        result = supabase.table("market_data_1min")\
             .select("timestamp")\
             .eq("symbol", symbol)\
             .order("timestamp", desc=True)\
@@ -69,22 +68,18 @@ def get_market_data_coverage(symbol: str, supabase) -> Dict:
                 date_range_days = f"Error: {str(e)}"
         
         # Get total count using pagination (more reliable for large datasets)
-        # Use a smart counting method: paginate through records to count
         record_count = 0
         if earliest_timestamp and latest_timestamp:
             try:
-                # Try using count with head method first (Supabase might support this)
-                # If not, use pagination
                 page_size = 1000
                 offset = 0
                 total_counted = 0
                 
                 # Count by paginating - but limit to reasonable number of pages
-                # For very large datasets, we'll estimate
-                max_pages_to_count = 1000  # Count up to 1M records, then estimate (increased for large datasets)
+                max_pages_to_count = 1000  # Count up to 1M records, then estimate
                 
                 while offset < (max_pages_to_count * page_size):
-                    count_result = supabase.table("market_data_5min")\
+                    count_result = supabase.table("market_data_1min")\
                         .select("id")\
                         .eq("symbol", symbol)\
                         .range(offset, offset + page_size - 1)\
@@ -105,12 +100,12 @@ def get_market_data_coverage(symbol: str, supabase) -> Dict:
                 
                 # If we hit the max pages limit, estimate based on date range
                 if offset >= (max_pages_to_count * page_size):
-                    # Estimate: ~78 records per trading day for 5-min data
-                    # (390 minutes per trading day / 5 = 78)
+                    # Estimate: ~390 records per trading day for 1-min data
+                    # (390 minutes per trading day)
                     if date_range_days and isinstance(date_range_days, int):
                         # Rough estimate: assume 252 trading days per year
                         trading_days = int(date_range_days * 252 / 365)
-                        estimated_records = trading_days * 78
+                        estimated_records = trading_days * 390
                         record_count = f"~{estimated_records:,} (estimated, >{total_counted:,} confirmed)"
                     else:
                         record_count = f">{total_counted:,} (counting stopped at {total_counted:,})"
@@ -120,7 +115,7 @@ def get_market_data_coverage(symbol: str, supabase) -> Dict:
             except Exception as e:
                 # Fallback: try to get at least a sample count
                 try:
-                    sample_result = supabase.table("market_data_5min")\
+                    sample_result = supabase.table("market_data_1min")\
                         .select("timestamp")\
                         .eq("symbol", symbol)\
                         .limit(100)\
@@ -133,10 +128,6 @@ def get_market_data_coverage(symbol: str, supabase) -> Dict:
                     record_count = f"Error counting: {str(e)}"
         else:
             record_count = 0
-        
-        # Check for data gaps (basic check - missing days)
-        # For 5-min data, we expect ~78 records per trading day (390 minutes / 5 = 78)
-        # But this is a rough estimate
         
         return {
             "symbol": symbol,
@@ -159,7 +150,7 @@ def get_market_data_coverage(symbol: str, supabase) -> Dict:
         }
 
 
-def get_quick_coverage_summary() -> pd.DataFrame:
+def get_quick_1min_coverage_summary() -> pd.DataFrame:
     """
     Quick coverage check - shows date ranges without counting records.
     Much faster for large datasets.
@@ -175,14 +166,14 @@ def get_quick_coverage_summary() -> pd.DataFrame:
     symbols = get_watchlist_symbols()
     coverage_data = []
     
-    print(f"Quick check: Getting date ranges for {len(symbols)} stocks...")
+    print(f"Quick check: Getting date ranges for {len(symbols)} stocks (1-minute data)...")
     print("=" * 80)
     
     for i, symbol in enumerate(symbols, 1):
         print(f"[{i}/{len(symbols)}] Checking {symbol}...", end=" ")
         try:
             # Get earliest timestamp
-            result = supabase.table("market_data_5min")\
+            result = supabase.table("market_data_1min")\
                 .select("timestamp")\
                 .eq("symbol", symbol)\
                 .order("timestamp", desc=False)\
@@ -192,7 +183,7 @@ def get_quick_coverage_summary() -> pd.DataFrame:
             earliest_timestamp = result.data[0].get("timestamp") if result.data else None
             
             # Get latest timestamp
-            result = supabase.table("market_data_5min")\
+            result = supabase.table("market_data_1min")\
                 .select("timestamp")\
                 .eq("symbol", symbol)\
                 .order("timestamp", desc=True)\
@@ -264,9 +255,9 @@ def get_quick_coverage_summary() -> pd.DataFrame:
     return pd.DataFrame(coverage_data)
 
 
-def get_all_stocks_coverage() -> pd.DataFrame:
+def get_all_stocks_1min_coverage() -> pd.DataFrame:
     """
-    Get market data coverage for all stocks in the watchlist.
+    Get 1-minute market data coverage for all stocks in the watchlist.
     
     Returns:
         DataFrame with coverage statistics for all stocks
@@ -279,12 +270,12 @@ def get_all_stocks_coverage() -> pd.DataFrame:
     symbols = get_watchlist_symbols()
     coverage_data = []
     
-    print(f"Checking market data coverage for {len(symbols)} stocks...")
+    print(f"Checking 1-minute market data coverage for {len(symbols)} stocks...")
     print("=" * 80)
     
     for i, symbol in enumerate(symbols, 1):
         print(f"[{i}/{len(symbols)}] Checking {symbol}...", end=" ")
-        coverage = get_market_data_coverage(symbol, supabase)
+        coverage = get_1min_market_data_coverage(symbol, supabase)
         coverage_data.append(coverage)
         
         if coverage["has_data"]:
@@ -335,93 +326,11 @@ def get_all_stocks_coverage() -> pd.DataFrame:
     return df
 
 
-def get_detailed_coverage_for_symbol(symbol: str) -> Dict:
-    """
-    Get detailed coverage information for a single symbol including:
-    - Daily record counts
-    - Date gaps
-    - Expected vs actual records
-    """
-    supabase = get_supabase()
-    if not supabase:
-        return {"error": "Supabase not configured"}
-    
-    try:
-        # Get all timestamps for this symbol (paginated)
-        all_timestamps = []
-        page_size = 1000
-        offset = 0
-        
-        while True:
-            result = supabase.table("market_data_5min")\
-                .select("timestamp")\
-                .eq("symbol", symbol)\
-                .order("timestamp", desc=False)\
-                .range(offset, offset + page_size - 1)\
-                .execute()
-            
-            if not result.data or len(result.data) == 0:
-                break
-            
-            all_timestamps.extend([r["timestamp"] for r in result.data])
-            
-            if len(result.data) < page_size:
-                break
-            
-            offset += page_size
-            print(f"  Fetched {len(all_timestamps)} records...")
-        
-        if not all_timestamps:
-            return {
-                "symbol": symbol,
-                "total_records": 0,
-                "earliest_date": None,
-                "latest_date": None,
-                "daily_breakdown": {}
-            }
-        
-        # Parse timestamps
-        timestamps = []
-        for ts in all_timestamps:
-            try:
-                if isinstance(ts, str):
-                    dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
-                else:
-                    dt = ts
-                timestamps.append(dt)
-            except:
-                pass
-        
-        if not timestamps:
-            return {"symbol": symbol, "error": "Could not parse timestamps"}
-        
-        timestamps.sort()
-        
-        # Group by date
-        daily_counts = {}
-        for ts in timestamps:
-            date_key = ts.date().isoformat()
-            daily_counts[date_key] = daily_counts.get(date_key, 0) + 1
-        
-        return {
-            "symbol": symbol,
-            "total_records": len(timestamps),
-            "earliest_date": timestamps[0].isoformat(),
-            "latest_date": timestamps[-1].isoformat(),
-            "date_range_days": (timestamps[-1] - timestamps[0]).days,
-            "daily_breakdown": daily_counts,
-            "unique_days": len(daily_counts)
-        }
-        
-    except Exception as e:
-        return {"symbol": symbol, "error": str(e)}
-
-
 if __name__ == "__main__":
     import sys
     
     print("=" * 80)
-    print("MARKET DATA 5-MIN COVERAGE REPORT")
+    print("1-MINUTE MARKET DATA COVERAGE REPORT")
     print("=" * 80)
     print()
     
@@ -432,13 +341,13 @@ if __name__ == "__main__":
         print("Running FULL report (with record counts - may be slow for large datasets)...")
         print()
         # Get coverage for all stocks with counts
-        df = get_all_stocks_coverage()
+        df = get_all_stocks_1min_coverage()
     else:
         print("Running QUICK report (date ranges only - fast)...")
         print("(Use --full or -f flag for full report with record counts)")
         print()
         # Get quick coverage (date ranges only, no counts)
-        df = get_quick_coverage_summary()
+        df = get_quick_1min_coverage_summary()
     
     if not df.empty:
         # Display summary
@@ -449,7 +358,7 @@ if __name__ == "__main__":
         print()
         
         # Save to CSV
-        output_file = "market_data_coverage_report_quick.csv" if not use_full_report else "market_data_coverage_report_full.csv"
+        output_file = "1min_market_data_coverage_report_quick.csv" if not use_full_report else "1min_market_data_coverage_report_full.csv"
         df.to_csv(output_file, index=False)
         print(f"✓ Report saved to {output_file}")
         
@@ -512,11 +421,7 @@ if __name__ == "__main__":
                 cols_to_show.insert(2, "Record Count")  # Insert after "Stock Name"
             print(stocks_with_data_df[cols_to_show].to_string(index=False))
         
-        # Optionally, get detailed breakdown for a specific symbol
         print("\n" + "=" * 80)
-        print("For detailed daily breakdown, run:")
-        print("  python -c \"from check_market_data_coverage import get_detailed_coverage_for_symbol; import json; print(json.dumps(get_detailed_coverage_for_symbol('SYMBOL'), indent=2, default=str))\"")
-        print("=" * 80)
     else:
         print("Error: Could not generate coverage report")
 

@@ -696,7 +696,7 @@ def phase1_foundation_data():
     col1, col2 = st.columns(2)
     
     with col1:
-        if st.button("Ingest All Historical Data", width='stretch', key="ingest_all_data"):
+        if st.button("Ingest All Historical Data (Oct 1, 2023 - Oct 31, 2025)", width='stretch', key="ingest_all_data"):
             pipeline = DataIngestionPipeline()
             
             # Create progress tracking
@@ -706,11 +706,21 @@ def phase1_foundation_data():
             symbols = get_watchlist_symbols()
             results = {}
             
+            # Explicit date range: Oct 1, 2023 to Oct 31, 2025 (729 days)
+            from datetime import datetime as dt
+            start_date = dt(2023, 10, 1)
+            end_date = dt(2025, 10, 31)
+            
             for i, symbol in enumerate(symbols):
                 status_text.text(f"Processing {symbol}... ({i+1}/{len(symbols)})")
                 progress_bar.progress((i + 1) / len(symbols))
                 
-                result = pipeline.ingest_historical_data(symbol, days_back=1825)  # 5 years of data
+                result = pipeline.ingest_historical_data(
+                    symbol, 
+                    interval='daily',
+                    start_date=start_date,
+                    end_date=end_date
+                )
                 results[symbol] = result
                 
                 if result:
@@ -771,22 +781,33 @@ def phase1_foundation_data():
             progress_bar.empty()
             status_text.empty()
 
-    # New: 5-minute intraday ingestion (past 2 years)
+    # 5-minute intraday ingestion (Oct 1, 2023 - Oct 31, 2025) with resume capability
     with col1:
-        if st.button("Ingest All Historical 5-min Data (2 years)", width='stretch', key="ingest_all_5min"):
+        if st.button("Ingest All Historical 5-min Data (Oct 1, 2023 - Oct 31, 2025)", width='stretch', key="ingest_all_5min"):
             pipeline = DataIngestionPipeline()
             progress_bar = st.progress(0)
             status_text = st.empty()
 
             symbols = get_watchlist_symbols()
             results_5min = {}
+            
+            # Explicit date range: Oct 1, 2023 to Oct 31, 2025 (729 days)
+            from datetime import datetime as dt
+            start_date = dt(2023, 10, 1)
+            end_date = dt(2025, 10, 31)
 
             for i, symbol in enumerate(symbols):
                 status_text.text(f"Processing 5-min {symbol}... ({i+1}/{len(symbols)})")
                 progress_bar.progress((i + 1) / len(symbols))
 
-                # 2 years of 5-min data -> days_back=730
-                result = pipeline.ingest_historical_data(symbol, days_back=730, interval='5min')
+                # 2 years of 5-min data with resume capability, chunk_days=30 for faster ingestion
+                result = pipeline.ingest_historical_data(
+                    symbol, 
+                    interval='5min', 
+                    chunk_days=30,
+                    start_date=start_date,
+                    end_date=end_date
+                )
                 results_5min[symbol] = result
 
                 if result:
@@ -830,8 +851,9 @@ def phase1_foundation_data():
 
             symbols = get_watchlist_symbols()
             results_1min = {}
-            start_range = datetime(2025, 8, 1)
-            end_range = datetime(2025, 10, 31)
+            from datetime import datetime as dt
+            start_range = dt(2025, 8, 1)
+            end_range = dt(2025, 10, 31)
 
             for i, symbol in enumerate(symbols):
                 status_text.text(f"Processing 1-min {symbol}... ({i+1}/{len(symbols)})")

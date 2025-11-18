@@ -100,6 +100,42 @@ class DataIngestionPipeline:
                 multiplier = None
             
             if target_table and multiplier:
+                # For 5-minute data: Check if we should resume from existing data
+                if interval in ("5min", "5-minute", "5m"):
+                    try:
+                        # Get the latest timestamp for this symbol
+                        latest_result = self.supabase.table(target_table)\
+                            .select("timestamp")\
+                            .eq("symbol", symbol)\
+                            .order("timestamp", desc=True)\
+                            .limit(1)\
+                            .execute()
+                        
+                        if latest_result.data and len(latest_result.data) > 0:
+                            latest_ts_str = latest_result.data[0].get("timestamp")
+                            if latest_ts_str:
+                                try:
+                                    if isinstance(latest_ts_str, str):
+                                        latest_ts = datetime.fromisoformat(latest_ts_str.replace('Z', '+00:00'))
+                                    else:
+                                        latest_ts = latest_ts_str
+                                    
+                                    # Resume from the day after the latest timestamp
+                                    # Add 1 day to start from the next day (to avoid duplicates)
+                                    resume_date = (latest_ts + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+                                    
+                                    # Only resume if the resume date is within our target range
+                                    if resume_date >= start_date and resume_date <= end_date:
+                                        print(f"Resuming {symbol} 5-min ingestion from {resume_date.strftime('%Y-%m-%d')} (latest existing: {latest_ts.strftime('%Y-%m-%d %H:%M:%S')})")
+                                        start_date = resume_date
+                                    elif resume_date > end_date:
+                                        print(f"{symbol} already has data up to {latest_ts.strftime('%Y-%m-%d')}, which is beyond the target end date. Skipping.")
+                                        return True  # Already complete
+                                except Exception as e:
+                                    print(f"Warning: Could not parse latest timestamp for {symbol}: {e}. Starting from beginning.")
+                    except Exception as e:
+                        print(f"Warning: Could not check existing data for {symbol}: {e}. Starting from beginning.")
+                
                 chunk_delta = timedelta(days=chunk_days)
                 chunk_start = start_date
                 all_success = True
@@ -135,10 +171,27 @@ class DataIngestionPipeline:
                         if result.data:
                             for record in result.data:
                                 ts = record.get("timestamp")
-                                if ts and isinstance(ts, str):
-                                    ts_normalized = ts.split('+')[0].split('Z')[0]
+                                if ts:
+                                    # Handle both string and datetime objects
+                                    if isinstance(ts, str):
+                                        ts_str = ts
+                                    else:
+                                        # If it's a datetime object, convert to ISO string
+                                        ts_str = ts.isoformat() if hasattr(ts, 'isoformat') else str(ts)
+                                    
+                                    # Normalize for comparison (remove timezone)
+                                    ts_normalized = ts_str.split('+')[0].split('Z')[0]
+                                    # Also add without microseconds if present
+                                    if '.' in ts_normalized:
+                                        ts_normalized_no_us = ts_normalized.split('.')[0]
+                                    else:
+                                        ts_normalized_no_us = ts_normalized
+                                    
+                                    # Add both formats to cache
                                     chunk_existing_timestamps.add(ts_normalized)
-                                    existing_timestamps_cache.add(ts_normalized)  # Cache for later chunks
+                                    chunk_existing_timestamps.add(ts_normalized_no_us)
+                                    existing_timestamps_cache.add(ts_normalized)
+                                    existing_timestamps_cache.add(ts_normalized_no_us)
                     except Exception as e:
                         print(f"Warning: Could not check existing records for {symbol} chunk {start_str} to {end_str}: {e}")
 
@@ -163,8 +216,20 @@ class DataIngestionPipeline:
                             rows = []
                             new_rows = []
                             for _, row in data.iterrows():
-                                timestamp_iso = row["timestamp"].isoformat()
+                                # Convert pandas timestamp to ISO format
+                                if hasattr(row["timestamp"], 'isoformat'):
+                                    timestamp_iso = row["timestamp"].isoformat()
+                                else:
+                                    timestamp_iso = str(row["timestamp"])
+                                
+                                # Normalize for comparison (remove microseconds and timezone for matching)
+                                # Database might store with or without timezone, so normalize both
                                 timestamp_normalized = timestamp_iso.split('+')[0].split('Z')[0]
+                                # Also try without microseconds for matching
+                                if '.' in timestamp_normalized:
+                                    timestamp_normalized_no_us = timestamp_normalized.split('.')[0]
+                                else:
+                                    timestamp_normalized_no_us = timestamp_normalized
 
                                 row_data = {
                                     "symbol": symbol,
@@ -179,11 +244,21 @@ class DataIngestionPipeline:
                                 rows.append(row_data)
 
                                 # Check both chunk-specific cache and global cache
-                                if timestamp_normalized not in chunk_existing_timestamps and timestamp_normalized not in existing_timestamps_cache:
+                                # Check both with and without microseconds
+                                is_duplicate = (
+                                    timestamp_normalized in chunk_existing_timestamps or 
+                                    timestamp_normalized in existing_timestamps_cache or
+                                    timestamp_normalized_no_us in chunk_existing_timestamps or
+                                    timestamp_normalized_no_us in existing_timestamps_cache
+                                )
+                                
+                                if not is_duplicate:
                                     new_rows.append(row_data)
-                                    # Add to both caches to avoid duplicates
+                                    # Add to both caches to avoid duplicates (add both formats)
                                     chunk_existing_timestamps.add(timestamp_normalized)
+                                    chunk_existing_timestamps.add(timestamp_normalized_no_us)
                                     existing_timestamps_cache.add(timestamp_normalized)
+                                    existing_timestamps_cache.add(timestamp_normalized_no_us)
 
                             # Bulk insert only new records (batch if too many to avoid timeouts)
                             if new_rows:
@@ -204,23 +279,75 @@ class DataIngestionPipeline:
                                         total_skipped += (len(rows) - len(new_rows))
                                         print(f"Inserted {len(new_rows)} new records for {symbol} {start_str} to {end_str} in batches (skipped {len(rows) - len(new_rows)} duplicates)")
                                 except Exception as e:
-                                    # If insert fails (e.g., duplicate key constraint), try upsert as fallback
-                                    print(f"Bulk insert failed for {symbol} {start_str} to {end_str}: {e}. Trying upsert...")
-                                    try:
-                                        # Try upsert in batches if needed
-                                        if len(new_rows) <= batch_size:
-                                            self.supabase.table(target_table).upsert(new_rows).execute()
-                                            total_inserted += len(new_rows)
-                                            print(f"Upserted {len(new_rows)} records for {symbol} {start_str} to {end_str}")
+                                    # If insert fails (e.g., duplicate key constraint), filter out duplicates and retry
+                                    error_str = str(e).lower()
+                                    if "duplicate key" in error_str or "23505" in error_str:
+                                        # Extract the duplicate timestamp from error if possible
+                                        print(f"Duplicate detected for {symbol} {start_str} to {end_str}. Filtering duplicates and retrying...")
+                                        
+                                        # Re-check existing records more thoroughly and filter
+                                        filtered_rows = []
+                                        for row in new_rows:
+                                            ts_iso = row["timestamp"]
+                                            ts_normalized = ts_iso.split('+')[0].split('Z')[0]
+                                            if '.' in ts_normalized:
+                                                ts_normalized_no_us = ts_normalized.split('.')[0]
+                                            else:
+                                                ts_normalized_no_us = ts_normalized
+                                            
+                                            # Check if this timestamp exists
+                                            if (ts_normalized not in chunk_existing_timestamps and 
+                                                ts_normalized_no_us not in chunk_existing_timestamps and
+                                                ts_normalized not in existing_timestamps_cache and
+                                                ts_normalized_no_us not in existing_timestamps_cache):
+                                                filtered_rows.append(row)
+                                                # Add to cache
+                                                chunk_existing_timestamps.add(ts_normalized)
+                                                chunk_existing_timestamps.add(ts_normalized_no_us)
+                                                existing_timestamps_cache.add(ts_normalized)
+                                                existing_timestamps_cache.add(ts_normalized_no_us)
+                                        
+                                        if filtered_rows:
+                                            try:
+                                                # Try inserting filtered rows
+                                                if len(filtered_rows) <= batch_size:
+                                                    self.supabase.table(target_table).insert(filtered_rows).execute()
+                                                    total_inserted += len(filtered_rows)
+                                                    total_skipped += (len(new_rows) - len(filtered_rows))
+                                                    print(f"Inserted {len(filtered_rows)} new records for {symbol} {start_str} to {end_str} after filtering {len(new_rows) - len(filtered_rows)} duplicates")
+                                                else:
+                                                    for i in range(0, len(filtered_rows), batch_size):
+                                                        batch = filtered_rows[i:i + batch_size]
+                                                        self.supabase.table(target_table).insert(batch).execute()
+                                                        total_inserted += len(batch)
+                                                    total_skipped += (len(new_rows) - len(filtered_rows))
+                                                    print(f"Inserted {len(filtered_rows)} new records for {symbol} {start_str} to {end_str} in batches after filtering duplicates")
+                                            except Exception as retry_error:
+                                                print(f"Retry insert also failed for {symbol} {start_str} to {end_str}: {retry_error}")
+                                                # Skip this chunk but continue
+                                                total_skipped += len(new_rows)
                                         else:
-                                            for i in range(0, len(new_rows), batch_size):
-                                                batch = new_rows[i:i + batch_size]
-                                                self.supabase.table(target_table).upsert(batch).execute()
-                                                total_inserted += len(batch)
-                                            print(f"Upserted {len(new_rows)} records for {symbol} {start_str} to {end_str} in batches")
-                                    except Exception as upsert_error:
-                                        print(f"Upsert also failed: {upsert_error}")
-                                        all_success = False
+                                            # All rows were duplicates
+                                            total_skipped += len(new_rows)
+                                            print(f"All {len(new_rows)} records for {symbol} {start_str} to {end_str} were duplicates, skipping")
+                                    else:
+                                        # Other error, try upsert as fallback
+                                        print(f"Bulk insert failed for {symbol} {start_str} to {end_str}: {e}. Trying upsert...")
+                                        try:
+                                            # Try upsert in batches if needed
+                                            if len(new_rows) <= batch_size:
+                                                self.supabase.table(target_table).upsert(new_rows).execute()
+                                                total_inserted += len(new_rows)
+                                                print(f"Upserted {len(new_rows)} records for {symbol} {start_str} to {end_str}")
+                                            else:
+                                                for i in range(0, len(new_rows), batch_size):
+                                                    batch = new_rows[i:i + batch_size]
+                                                    self.supabase.table(target_table).upsert(batch).execute()
+                                                    total_inserted += len(batch)
+                                                print(f"Upserted {len(new_rows)} records for {symbol} {start_str} to {end_str} in batches")
+                                        except Exception as upsert_error:
+                                            print(f"Upsert also failed: {upsert_error}")
+                                            all_success = False
                             else:
                                 total_skipped += len(rows)
                                 print(f"All {len(rows)} records for {symbol} {start_str} to {end_str} already exist, skipping")
