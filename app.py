@@ -38,6 +38,7 @@ from tradingagents.agents.utils.trading_engine import (
     FireTestingEngine,
     AIEnhancedScoringEngine
 )
+from tradingagents.agents.utils.historical_datascan import HistoricalDataScanEngine
 
 # Phase 4 imports
 from tradingagents.agents.utils.session_manager import (
@@ -2363,6 +2364,47 @@ def ai_enhanced_recommendation(symbol):
     final_conf = round(0.7 * (score_ratio * 10) + 0.3 * ai_conf, 1)
     return {"symbol": symbol, "recommendation": base_rec, "confidence": final_conf, "fire_test": fire}
 
+
+def _render_datascan_output(datascan_result: dict):
+    """Display the DataScan engine output in the UI."""
+    timeframe_stats = datascan_result.get("timeframe_stats") or {}
+    if timeframe_stats:
+        rows = []
+        for tf_label, info in timeframe_stats.items():
+            metric = info.get("trend")
+            if not metric:
+                rsi_val = info.get("rsi14")
+                metric = f"RSI14={rsi_val}" if rsi_val is not None else ""
+            rows.append({
+                "Timeframe": tf_label.upper(),
+                "Records": info.get("records", "N/A"),
+                "Start": info.get("start", "-"),
+                "End": info.get("end", "-"),
+                "Key Metric": metric or ""
+            })
+        stats_df = pd.DataFrame(rows)
+        st.dataframe(stats_df, use_container_width=True)
+
+    if datascan_result.get("report"):
+        st.markdown("##### DataScan Report")
+        st.markdown(datascan_result["report"])
+
+    if datascan_result.get("prompt"):
+        with st.expander("View Generated Prompt Payload"):
+            st.code(datascan_result["prompt"], language="markdown")
+
+    samples = datascan_result.get("samples") or {}
+    if samples:
+        with st.expander("Recent Candles Preview (D1 / M5 / M1)"):
+            for label in ("daily", "m5", "m1"):
+                sample_table = samples.get(label)
+                if sample_table:
+                    st.markdown(f"**{label.upper()}**")
+                    st.markdown(sample_table)
+
+    if datascan_result.get("message"):
+        st.warning(datascan_result["message"])
+
 def phase3_trading_engine_core():
     """Phase 3: Trading Engine Core - Complete Phase 1 + Phase 2 Analysis Workflow"""
     
@@ -2375,6 +2417,9 @@ def phase3_trading_engine_core():
     
     if 'ai_scorer' not in st.session_state:
         st.session_state.ai_scorer = AIEnhancedScoringEngine()
+
+    if 'datascan_engine' not in st.session_state:
+        st.session_state.datascan_engine = HistoricalDataScanEngine()
     
     symbols = get_watchlist_symbols()
     
@@ -2645,6 +2690,26 @@ def phase3_trading_engine_core():
                 st.markdown("#### 📋 Previous Fire Test Results")
                 score_ratio = result["score"] / result["max_score"]
                 st.metric("Previous Score", f"{result['score']} / {result['max_score']} ({score_ratio*100:.1f}%)")
+
+        st.markdown("---")
+        st.markdown("#### 🛰️ Historical DataScan Prompt")
+        st.write(
+            "Run the multi-timeframe DataScan prompt to validate that the ingested D1/M5/M1 datasets are aligned "
+            "before moving from Phase 1 (data) to Phase 2 (analysis)."
+        )
+
+        if st.button("🧠 Run Historical DataScan", key="run_datascan_prompt", type="primary"):
+            with st.spinner(f"Gathering historical slices for {selected_symbol}..."):
+                datascan_result = st.session_state.datascan_engine.run_analysis(selected_symbol)
+                st.session_state.datascan_result = datascan_result
+
+                if datascan_result.get("error"):
+                    st.error(datascan_result["error"])
+                else:
+                    _render_datascan_output(datascan_result)
+        elif 'datascan_result' in st.session_state and not st.session_state.datascan_result.get("error"):
+            st.info("Showing the most recent DataScan output for this session.")
+            _render_datascan_output(st.session_state.datascan_result)
         
         st.markdown('</div>', unsafe_allow_html=True)
     
