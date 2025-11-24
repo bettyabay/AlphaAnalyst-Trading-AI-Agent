@@ -28,6 +28,8 @@ from tradingagents.dataflows.market_data_service import (
     get_latest_price,
     period_to_days
 )
+from tradingagents.dataflows.data_guardrails import DataCoverageService
+from tradingagents.dataflows.feature_lab import FeatureLab
 
 # Phase 2 imports
 from tradingagents.dataflows.ai_analysis import AIResearchAnalyzer
@@ -697,7 +699,7 @@ def phase1_foundation_data():
     col1, col2 = st.columns(2)
     
     with col1:
-        if st.button("Ingest All Historical Data (Oct 1, 2023 - Oct 31, 2025)", width='stretch', key="ingest_all_data"):
+        if st.button("Ingest All Historical Daily Data (Oct 1, 2023 → Now)", width='stretch', key="ingest_all_data"):
             pipeline = DataIngestionPipeline()
             
             # Create progress tracking
@@ -707,10 +709,9 @@ def phase1_foundation_data():
             symbols = get_watchlist_symbols()
             results = {}
             
-            # Explicit date range: Oct 1, 2023 to Oct 31, 2025 (729 days)
-            from datetime import datetime as dt
-            start_date = dt(2023, 10, 1)
-            end_date = dt(2025, 10, 31)
+            # Explicit date range start with dynamic end -> run time
+            start_date = datetime(2023, 10, 1)
+            end_date = datetime.utcnow()
             
             for i, symbol in enumerate(symbols):
                 status_text.text(f"Processing {symbol}... ({i+1}/{len(symbols)})")
@@ -784,7 +785,7 @@ def phase1_foundation_data():
 
     # 5-minute intraday ingestion (Oct 1, 2023 - Oct 31, 2025) with resume capability
     with col1:
-        if st.button("Ingest All Historical 5-min Data (Oct 1, 2023 - Oct 31, 2025)", width='stretch', key="ingest_all_5min"):
+        if st.button("Ingest All Historical 5-min Data (Oct 1, 2023 → Now)", width='stretch', key="ingest_all_5min"):
             pipeline = DataIngestionPipeline()
             progress_bar = st.progress(0)
             status_text = st.empty()
@@ -792,10 +793,9 @@ def phase1_foundation_data():
             symbols = get_watchlist_symbols()
             results_5min = {}
             
-            # Explicit date range: Oct 1, 2023 to Oct 31, 2025 (729 days)
-            from datetime import datetime as dt
-            start_date = dt(2023, 10, 1)
-            end_date = dt(2025, 10, 31)
+            # Explicit date range start with dynamic end -> run time
+            start_date = datetime(2023, 10, 1)
+            end_date = datetime.utcnow()
 
             for i, symbol in enumerate(symbols):
                 status_text.text(f"Processing 5-min {symbol}... ({i+1}/{len(symbols)})")
@@ -843,38 +843,34 @@ def phase1_foundation_data():
             progress_bar.empty()
             status_text.empty()
 
-    # New: 1-minute intraday ingestion (resume from where data stops till today)
+    # New: 1-minute intraday ingestion (Aug-Oct 2025)
     with col1:
-        if st.button("Ingest 1-min Data (Resume from Database Till Today)", width='stretch', key="ingest_all_1min"):
+        if st.button("Ingest 1-min Data (Aug 2025 → Now)", width='stretch', key="ingest_all_1min"):
             pipeline = DataIngestionPipeline()
             progress_bar = st.progress(0)
             status_text = st.empty()
 
             symbols = get_watchlist_symbols()
             results_1min = {}
-            from datetime import datetime as dt
-            
-            # End date is today - will automatically resume from latest timestamp in database
-            end_range = dt.now()
-            # start_date=None will let the pipeline detect the latest timestamp and resume from there
-            # If no data exists, it will default to days_back (1825 days = 5 years)
+            start_range = datetime(2025, 8, 1)
+            end_range = datetime.utcnow()
 
             for i, symbol in enumerate(symbols):
                 status_text.text(f"Processing 1-min {symbol}... ({i+1}/{len(symbols)})")
                 progress_bar.progress((i + 1) / len(symbols))
 
-                # Ingest 1-min data - will automatically resume from latest timestamp in database till today
+                # Ingest 3 months of 1-min data (Aug-Oct 2025)
                 result = pipeline.ingest_historical_data(
                     symbol,
                     interval='1min',
-                    chunk_days=3,  # Small chunks to avoid API limits
-                    start_date=None,  # None = auto-detect resume point from database
-                    end_date=end_range  # Today
+                    chunk_days=3,
+                    start_date=start_range,
+                    end_date=end_range
                 )
                 results_1min[symbol] = result
 
                 if result:
-                    st.success(f"✅ 1-min {symbol} processed successfully")
+                    st.success(f"✅ 1-min {symbol} processed successfully (Aug-Oct 2025)")
                 else:
                     st.warning(f"⚠️ 1-min {symbol} had issues (check console for details)")
 
@@ -884,7 +880,7 @@ def phase1_foundation_data():
             failed_count = len(results_1min) - success_count
 
             if success_count > 0:
-                st.success(f"✅ Successfully processed 1-min data for {success_count}/{len(results_1min)} stocks")
+                st.success(f"✅ Successfully processed 1-min data (Aug-Oct 2025) for {success_count}/{len(results_1min)} stocks")
                 st.balloons()
             else:
                 st.error(f"❌ Failed to process 1-min data for all {len(results_1min)} stocks")
@@ -895,13 +891,60 @@ def phase1_foundation_data():
                 st.write("Stocks with issues:", ", ".join(failed_stocks))
 
             # Show detailed results
-            st.subheader("1-min Detailed Results")
+            st.subheader("1-min Detailed Results (Aug-Oct 2025)")
             results_df = pd.DataFrame([
                 {"Symbol": symbol, "Status": "✅ Success" if success else "⚠️ Issues"}
                 for symbol, success in results_1min.items()
             ])
             st.dataframe(results_df, width='stretch')
 
+            progress_bar.empty()
+            status_text.empty()
+
+    with col1:
+        if st.button("⚡ Ingest Daily + 5-min + 1-min (Full Stack)", width='stretch', key="ingest_full_stack"):
+            pipeline = DataIngestionPipeline()
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+
+            symbols = get_watchlist_symbols()
+            now = datetime.utcnow()
+            daily_range = (datetime(2023, 10, 1), now)
+            intraday_start = datetime(2023, 10, 1)
+            one_min_start = datetime(2025, 8, 1)
+            chunk_overrides = {"5min": 90, "1min": 14}
+
+            full_results = {}
+            for i, symbol in enumerate(symbols):
+                status_text.text(f"Full-stack ingestion for {symbol}... ({i+1}/{len(symbols)})")
+                progress_bar.progress((i + 1) / len(symbols))
+                result = pipeline.ingest_symbol_full_stack(
+                    symbol,
+                    daily_range=daily_range,
+                    m5_range=(intraday_start, now),
+                    m1_range=(one_min_start, now),
+                    chunk_overrides=chunk_overrides,
+                )
+                full_results[symbol] = result
+                if all(result.values()):
+                    st.success(f"✅ {symbol}: Daily+5m+1m complete")
+                else:
+                    failed = [k for k, ok in result.items() if not ok]
+                    st.warning(f"⚠️ {symbol}: Issues with {', '.join(failed)}")
+
+            pipeline.close()
+            summary_rows = []
+            for symbol, result in full_results.items():
+                summary_rows.append(
+                    {
+                        "Symbol": symbol,
+                        "Daily": "✅" if result.get("daily") else "⚠️",
+                        "5-min": "✅" if result.get("5min") else "⚠️",
+                        "1-min": "✅" if result.get("1min") else "⚠️",
+                    }
+                )
+            st.subheader("Full Stack Ingestion Status")
+            st.dataframe(pd.DataFrame(summary_rows), width='stretch')
             progress_bar.empty()
             status_text.empty()
     
@@ -992,6 +1035,137 @@ def phase1_foundation_data():
                 ])
                 st.dataframe(status_df, width='stretch')
     st.markdown('</div>', unsafe_allow_html=True)
+
+    # Data coverage guardrail & feature lab
+    st.markdown('<div class="feature-card">', unsafe_allow_html=True)
+    st.markdown("### Data Coverage Guardrail & Feature Lab")
+    coverage_service = DataCoverageService()
+    feature_lab = FeatureLab()
+
+    coverage_description = """
+    **Required Coverage Windows**
+    - **1-minute**: Aug 1, 2025 → current time minus 15 minutes (EAT reference)
+    - **5-minute**: Oct 1, 2023 → current time minus 15 minutes
+    - **Daily**: Oct 1, 2023 → previous trading day close
+
+    Use the buttons below to audit the Supabase tables and backfill any gaps
+    before triggering downstream analysis or LLM prompts.
+    """
+    st.info(coverage_description)
+
+    coverage_col1, coverage_col2 = st.columns(2)
+    with coverage_col1:
+        if st.button("🔍 Run Coverage Audit", key="coverage_audit"):
+            with st.spinner("Checking Supabase tables for required ranges..."):
+                report_records = coverage_service.build_watchlist_report()
+                st.session_state.coverage_records = report_records
+                st.session_state.coverage_rows = [rec.to_dict() for rec in report_records]
+                st.success("Coverage audit completed")
+    with coverage_col2:
+        records = st.session_state.get("coverage_records") or []
+        missing_records = [rec for rec in records if rec.needs_backfill()]
+        if st.button("🛠️ Auto Backfill Missing Data", key="coverage_backfill"):
+            if not records:
+                st.warning("Run the coverage audit first to identify gaps.")
+            elif not missing_records:
+                st.success("No gaps detected. Nothing to backfill.")
+            else:
+                with st.spinner("Running targeted ingestion jobs..."):
+                    pipeline = DataIngestionPipeline()
+                    logs = coverage_service.backfill_missing(pipeline, missing_records)
+                    pipeline.close()
+                    st.session_state.coverage_backfill_logs = logs
+                    st.success("Backfill jobs completed")
+
+    coverage_rows = st.session_state.get("coverage_rows")
+    if coverage_rows:
+        coverage_df = pd.DataFrame(coverage_rows)
+        st.dataframe(coverage_df, width='stretch', hide_index=True)
+        statuses = coverage_df["status"].value_counts().to_dict()
+        st.caption(f"Status summary: {statuses}")
+
+    backfill_logs = st.session_state.get("coverage_backfill_logs")
+    if backfill_logs:
+        log_df = pd.DataFrame(backfill_logs)
+        st.markdown("#### Backfill Activity")
+        st.dataframe(log_df, width='stretch', hide_index=True)
+
+    st.markdown("---")
+    st.markdown("#### Promptable Feature Lab")
+    symbols_for_lab = get_watchlist_symbols()
+    lab_symbol = st.selectbox("Symbol", symbols_for_lab, key="feature_lab_symbol")
+    default_prompt = (
+        "Highlight whether momentum across daily/5m/1m is aligned, "
+        "flag conflicting signals, and call out any volume or ATR extremes."
+    )
+    lab_prompt = st.text_area(
+        "Analysis Prompt",
+        value=default_prompt,
+        help="Describe what you want the LLM to analyze using the stored features.",
+        key="feature_lab_prompt",
+    )
+
+    if st.button("🧠 Generate Feature Packet", key="feature_lab_run"):
+        with st.spinner("Computing features and preparing prompt..."):
+            try:
+                result = feature_lab.run(lab_symbol, lab_prompt)
+                st.session_state.feature_lab_result = result
+                st.success("Feature packet ready!")
+            except Exception as exc:
+                st.error(f"Feature lab failed: {exc}")
+
+    feature_result = st.session_state.get("feature_lab_result")
+    if feature_result:
+        blocks = feature_result.feature_blocks
+        block_rows = []
+        for label, data in blocks.items():
+            row = {"Timeframe": label.upper()}
+            row.update({k: v for k, v in data.items() if k not in {"label"}})
+            block_rows.append(row)
+        if block_rows:
+            st.dataframe(pd.DataFrame(block_rows), width='stretch', hide_index=True)
+
+        st.markdown("##### Feature Context")
+        st.code(feature_result.context, language="markdown")
+
+        st.markdown("##### Final Prompt")
+        st.code(feature_result.prompt, language="markdown")
+
+        if feature_result.llm_response:
+            if feature_result.llm_response.startswith("LLM call failed"):
+                st.warning(feature_result.llm_response)
+            else:
+                st.markdown("##### LLM Response")
+                st.markdown(feature_result.llm_response)
+        else:
+            st.info("No GROQ_API_KEY detected. Copy the prompt above into your LLM of choice.")
+
+    st.markdown("##### QUANTUMTRADER v0.1 Prompt")
+    quantum_ts_default = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    quantum_timestamp = st.text_input(
+        "Command Timestamp",
+        value=quantum_ts_default,
+        help="Adjust if you want to backfill a historical command time.",
+        key="quantum_ts_input",
+    )
+    if st.button("⚙️ Run QUANTUMTRADER Prompt", key="quantum_prompt_button"):
+        with st.spinner("Calculating QUANTUMTRADER metrics..."):
+            try:
+                qt_result = feature_lab.run_quantum_screen(lab_symbol, quantum_timestamp)
+                st.session_state.quantum_result = qt_result
+                st.success("QUANTUMTRADER packet ready!")
+            except Exception as exc:
+                st.error(f"Quantum run failed: {exc}")
+
+    quantum_result = st.session_state.get("quantum_result")
+    if quantum_result:
+        st.success(quantum_result["summary"])
+        metrics_df = pd.DataFrame([quantum_result["metrics"]])
+        st.dataframe(metrics_df, width='stretch', hide_index=True)
+        st.markdown("###### QUANTUMTRADER Prompt Payload")
+        st.code(quantum_result["prompt"], language="markdown")
+
+    st.markdown('</div>', unsafe_allow_html=True)
     
     # Document management
     st.markdown('<div class="feature-card">', unsafe_allow_html=True)
@@ -1070,9 +1244,8 @@ def phase1_foundation_data():
             created_at = doc.get("uploaded_at", doc.get("created_at", ""))
             if created_at:
                 try:
-                    from datetime import datetime
-                    dt = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
-                    formatted_date = dt.strftime("%Y-%m-%d %H:%M")
+                    parsed_dt = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                    formatted_date = parsed_dt.strftime("%Y-%m-%d %H:%M")
                 except:
                     formatted_date = created_at[:10] if len(created_at) >= 10 else "Unknown"
             else:
@@ -2474,7 +2647,6 @@ def phase3_trading_engine_core():
                     st.markdown("---")
                     if st.button("💾 Save Screening Results to Database", key="save_screening_results"):
                         try:
-                            from datetime import datetime
                             from tradingagents.database.config import get_supabase
                             from tradingagents.database.db_service import (
                                 _make_json_serializable,
@@ -2695,10 +2867,9 @@ def phase3_trading_engine_core():
                 st.metric("Previous Score", f"{result['score']} / {result['max_score']} ({score_ratio*100:.1f}%)")
 
         st.markdown("---")
-        st.markdown("#### 🛰️ Historical DataScan Prompt")
+        st.markdown("#### Historical DataScan Prompt")
         st.write(
             "Run the multi-timeframe DataScan prompt to validate that the ingested D1/M5/M1 datasets are aligned "
-            "before moving from Phase 1 (data) to Phase 2 (analysis)."
         )
 
         if st.button("🧠 Run Historical DataScan", key="run_datascan_prompt", type="primary"):
@@ -3016,7 +3187,6 @@ def phase3_trading_engine_core():
                     try:
                         from tradingagents.database.db_service import log_event
                         from tradingagents.database.config import get_supabase
-                        from datetime import datetime
                         
                         # Check database connection first
                         supabase = get_supabase()
@@ -3069,7 +3239,6 @@ def phase3_trading_engine_core():
                         try:
                             from tradingagents.database.db_service import log_event
                             from tradingagents.database.config import get_supabase
-                            from datetime import datetime
                             
                             # Check database connection first
                             supabase = get_supabase()
@@ -3122,7 +3291,6 @@ def phase3_trading_engine_core():
                         try:
                             from tradingagents.database.db_service import log_event
                             from tradingagents.database.config import get_supabase
-                            from datetime import datetime
                             
                             # Check database connection first
                             supabase = get_supabase()
@@ -3727,7 +3895,7 @@ def phase5_results_analysis():
             fig = go.Figure()
             fig.add_trace(go.Scatter(x=df["date"], y=df["equity"], mode="lines", name="Equity"))
             fig.update_layout(title="Equity Curve (Realized)", template='plotly_white', height=360)
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width='stretch')
 
             # Per-symbol performance
             perf_rows = []
@@ -3899,7 +4067,7 @@ def main():
                             st.markdown(f'<div class="metric-card"><div class="metric-value">{info.get("recommendationKey", "N/A").title()}</div><div class="metric-label">Recommendation</div></div>', unsafe_allow_html=True)
                         
                         st.markdown('<div class="chart-container">', unsafe_allow_html=True)
-                        st.plotly_chart(create_price_chart(hist, symbol), use_container_width=True)
+                        st.plotly_chart(create_price_chart(hist, symbol), width='stretch')
                         st.markdown('</div>', unsafe_allow_html=True)
                         
                         if 'longBusinessSummary' in info:

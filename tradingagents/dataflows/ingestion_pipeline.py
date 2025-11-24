@@ -4,7 +4,7 @@ Data ingestion pipeline for AlphaAnalyst Trading AI Agent
 import os
 import pandas as pd
 from datetime import datetime, timedelta
-from typing import List, Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, List
 from dotenv import load_dotenv
 
 from ..database.config import get_supabase
@@ -19,6 +19,7 @@ class DataIngestionPipeline:
     def __init__(self):
         self.polygon_client = PolygonDataClient()
         self.supabase = get_supabase()
+        self.high_rate_plan = os.getenv("POLYGON_PREMIUM_PLAN", os.getenv("POLYGON_PAID_PLAN", "false")).lower() in {"1", "true", "yes", "premium"}
         
     def initialize_stocks(self) -> bool:
         """Initialize stocks in database"""
@@ -41,10 +42,11 @@ class DataIngestionPipeline:
         symbol: str,
         days_back: int = 1825,
         interval: str = "daily",
-        chunk_days: int = 7,
+        chunk_days: Optional[int] = None,
         max_retries: int = 5,
         start_date: Optional[datetime] = None,
-        end_date: Optional[datetime] = None
+        end_date: Optional[datetime] = None,
+        resume_from_latest: bool = True,
     ) -> bool:
         """Ingest historical data for a symbol, with chunked fetching and retry/backoff for intraday data.
 
@@ -100,8 +102,10 @@ class DataIngestionPipeline:
                 multiplier = None
             
             if target_table and multiplier:
+                chunk_days = self._resolve_chunk_days(interval, chunk_days)
                 # For intraday data (5-minute and 1-minute): Check if we should resume from existing data
-                if interval in ("5min", "5-minute", "5m", "1min", "1-minute", "1m"):
+                should_resume = resume_from_latest and interval in ("5min", "5-minute", "5m", "1min", "1-minute", "1m")
+                if should_resume:
                     try:
                         # Get the latest timestamp for this symbol
                         latest_result = self.supabase.table(target_table)\
@@ -481,6 +485,62 @@ class DataIngestionPipeline:
         except Exception as e:
             print(f"Error ingesting historical data for {symbol}: {e}")
             return False
+
+    def _resolve_chunk_days(self, interval: str, chunk_days: Optional[int]) -> int:
+        interval_key = interval.lower()
+        if interval_key in ("1min", "1-minute", "1m"):
+            base_default = 3
+            premium_default = 14
+        elif interval_key in ("5min", "5-minute", "5m"):
+            base_default = 30
+            premium_default = 90
+        else:
+            return chunk_days or 7
+
+        if self.high_rate_plan:
+            return max(chunk_days or premium_default, premium_default)
+        return chunk_days or base_default
+
+    def ingest_symbol_full_stack(
+        self,
+        symbol: str,
+        daily_range: Optional[Tuple[datetime, datetime]] = None,
+        m5_range: Optional[Tuple[datetime, datetime]] = None,
+        m1_range: Optional[Tuple[datetime, datetime]] = None,
+        chunk_overrides: Optional[Dict[str, int]] = None,
+    ) -> Dict[str, bool]:
+        chunk_overrides = chunk_overrides or {}
+        now = datetime.utcnow()
+        defaults = {
+            "daily": (
+                daily_range[0] if daily_range else datetime(2023, 10, 1),
+                daily_range[1] if daily_range else now,
+            ),
+            "5min": (
+                m5_range[0] if m5_range else datetime(2023, 10, 1),
+                m5_range[1] if m5_range else now,
+            ),
+            "1min": (
+                m1_range[0] if m1_range else datetime(2025, 8, 1),
+                m1_range[1] if m1_range else now,
+            ),
+        }
+
+        results: Dict[str, bool] = {}
+        for interval_key, bounds in defaults.items():
+            start, end = bounds
+            kwargs = {
+                "symbol": symbol,
+                "interval": interval_key if interval_key != "daily" else "daily",
+                "start_date": start,
+                "end_date": end,
+            }
+            if interval_key != "daily":
+                kwargs["chunk_days"] = chunk_overrides.get(interval_key)
+                kwargs["resume_from_latest"] = True
+            success = self.ingest_historical_data(**kwargs)
+            results[interval_key] = success
+        return results
     
     def ingest_all_historical_data(self, days_back: int = 1825) -> Dict[str, bool]:  # Default to 5 years
         """Ingest historical data for all watchlist stocks"""
