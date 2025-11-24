@@ -100,8 +100,8 @@ class DataIngestionPipeline:
                 multiplier = None
             
             if target_table and multiplier:
-                # For 5-minute data: Check if we should resume from existing data
-                if interval in ("5min", "5-minute", "5m"):
+                # For intraday data (5-minute and 1-minute): Check if we should resume from existing data
+                if interval in ("5min", "5-minute", "5m", "1min", "1-minute", "1m"):
                     try:
                         # Get the latest timestamp for this symbol
                         latest_result = self.supabase.table(target_table)\
@@ -120,16 +120,37 @@ class DataIngestionPipeline:
                                     else:
                                         latest_ts = latest_ts_str
                                     
+                                    # Make latest_ts timezone-naive if it has timezone
+                                    if latest_ts.tzinfo is not None:
+                                        latest_ts = latest_ts.replace(tzinfo=None)
+                                    
                                     # Resume from the day after the latest timestamp
                                     # Add 1 day to start from the next day (to avoid duplicates)
                                     resume_date = (latest_ts + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
                                     
-                                    # Only resume if the resume date is within our target range
-                                    if resume_date >= start_date and resume_date <= end_date:
-                                        print(f"Resuming {symbol} 5-min ingestion from {resume_date.strftime('%Y-%m-%d')} (latest existing: {latest_ts.strftime('%Y-%m-%d %H:%M:%S')})")
+                                    # Always resume from existing data if it exists and is before end_date
+                                    # This ensures we continue from where data stops, regardless of initial start_date
+                                    now = datetime.now()
+                                    interval_label = "1-min" if interval in ("1min", "1-minute", "1m") else "5-min"
+                                    
+                                    print(f"🔍 {symbol} {interval_label} - Latest DB timestamp: {latest_ts.strftime('%Y-%m-%d %H:%M:%S')}")
+                                    print(f"🔍 {symbol} {interval_label} - Calculated resume date: {resume_date.strftime('%Y-%m-%d')}")
+                                    print(f"🔍 {symbol} {interval_label} - End date: {end_date.strftime('%Y-%m-%d')}")
+                                    print(f"🔍 {symbol} {interval_label} - Today: {now.strftime('%Y-%m-%d')}")
+                                    
+                                    # Check if resume_date is in the future (shouldn't happen normally, but handle gracefully)
+                                    if resume_date > now:
+                                        print(f"⚠️ {symbol} {interval_label} resume date {resume_date.strftime('%Y-%m-%d')} is in the future (today: {now.strftime('%Y-%m-%d')}). Latest DB timestamp: {latest_ts.strftime('%Y-%m-%d %H:%M:%S')}.")
+                                        print(f"{symbol} already has {interval} data up to {latest_ts.strftime('%Y-%m-%d %H:%M:%S')}, which is in the future. No new data to fetch. Skipping.")
+                                        return True  # Already complete (or has future dates)
+                                    
+                                    # Check if resume_date is before or equal to end_date
+                                    if resume_date <= end_date:
+                                        print(f"✅ Resuming {symbol} {interval_label} ingestion from {resume_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')} (latest existing: {latest_ts.strftime('%Y-%m-%d %H:%M:%S')})")
                                         start_date = resume_date
-                                    elif resume_date > end_date:
-                                        print(f"{symbol} already has data up to {latest_ts.strftime('%Y-%m-%d')}, which is beyond the target end date. Skipping.")
+                                    else:
+                                        # Data is already up to date (latest timestamp is at or after end_date)
+                                        print(f"ℹ️ {symbol} already has {interval} data up to {latest_ts.strftime('%Y-%m-%d %H:%M:%S')}, which is at or after the target end date ({end_date.strftime('%Y-%m-%d')}). Skipping.")
                                         return True  # Already complete
                                 except Exception as e:
                                     print(f"Warning: Could not parse latest timestamp for {symbol}: {e}. Starting from beginning.")
@@ -141,18 +162,33 @@ class DataIngestionPipeline:
                 all_success = True
                 total_inserted = 0
                 total_skipped = 0
+                
+                # Log the date range we're processing
+                interval_label = "1-min" if interval in ("1min", "1-minute", "1m") else "5-min"
+                print(f"📊 Starting {symbol} {interval_label} ingestion: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
 
                 # Track existing timestamps per chunk (only load what we need, when we need it)
                 # This avoids loading all records upfront
                 existing_timestamps_cache = set()
 
+                chunk_count = 0
                 while chunk_start <= end_date:
+                    chunk_count += 1
                     chunk_end = min(chunk_start + chunk_delta - timedelta(days=1), end_date)
                     if chunk_end < chunk_start:
                         chunk_end = chunk_start
 
                     start_str = chunk_start.strftime("%Y-%m-%d")
                     end_str = chunk_end.strftime("%Y-%m-%d")
+                    
+                    print(f"📦 Processing chunk {chunk_count} for {symbol}: {start_str} to {end_str}")
+                    
+                    # Skip if chunk is entirely in the future
+                    now = datetime.now()
+                    if chunk_start > now:
+                        print(f"⏭️ Skipping future chunk for {symbol}: {start_str} to {end_str} (today: {now.strftime('%Y-%m-%d %H:%M:%S')})")
+                        chunk_start = chunk_end + timedelta(days=1)
+                        continue
 
                     # Check existing records ONLY for this specific chunk date range
                     chunk_existing_timestamps = set()
@@ -205,11 +241,15 @@ class DataIngestionPipeline:
                                     start_dt = datetime.strptime(start_str, "%Y-%m-%d")
                                     end_dt = datetime.strptime(end_str, "%Y-%m-%d")
                                     now = datetime.now()
-                                    if start_dt <= now and end_dt <= now:
+                                    if start_dt > now or end_dt > now:
+                                        # Future dates - skip this chunk
+                                        print(f"Skipping future dates for {symbol} {start_str} to {end_str} (today: {now.strftime('%Y-%m-%d')})")
+                                        break  # Don't retry empty data for future dates
+                                    elif start_dt <= now and end_dt <= now:
                                         # Past dates with no data - might be weekend/holiday
                                         print(f"No trading data for {symbol} {start_str} to {end_str} (likely weekend/holiday)")
-                                except Exception:
-                                    print(f"No data for {symbol} {start_str} to {end_str}")
+                                except Exception as e:
+                                    print(f"No data for {symbol} {start_str} to {end_str} (error: {e})")
                                 break  # Don't retry empty data
 
                             # Prepare rows and filter duplicates using chunk-specific existing timestamps
@@ -266,10 +306,10 @@ class DataIngestionPipeline:
                                 try:
                                     if len(new_rows) <= batch_size:
                                         # Use insert instead of upsert since we've already filtered duplicates
-                                        self.supabase.table(target_table).insert(new_rows).execute()
+                                        result = self.supabase.table(target_table).insert(new_rows).execute()
                                         total_inserted += len(new_rows)
                                         total_skipped += (len(rows) - len(new_rows))
-                                        print(f"Inserted {len(new_rows)} new records for {symbol} {start_str} to {end_str} (skipped {len(rows) - len(new_rows)} duplicates)")
+                                        print(f"✅ Inserted {len(new_rows)} new records for {symbol} {start_str} to {end_str} (skipped {len(rows) - len(new_rows)} duplicates)")
                                     else:
                                         # Insert in batches
                                         for i in range(0, len(new_rows), batch_size):
@@ -277,7 +317,7 @@ class DataIngestionPipeline:
                                             self.supabase.table(target_table).insert(batch).execute()
                                             total_inserted += len(batch)
                                         total_skipped += (len(rows) - len(new_rows))
-                                        print(f"Inserted {len(new_rows)} new records for {symbol} {start_str} to {end_str} in batches (skipped {len(rows) - len(new_rows)} duplicates)")
+                                        print(f"✅ Inserted {len(new_rows)} new records for {symbol} {start_str} to {end_str} in {len(range(0, len(new_rows), batch_size))} batches (skipped {len(rows) - len(new_rows)} duplicates)")
                                 except Exception as e:
                                     # If insert fails (e.g., duplicate key constraint), filter out duplicates and retry
                                     error_str = str(e).lower()
@@ -380,7 +420,12 @@ class DataIngestionPipeline:
                                     all_success = False
                     chunk_start = chunk_end + timedelta(days=1)
 
-                print(f"Completed {symbol}: Inserted {total_inserted} new records, skipped {total_skipped} duplicates")
+                if total_inserted > 0:
+                    print(f"✅ Completed {symbol}: Inserted {total_inserted} new records, skipped {total_skipped} duplicates")
+                elif total_skipped > 0:
+                    print(f"ℹ️ Completed {symbol}: All {total_skipped} records were duplicates or already exist")
+                else:
+                    print(f"⚠️ Completed {symbol}: No data inserted. Check if dates are in the future or if there's no data available for this period.")
                 return all_success
             else:
                 # Daily data (original logic)

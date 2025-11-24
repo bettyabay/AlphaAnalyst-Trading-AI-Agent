@@ -843,9 +843,9 @@ def phase1_foundation_data():
             progress_bar.empty()
             status_text.empty()
 
-    # New: 1-minute intraday ingestion (Aug-Oct 2025)
+    # New: 1-minute intraday ingestion (resume from where data stops till today)
     with col1:
-        if st.button("Ingest 1-min Data (Aug-Oct 2025)", width='stretch', key="ingest_all_1min"):
+        if st.button("Ingest 1-min Data (Resume from Database Till Today)", width='stretch', key="ingest_all_1min"):
             pipeline = DataIngestionPipeline()
             progress_bar = st.progress(0)
             status_text = st.empty()
@@ -853,25 +853,28 @@ def phase1_foundation_data():
             symbols = get_watchlist_symbols()
             results_1min = {}
             from datetime import datetime as dt
-            start_range = dt(2025, 8, 1)
-            end_range = dt(2025, 10, 31)
+            
+            # End date is today - will automatically resume from latest timestamp in database
+            end_range = dt.now()
+            # start_date=None will let the pipeline detect the latest timestamp and resume from there
+            # If no data exists, it will default to days_back (1825 days = 5 years)
 
             for i, symbol in enumerate(symbols):
                 status_text.text(f"Processing 1-min {symbol}... ({i+1}/{len(symbols)})")
                 progress_bar.progress((i + 1) / len(symbols))
 
-                # Ingest 3 months of 1-min data (Aug-Oct 2025)
+                # Ingest 1-min data - will automatically resume from latest timestamp in database till today
                 result = pipeline.ingest_historical_data(
                     symbol,
                     interval='1min',
-                    chunk_days=3,
-                    start_date=start_range,
-                    end_date=end_range
+                    chunk_days=3,  # Small chunks to avoid API limits
+                    start_date=None,  # None = auto-detect resume point from database
+                    end_date=end_range  # Today
                 )
                 results_1min[symbol] = result
 
                 if result:
-                    st.success(f"✅ 1-min {symbol} processed successfully (Aug-Oct 2025)")
+                    st.success(f"✅ 1-min {symbol} processed successfully")
                 else:
                     st.warning(f"⚠️ 1-min {symbol} had issues (check console for details)")
 
@@ -881,7 +884,7 @@ def phase1_foundation_data():
             failed_count = len(results_1min) - success_count
 
             if success_count > 0:
-                st.success(f"✅ Successfully processed 1-min data (Aug-Oct 2025) for {success_count}/{len(results_1min)} stocks")
+                st.success(f"✅ Successfully processed 1-min data for {success_count}/{len(results_1min)} stocks")
                 st.balloons()
             else:
                 st.error(f"❌ Failed to process 1-min data for all {len(results_1min)} stocks")
@@ -892,7 +895,7 @@ def phase1_foundation_data():
                 st.write("Stocks with issues:", ", ".join(failed_stocks))
 
             # Show detailed results
-            st.subheader("1-min Detailed Results (Aug-Oct 2025)")
+            st.subheader("1-min Detailed Results")
             results_df = pd.DataFrame([
                 {"Symbol": symbol, "Status": "✅ Success" if success else "⚠️ Issues"}
                 for symbol, success in results_1min.items()
@@ -3724,7 +3727,7 @@ def phase5_results_analysis():
             fig = go.Figure()
             fig.add_trace(go.Scatter(x=df["date"], y=df["equity"], mode="lines", name="Equity"))
             fig.update_layout(title="Equity Curve (Realized)", template='plotly_white', height=360)
-            st.plotly_chart(fig, width='stretch')
+            st.plotly_chart(fig, use_container_width=True)
 
             # Per-symbol performance
             perf_rows = []
@@ -3896,7 +3899,7 @@ def main():
                             st.markdown(f'<div class="metric-card"><div class="metric-value">{info.get("recommendationKey", "N/A").title()}</div><div class="metric-label">Recommendation</div></div>', unsafe_allow_html=True)
                         
                         st.markdown('<div class="chart-container">', unsafe_allow_html=True)
-                        st.plotly_chart(create_price_chart(hist, symbol), width='stretch')
+                        st.plotly_chart(create_price_chart(hist, symbol), use_container_width=True)
                         st.markdown('</div>', unsafe_allow_html=True)
                         
                         if 'longBusinessSummary' in info:
