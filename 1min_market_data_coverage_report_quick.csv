@@ -1,20 +1,20 @@
-Symbol,Stock Name,Earliest Date,Latest Date,Date Range (Days),Has Data
-COIN,"Coinbase Global, Inc.",2025-08-01,2025-10-31,91,Yes
-TSLA,"Tesla, Inc.",2025-08-01,2025-10-31,91,Yes
-NVDA,NVIDIA Corporation,2025-08-01,2025-10-31,91,Yes
-AVGO,Broadcom Inc.,2025-08-01,2025-10-31,91,Yes
-PLTR,Palantir Technologies Inc.,2025-08-01,2025-10-31,91,Yes
-LRCX,Lam Research Corporation,2025-08-01,2025-10-31,91,Yes
-CRWD,"CrowdStrike Holdings, Inc.",2025-08-01,2025-10-31,91,Yes
-HOOD,"Robinhood Markets, Inc.",2025-08-01,2025-10-31,91,Yes
-APP,AppLovin Corporation,2025-08-01,2025-10-31,91,Yes
-MU,"Micron Technology, Inc.",2025-08-01,2025-10-31,91,Yes
-SNPS,"Synopsys, Inc.",2025-08-01,2025-10-31,91,Yes
-CDNS,"Cadence Design Systems, Inc.",2025-08-01,2025-10-31,91,Yes
-VST,Vistra Corp.,2025-08-01,2025-10-31,91,Yes
-DASH,"DoorDash, Inc.",No data,No data,0,No
-DELL,Dell Technologies Inc.,No data,No data,0,No
-NOW,"ServiceNow, Inc.",No data,No data,0,No
-PANW,"Palo Alto Networks, Inc.",No data,No data,0,No
-AXON,"Axon Enterprise, Inc.",No data,No data,0,No
-URI,"United Rentals, Inc.",No data,No data,0,No
+Symbol,Stock Name,Earliest Date,Latest Date,Date Range (Days),Record Count,Expected Records,Missing Records,Data Quality,Has Data,Error
+COIN,"Coinbase Global, Inc.",Error,Error,Error,Error,,,Error,Error,[WinError 10054] An existing connection was forcibly closed by the remote host
+TSLA,"Tesla, Inc.",2025-08-01,2025-11-24,115,73540,31200.0,0.0,Complete,Yes,
+NVDA,NVIDIA Corporation,2025-08-01,2025-11-24,115,74683,31200.0,0.0,Complete,Yes,
+AVGO,Broadcom Inc.,2025-08-01,2025-11-24,115,51644,31200.0,0.0,Complete,Yes,
+PLTR,Palantir Technologies Inc.,2025-08-01,2025-11-24,115,68757,31200.0,0.0,Complete,Yes,
+LRCX,Lam Research Corporation,2025-08-01,2025-11-24,115,36196,31200.0,0.0,Complete,Yes,
+CRWD,"CrowdStrike Holdings, Inc.",2025-08-01,2025-11-24,115,33563,31200.0,0.0,Complete,Yes,
+HOOD,"Robinhood Markets, Inc.",2025-08-01,2025-11-24,115,59150,31200.0,0.0,Complete,Yes,
+APP,AppLovin Corporation,2025-08-01,2025-11-24,115,38684,31200.0,0.0,Complete,Yes,
+MU,"Micron Technology, Inc.",2025-08-01,2025-11-24,115,55532,31200.0,0.0,Complete,Yes,
+SNPS,"Synopsys, Inc.",2025-08-01,2025-11-24,115,30928,31200.0,272.0,Minor gap,Yes,
+CDNS,"Cadence Design Systems, Inc.",2025-08-01,2025-11-24,115,30071,31200.0,1129.0,Major gap,Yes,
+VST,Vistra Corp.,2025-08-01,2025-11-24,115,34484,31200.0,0.0,Complete,Yes,
+DASH,"DoorDash, Inc.",2025-08-01,2025-11-24,115,23613,31200.0,7587.0,Severe gap,Yes,
+DELL,Dell Technologies Inc.,2025-08-01,2025-11-24,115,31169,31200.0,31.0,Minor gap,Yes,
+NOW,"ServiceNow, Inc.",2025-08-01,2025-11-24,115,24713,31200.0,6487.0,Severe gap,Yes,
+PANW,"Palo Alto Networks, Inc.",2025-08-01,2025-11-24,115,27771,31200.0,3429.0,Major gap,Yes,
+AXON,"Axon Enterprise, Inc.",2025-08-04,2025-11-24,112,17775,30420.0,12645.0,Severe gap,Yes,
+URI,"United Rentals, Inc.",2025-08-01,2025-11-24,114,14746,30810.0,16064.0,Severe gap,Yes,

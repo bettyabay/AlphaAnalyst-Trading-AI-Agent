@@ -13,6 +13,68 @@ from tradingagents.config.watchlist import WATCHLIST_STOCKS, get_watchlist_symbo
 
 load_dotenv()
 
+TRADING_DAYS_PER_YEAR = 252
+CALENDAR_DAYS_PER_YEAR = 365
+
+
+def get_symbol_record_count(table_name: str, symbol: str, supabase) -> Optional[int]:
+    """
+    Use Supabase's count metadata to fetch total rows for a symbol without downloading data.
+    """
+    try:
+        result = supabase.table(table_name)\
+            .select("id", count="exact", head=True)\
+            .eq("symbol", symbol)\
+            .execute()
+
+        if hasattr(result, "count") and result.count is not None:
+            return result.count
+
+        # Fallback if client version does not expose count attribute
+        if result.data is not None:
+            return len(result.data)
+    except Exception:
+        return None
+    return None
+
+
+def estimate_trading_days(date_range_days: Optional[int]) -> Optional[int]:
+    if not isinstance(date_range_days, int) or date_range_days < 0:
+        return None
+    return max(1, int((date_range_days + 1) * TRADING_DAYS_PER_YEAR / CALENDAR_DAYS_PER_YEAR))
+
+
+def evaluate_data_quality(record_count: Optional[int],
+                          trading_days: Optional[int],
+                          expected_rows_per_day: int = 1) -> Dict[str, Optional[int]]:
+    if record_count is None or trading_days is None:
+        return {
+            "expected_records": None,
+            "missing_records": None,
+            "quality": "Unknown"
+        }
+
+    expected_records = trading_days * expected_rows_per_day
+    missing_records = expected_records - record_count
+
+    if missing_records <= 0:
+        quality = "Complete"
+        missing_records = 0
+    else:
+        gap_ratio = missing_records / expected_records if expected_records else 0
+        if gap_ratio < 0.02:
+            quality = "Minor gap"
+        elif gap_ratio < 0.15:
+            quality = "Major gap"
+        else:
+            quality = "Severe gap"
+
+    return {
+        "expected_records": expected_records,
+        "missing_records": missing_records,
+        "quality": quality
+    }
+
 
 def get_daily_market_data_coverage(symbol: str, supabase) -> Dict:
     """
@@ -165,7 +227,7 @@ def get_quick_daily_coverage_summary() -> pd.DataFrame:
     symbols = get_watchlist_symbols()
     coverage_data = []
     
-    print(f"Quick check: Getting date ranges for {len(symbols)} stocks (daily data)...")
+    print(f"Quick check: Getting date ranges and counts for {len(symbols)} stocks (daily data)...")
     print("=" * 80)
     
     for i, symbol in enumerate(symbols, 1):
@@ -208,15 +270,24 @@ def get_quick_daily_coverage_summary() -> pd.DataFrame:
                     earliest_str = earliest_dt.strftime("%Y-%m-%d")
                     latest_str = latest_dt.strftime("%Y-%m-%d")
                     
+                    record_count = get_symbol_record_count("market_data", symbol, supabase)
+                    trading_days = estimate_trading_days(date_range_days)
+                    quality_info = evaluate_data_quality(record_count, trading_days, expected_rows_per_day=1)
+
                     coverage_data.append({
                         "Symbol": symbol,
                         "Stock Name": WATCHLIST_STOCKS.get(symbol, "Unknown"),
                         "Earliest Date": earliest_str,
                         "Latest Date": latest_str,
                         "Date Range (Days)": date_range_days,
+                        "Record Count": record_count if record_count is not None else "Unknown",
+                        "Expected Records": quality_info["expected_records"],
+                        "Missing Records": quality_info["missing_records"],
+                        "Data Quality": quality_info["quality"],
                         "Has Data": "Yes"
                     })
-                    print(f"✓ {earliest_str} to {latest_str} ({date_range_days} days)")
+                    record_str = record_count if record_count is not None else "?"
+                    print(f"✓ {earliest_str} to {latest_str} ({date_range_days} days, {record_str} records)")
                 except Exception as e:
                     coverage_data.append({
                         "Symbol": symbol,
@@ -224,6 +295,10 @@ def get_quick_daily_coverage_summary() -> pd.DataFrame:
                         "Earliest Date": "Error",
                         "Latest Date": "Error",
                         "Date Range (Days)": "Error",
+                        "Record Count": "Error",
+                        "Expected Records": None,
+                        "Missing Records": None,
+                        "Data Quality": "Error",
                         "Has Data": "Error",
                         "Error": str(e)
                     })
@@ -235,6 +310,10 @@ def get_quick_daily_coverage_summary() -> pd.DataFrame:
                     "Earliest Date": "No data",
                     "Latest Date": "No data",
                     "Date Range (Days)": 0,
+                    "Record Count": 0,
+                    "Expected Records": 0,
+                    "Missing Records": None,
+                    "Data Quality": "No data",
                     "Has Data": "No"
                 })
                 print(f"✗ No data")
@@ -245,6 +324,10 @@ def get_quick_daily_coverage_summary() -> pd.DataFrame:
                 "Earliest Date": "Error",
                 "Latest Date": "Error",
                 "Date Range (Days)": "Error",
+                "Record Count": "Error",
+                "Expected Records": None,
+                "Missing Records": None,
+                "Data Quality": "Error",
                 "Has Data": "Error",
                 "Error": str(e)
             })
@@ -309,6 +392,18 @@ def get_all_stocks_daily_coverage() -> pd.DataFrame:
                 latest_str = dt.strftime("%Y-%m-%d")
             except:
                 latest_str = str(coverage["latest_date"])[:10]
+
+        date_range_days = coverage.get("date_range_days", "N/A")
+        trading_days = estimate_trading_days(date_range_days) if isinstance(date_range_days, int) else None
+        record_count_val = coverage.get("record_count")
+        if isinstance(record_count_val, int):
+            quality_info = evaluate_data_quality(record_count_val, trading_days, expected_rows_per_day=1)
+        else:
+            quality_info = {
+                "expected_records": None,
+                "missing_records": None,
+                "quality": "Unknown" if coverage["has_data"] else "No data"
+            }
         
         df_data.append({
             "Symbol": coverage["symbol"],
@@ -316,7 +411,10 @@ def get_all_stocks_daily_coverage() -> pd.DataFrame:
             "Record Count": coverage["record_count"],
             "Earliest Date": earliest_str if earliest_str else "No data",
             "Latest Date": latest_str if latest_str else "No data",
-            "Date Range (Days)": coverage.get("date_range_days", "N/A"),
+            "Date Range (Days)": date_range_days,
+            "Expected Records": quality_info["expected_records"],
+            "Missing Records": quality_info["missing_records"],
+            "Data Quality": quality_info["quality"],
             "Has Data": "Yes" if coverage["has_data"] else "No",
             "Error": coverage.get("error", "")
         })
@@ -342,10 +440,10 @@ if __name__ == "__main__":
         # Get coverage for all stocks with counts
         df = get_all_stocks_daily_coverage()
     else:
-        print("Running QUICK report (date ranges only - fast)...")
-        print("(Use --full or -f flag for full report with record counts)")
+        print("Running QUICK report (date ranges + counts, fast)...")
+        print("(Use --full or -f flag for detailed pagination count)")
         print()
-        # Get quick coverage (date ranges only, no counts)
+        # Get quick coverage (date ranges + lightweight counts)
         df = get_quick_daily_coverage_summary()
     
     if not df.empty:
@@ -432,10 +530,13 @@ if __name__ == "__main__":
         stocks_with_data_df = df[df["Has Data"] == "Yes"]
         if not stocks_with_data_df.empty:
             # Select columns based on what's available
-            cols_to_show = ["Symbol", "Stock Name", "Earliest Date", "Latest Date", "Date Range (Days)"]
+            cols_to_show = ["Symbol", "Stock Name"]
             if "Record Count" in stocks_with_data_df.columns:
-                cols_to_show.insert(2, "Record Count")  # Insert after "Stock Name"
-            print(stocks_with_data_df[cols_to_show].to_string(index=False))
+                cols_to_show.append("Record Count")
+            cols_to_show.extend(["Expected Records", "Missing Records", "Data Quality",
+                                 "Earliest Date", "Latest Date", "Date Range (Days)"])
+            existing_cols = [col for col in cols_to_show if col in stocks_with_data_df.columns]
+            print(stocks_with_data_df[existing_cols].to_string(index=False))
         
         print("\n" + "=" * 80)
     else:

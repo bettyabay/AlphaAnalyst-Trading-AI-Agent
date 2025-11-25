@@ -1,20 +1,20 @@
 Symbol,Stock Name,Earliest Date,Latest Date,Date Range (Days),Has Data
-COIN,"Coinbase Global, Inc.",2023-10-02,2025-11-18,778,Yes
-TSLA,"Tesla, Inc.",2023-10-02,2025-11-18,778,Yes
-NVDA,NVIDIA Corporation,2023-10-02,2025-11-18,778,Yes
-AVGO,Broadcom Inc.,2023-10-02,2025-10-29,758,Yes
-PLTR,Palantir Technologies Inc.,2023-10-02,2025-10-28,757,Yes
-LRCX,Lam Research Corporation,2023-10-02,2025-10-31,760,Yes
-CRWD,"CrowdStrike Holdings, Inc.",2023-10-02,2025-10-31,760,Yes
-HOOD,"Robinhood Markets, Inc.",2023-10-02,2025-10-28,757,Yes
-APP,AppLovin Corporation,2023-10-02,2025-10-31,760,Yes
-MU,"Micron Technology, Inc.",2023-10-02,2025-10-28,757,Yes
-SNPS,"Synopsys, Inc.",2023-10-02,2025-10-31,760,Yes
-CDNS,"Cadence Design Systems, Inc.",2023-10-02,2025-10-31,760,Yes
-VST,Vistra Corp.,2023-10-02,2025-10-31,760,Yes
-DASH,"DoorDash, Inc.",2023-10-02,2025-10-31,760,Yes
-DELL,Dell Technologies Inc.,2023-10-02,2025-10-31,760,Yes
-NOW,"ServiceNow, Inc.",2023-10-02,2025-10-31,760,Yes
-PANW,"Palo Alto Networks, Inc.",2023-10-02,2025-10-31,760,Yes
-AXON,"Axon Enterprise, Inc.",2023-10-02,2025-10-31,760,Yes
-URI,"United Rentals, Inc.",2023-10-02,2025-10-31,760,Yes
+COIN,"Coinbase Global, Inc.",2023-10-02,2025-11-24,784,Yes
+TSLA,"Tesla, Inc.",2023-10-02,2025-11-24,784,Yes
+NVDA,NVIDIA Corporation,2023-10-02,2025-11-24,784,Yes
+AVGO,Broadcom Inc.,2023-10-02,2025-11-07,767,Yes
+PLTR,Palantir Technologies Inc.,2023-10-02,2025-11-05,765,Yes
+LRCX,Lam Research Corporation,2023-10-02,2025-11-17,777,Yes
+CRWD,"CrowdStrike Holdings, Inc.",2023-10-02,2025-11-17,777,Yes
+HOOD,"Robinhood Markets, Inc.",2023-10-02,2025-11-06,766,Yes
+APP,AppLovin Corporation,2023-10-02,2025-11-13,773,Yes
+MU,"Micron Technology, Inc.",2023-10-02,2025-11-06,766,Yes
+SNPS,"Synopsys, Inc.",2023-10-02,2025-11-18,778,Yes
+CDNS,"Cadence Design Systems, Inc.",2023-10-02,2025-11-19,779,Yes
+VST,Vistra Corp.,2023-10-02,2025-11-17,777,Yes
+DASH,"DoorDash, Inc.",2023-10-02,2025-11-14,774,Yes
+DELL,Dell Technologies Inc.,2023-10-02,2025-11-17,777,Yes
+NOW,"ServiceNow, Inc.",2023-10-02,2025-11-18,778,Yes
+PANW,"Palo Alto Networks, Inc.",2023-10-02,2025-11-18,778,Yes
+AXON,"Axon Enterprise, Inc.",2023-10-02,2025-11-18,778,Yes
+URI,"United Rentals, Inc.",2023-10-02,2025-11-21,781,Yes
