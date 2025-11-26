@@ -111,8 +111,14 @@ def _format_ohlcv_table(df: pd.DataFrame, label: str = "Timestamp") -> str:
 def _format_window(index: pd.Index) -> str:
     if index.empty:
         return "N/A"
-    start = index[0].strftime("%Y-%m-%d %H:%M")
-    end = index[-1].strftime("%Y-%m-%d %H:%M")
+    start_ts = pd.to_datetime(index[0])
+    end_ts = pd.to_datetime(index[-1])
+    same_day = start_ts.date() == end_ts.date()
+    if same_day:
+        date_label = start_ts.strftime("%Y-%m-%d")
+        return f"{start_ts.strftime('%H:%M')}-{end_ts.strftime('%H:%M')} ({date_label})"
+    start = start_ts.strftime("%Y-%m-%d %H:%M")
+    end = end_ts.strftime("%Y-%m-%d %H:%M")
     return f"{start} → {end}"
 
 
@@ -188,6 +194,11 @@ class FeatureLab:
         m5 = self._fetch_df(symbol, "5min", lookback_days=7)
         if m5.empty:
             raise ValueError("No 5-minute data available. Run ingestion first.")
+
+        if len(m1) < 20:
+            raise ValueError("Need at least 20 consecutive 1-minute bars (start ingesting from Aug 1 to current time).")
+        if len(m5) < 6:
+            raise ValueError("Need at least 6 consecutive 5-minute bars (ingest data from Oct 1, 2023 onward).")
 
         timestamp_label = command_ts or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         metrics = self._compute_quantum_metrics(m1, m5)
@@ -640,6 +651,10 @@ Phase 1 Scoring Calculations Required:
 
 Expected Output Format:
 {symbol} | Vol: {fmt(metrics['volume_score'])} | VWAP: {fmt(metrics['vwap_score'])} | Mom: {fmt(metrics['momentum_score'])} | Cat: {fmt(metrics['catalyst_score'])} | Composite: {fmt(metrics['composite_score'])} | {metrics['verdict']}
+
+DATA POLICY:
+• Responses must rely strictly on the Supabase-ingested OHLCV tables reflected above.
+• Do NOT fetch, assume, or hallucinate data from any external source.
 """
         return prompt.strip()
 

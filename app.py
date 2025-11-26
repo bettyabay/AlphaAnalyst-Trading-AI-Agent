@@ -795,7 +795,8 @@ def phase1_foundation_data():
             
             # Explicit date range start with dynamic end -> run time
             start_date = datetime(2023, 10, 1)
-            end_date = datetime.utcnow()
+            now_utc = datetime.utcnow()
+            end_date = max(start_date, now_utc - timedelta(minutes=15))
 
             for i, symbol in enumerate(symbols):
                 status_text.text(f"Processing 5-min {symbol}... ({i+1}/{len(symbols)})")
@@ -853,7 +854,7 @@ def phase1_foundation_data():
             symbols = get_watchlist_symbols()
             results_1min = {}
             start_range = datetime(2025, 8, 1)
-            end_range = datetime.utcnow()
+            end_range = max(start_range, datetime.utcnow() - timedelta(minutes=15))
 
             for i, symbol in enumerate(symbols):
                 status_text.text(f"Processing 1-min {symbol}... ({i+1}/{len(symbols)})")
