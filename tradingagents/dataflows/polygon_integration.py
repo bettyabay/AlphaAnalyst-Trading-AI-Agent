@@ -17,9 +17,14 @@ class PolygonDataClient:
     def __init__(self):
         self.api_key = os.getenv("POLYGON_API_KEY")
         self.base_url = "https://api.polygon.io"
-        self.headers = {"Authorization": f"Bearer {self.api_key}"}
+        self.headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         self.last_request_time = 0
         self.min_request_interval = 0.25  # Minimum 250ms between requests (4 requests/sec)
+        
+        # Warn if API key is missing
+        if not self.api_key:
+            print("⚠️ WARNING: POLYGON_API_KEY not found in environment variables. API calls will fail.")
+            print("   Get a key from: https://polygon.io/dashboard/api-keys")
         
     def get_stock_details(self, symbol: str) -> Dict:
         """Get stock details and company information"""
@@ -76,6 +81,19 @@ class PolygonDataClient:
                     return pd.DataFrame()
                     
             except requests.exceptions.HTTPError as e:
+                response_status = getattr(e.response, 'status_code', None) if hasattr(e, 'response') else None
+                
+                # Handle 401 Unauthorized (invalid API key)
+                if response_status == 401:
+                    error_msg = (
+                        f"❌ POLYGON_API_KEY authentication failed (401 Unauthorized). "
+                        f"Please check your API key in the .env file.\n"
+                        f"Get a key from: https://polygon.io/dashboard/api-keys"
+                    )
+                    print(error_msg)
+                    # Don't retry 401 errors - they won't succeed
+                    raise ValueError(error_msg) from e
+                
                 if "429" in str(e) and attempt < max_retries - 1:
                     wait_time = min(2 ** attempt, 60)
                     print(f"HTTP 429 error for {symbol}. Waiting {wait_time}s before retry {attempt + 1}/{max_retries}...")
@@ -166,8 +184,21 @@ class PolygonDataClient:
                         return pd.DataFrame()
 
             except requests.exceptions.HTTPError as e:
-                # Check if response exists and if it's a 429
+                # Check if response exists and get status code
                 response_status = getattr(e.response, 'status_code', None) if hasattr(e, 'response') else None
+                
+                # Handle 401 Unauthorized (invalid API key)
+                if response_status == 401:
+                    error_msg = (
+                        f"❌ POLYGON_API_KEY authentication failed (401 Unauthorized). "
+                        f"Please check your API key in the .env file.\n"
+                        f"Get a key from: https://polygon.io/dashboard/api-keys"
+                    )
+                    print(error_msg)
+                    # Don't retry 401 errors - they won't succeed
+                    raise ValueError(error_msg) from e
+                
+                # Handle 429 rate limiting
                 if response_status == 429:
                     # Already handled above, but catch here too
                     if attempt < max_retries - 1:

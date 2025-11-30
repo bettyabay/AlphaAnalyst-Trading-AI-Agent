@@ -901,53 +901,6 @@ def phase1_foundation_data():
 
             progress_bar.empty()
             status_text.empty()
-
-    with col1:
-        if st.button("⚡ Ingest Daily + 5-min + 1-min (Full Stack)", width='stretch', key="ingest_full_stack"):
-            pipeline = DataIngestionPipeline()
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-
-            symbols = get_watchlist_symbols()
-            now = datetime.utcnow()
-            daily_range = (datetime(2023, 10, 1), now)
-            intraday_start = datetime(2023, 10, 1)
-            one_min_start = datetime(2025, 8, 1)
-            chunk_overrides = {"5min": 90, "1min": 14}
-
-            full_results = {}
-            for i, symbol in enumerate(symbols):
-                status_text.text(f"Full-stack ingestion for {symbol}... ({i+1}/{len(symbols)})")
-                progress_bar.progress((i + 1) / len(symbols))
-                result = pipeline.ingest_symbol_full_stack(
-                    symbol,
-                    daily_range=daily_range,
-                    m5_range=(intraday_start, now),
-                    m1_range=(one_min_start, now),
-                    chunk_overrides=chunk_overrides,
-                )
-                full_results[symbol] = result
-                if all(result.values()):
-                    st.success(f"✅ {symbol}: Daily+5m+1m complete")
-                else:
-                    failed = [k for k, ok in result.items() if not ok]
-                    st.warning(f"⚠️ {symbol}: Issues with {', '.join(failed)}")
-
-            pipeline.close()
-            summary_rows = []
-            for symbol, result in full_results.items():
-                summary_rows.append(
-                    {
-                        "Symbol": symbol,
-                        "Daily": "✅" if result.get("daily") else "⚠️",
-                        "5-min": "✅" if result.get("5min") else "⚠️",
-                        "1-min": "✅" if result.get("1min") else "⚠️",
-                    }
-                )
-            st.subheader("Full Stack Ingestion Status")
-            st.dataframe(pd.DataFrame(summary_rows), width='stretch')
-            progress_bar.empty()
-            status_text.empty()
     
     with col2:
         if st.button("Check Data Status", width='stretch', key="main_data_status"):
@@ -1071,12 +1024,63 @@ def phase1_foundation_data():
             elif not missing_records:
                 st.success("No gaps detected. Nothing to backfill.")
             else:
-                with st.spinner("Running targeted ingestion jobs..."):
-                    pipeline = DataIngestionPipeline()
-                    logs = coverage_service.backfill_missing(pipeline, missing_records)
-                    pipeline.close()
-                    st.session_state.coverage_backfill_logs = logs
-                    st.success("Backfill jobs completed")
+                # Check API key before attempting backfill
+                import os
+                polygon_key = os.getenv("POLYGON_API_KEY")
+                if not polygon_key:
+                    st.error("❌ POLYGON_API_KEY not found in environment variables. Cannot backfill data.")
+                    st.info("💡 Please add POLYGON_API_KEY to your .env file. Get a key from: https://polygon.io/dashboard/api-keys")
+                else:
+                    with st.spinner("Running targeted ingestion jobs..."):
+                        try:
+                            pipeline = DataIngestionPipeline()
+                            logs = coverage_service.backfill_missing(pipeline, missing_records)
+                            pipeline.close()
+                            st.session_state.coverage_backfill_logs = logs
+                            
+                            # Check for 401 errors in logs
+                            has_401_error = False
+                            for log in logs:
+                                if isinstance(log, dict) and "error" in str(log.get("message", "")).lower():
+                                    if "401" in str(log.get("message", "")) or "unauthorized" in str(log.get("message", "")).lower():
+                                        has_401_error = True
+                                        break
+                            
+                            if has_401_error:
+                                st.error("❌ Backfill failed: Polygon API authentication error (401 Unauthorized)")
+                                st.warning("💡 Your POLYGON_API_KEY appears to be invalid or expired. Please:")
+                                st.markdown("""
+                                1. Check your API key at: https://polygon.io/dashboard/api-keys
+                                2. Update your `.env` file with: `POLYGON_API_KEY=your_valid_key_here`
+                                3. Restart the Streamlit app
+                                """)
+                            else:
+                                success_count = sum(1 for log in logs if log.get("success", False))
+                                total_count = len(logs)
+                                if success_count > 0:
+                                    st.success(f"✅ Backfill completed: {success_count}/{total_count} tasks succeeded")
+                                else:
+                                    st.warning(f"⚠️ Backfill completed but no tasks succeeded. Check logs below for details.")
+                        except ValueError as e:
+                            # Catch 401 errors raised from polygon_integration
+                            error_msg = str(e)
+                            if "401" in error_msg or "unauthorized" in error_msg.lower():
+                                st.error("❌ Polygon API Authentication Failed")
+                                st.warning("💡 Your POLYGON_API_KEY is invalid or expired. Please:")
+                                st.markdown("""
+                                1. Get a valid API key from: https://polygon.io/dashboard/api-keys
+                                2. Update your `.env` file: `POLYGON_API_KEY=your_valid_key_here`
+                                3. Restart the Streamlit app
+                                """)
+                            else:
+                                st.error(f"❌ Backfill error: {error_msg}")
+                        except Exception as e:
+                            error_msg = str(e)
+                            if "401" in error_msg or "unauthorized" in error_msg.lower():
+                                st.error("❌ Polygon API Authentication Failed (401 Unauthorized)")
+                                st.warning("💡 Please check your POLYGON_API_KEY in the .env file")
+                            else:
+                                st.error(f"❌ Backfill failed: {error_msg}")
 
     coverage_rows = st.session_state.get("coverage_rows")
     if coverage_rows:

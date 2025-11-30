@@ -354,24 +354,53 @@ class DataCoverageService:
                 if end_dt <= start_dt:
                     continue
 
-                success = pipeline.ingest_historical_data(
-                    symbol=task["symbol"],
-                    interval="daily" if task["interval"] == "1d" else task["interval"],
-                    start_date=start_dt,
-                    end_date=end_dt,
-                    chunk_days=task["chunk_days"],
-                    resume_from_latest=task["resume_from_latest"],
-                )
-                logs.append(
-                    {
-                        "symbol": task["symbol"],
-                        "interval": task["interval"],
-                        "reason": task["reason"],
-                        "start": start_dt.isoformat(),
-                        "end": end_dt.isoformat(),
-                        "success": success,
-                    }
-                )
+                try:
+                    success = pipeline.ingest_historical_data(
+                        symbol=task["symbol"],
+                        interval="daily" if task["interval"] == "1d" else task["interval"],
+                        start_date=start_dt,
+                        end_date=end_dt,
+                        chunk_days=task["chunk_days"],
+                        resume_from_latest=task["resume_from_latest"],
+                    )
+                    logs.append(
+                        {
+                            "symbol": task["symbol"],
+                            "interval": task["interval"],
+                            "reason": task["reason"],
+                            "start": start_dt.isoformat(),
+                            "end": end_dt.isoformat(),
+                            "success": success,
+                        }
+                    )
+                except ValueError as e:
+                    # Catch 401 errors from polygon_integration
+                    error_msg = str(e)
+                    logs.append(
+                        {
+                            "symbol": task["symbol"],
+                            "interval": task["interval"],
+                            "reason": task["reason"],
+                            "start": start_dt.isoformat(),
+                            "end": end_dt.isoformat(),
+                            "success": False,
+                            "message": error_msg,
+                        }
+                    )
+                except Exception as e:
+                    # Catch other errors
+                    error_msg = str(e)
+                    logs.append(
+                        {
+                            "symbol": task["symbol"],
+                            "interval": task["interval"],
+                            "reason": task["reason"],
+                            "start": start_dt.isoformat(),
+                            "end": end_dt.isoformat(),
+                            "success": False,
+                            "message": error_msg,
+                        }
+                    )
         return logs
 
 
