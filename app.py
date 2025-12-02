@@ -3,7 +3,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import yfinance as yf
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import os
 import io
@@ -854,7 +854,11 @@ def phase1_foundation_data():
             symbols = get_watchlist_symbols()
             results_1min = {}
             start_range = datetime(2025, 8, 1)
-            end_range = max(start_range, datetime.utcnow() - timedelta(minutes=15))
+            # Ingest up to current time when button is clicked
+            # Set end_date to tomorrow to ensure today's data is included
+            # (ingestion pipeline normalizes to midnight, so tomorrow ensures today is processed)
+            now_utc = datetime.utcnow()
+            end_range = (now_utc + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
 
             for i, symbol in enumerate(symbols):
                 status_text.text(f"Processing 1-min {symbol}... ({i+1}/{len(symbols)})")

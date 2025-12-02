@@ -15,6 +15,7 @@ import pandas as pd
 from groq import Groq
 
 from tradingagents.dataflows.market_data_service import fetch_ohlcv
+from tradingagents.database.config import get_supabase
 
 
 UTC = timezone.utc
@@ -182,6 +183,40 @@ class FeatureLab:
             provider=provider,
         )
 
+    def _check_data_availability(self, symbol: str, interval: str) -> Dict[str, object]:
+        """Check what data exists in the database for diagnostic purposes."""
+        supabase = get_supabase()
+        if not supabase:
+            return {"error": "Supabase not configured"}
+        
+        table_map = {"1min": "market_data_1min", "5min": "market_data_5min"}
+        table = table_map.get(interval)
+        if not table:
+            return {"error": f"Unknown interval: {interval}"}
+        
+        try:
+            # Get total count
+            count_resp = supabase.table(table).select("timestamp", count="exact").eq("symbol", symbol).execute()
+            total_count = count_resp.count if hasattr(count_resp, 'count') else None
+            
+            # Get earliest and latest timestamps
+            earliest_resp = supabase.table(table).select("timestamp").eq("symbol", symbol).order("timestamp", desc=False).limit(1).execute()
+            latest_resp = supabase.table(table).select("timestamp").eq("symbol", symbol).order("timestamp", desc=True).limit(1).execute()
+            
+            earliest = earliest_resp.data[0]["timestamp"] if earliest_resp.data else None
+            latest = latest_resp.data[0]["timestamp"] if latest_resp.data else None
+            
+            return {
+                "symbol": symbol,
+                "interval": interval,
+                "table": table,
+                "total_count": total_count,
+                "earliest": earliest,
+                "latest": latest,
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
     def run_quantum_screen(self, symbol: str, command_ts: Optional[str] = None) -> Dict[str, object]:
         symbol = (symbol or "").upper()
         if not symbol:
@@ -189,11 +224,57 @@ class FeatureLab:
 
         m1 = self._fetch_df(symbol, "1min", lookback_days=3)
         if m1.empty:
-            raise ValueError("No 1-minute data available. Run ingestion first.")
+            # Check what data actually exists
+            m1_diag = self._check_data_availability(symbol, "1min")
+            m1_extended = self._fetch_df(symbol, "1min", lookback_days=30)
+            
+            if m1_extended.empty:
+                diag_msg = ""
+                if "error" not in m1_diag:
+                    diag_msg = (
+                        f" Diagnostic: Found {m1_diag.get('total_count', 0)} total records in database. "
+                        f"Earliest: {m1_diag.get('earliest', 'N/A')}, Latest: {m1_diag.get('latest', 'N/A')}."
+                    )
+                raise ValueError(
+                    f"No 1-minute data available for {symbol} in the last 30 days.{diag_msg} "
+                    "Run ingestion first. Check that data exists in market_data_1min table."
+                )
+            else:
+                diag_msg = ""
+                if "error" not in m1_diag:
+                    diag_msg = f" Latest data in DB: {m1_diag.get('latest', 'N/A')}."
+                raise ValueError(
+                    f"No 1-minute data available for {symbol} in the last 3 days. "
+                    f"Found {len(m1_extended)} records in the last 30 days, but need recent data.{diag_msg} "
+                    "The data may be too old. Consider ingesting more recent data."
+                )
 
         m5 = self._fetch_df(symbol, "5min", lookback_days=7)
         if m5.empty:
-            raise ValueError("No 5-minute data available. Run ingestion first.")
+            # Check what data actually exists
+            m5_diag = self._check_data_availability(symbol, "5min")
+            m5_extended = self._fetch_df(symbol, "5min", lookback_days=30)
+            
+            if m5_extended.empty:
+                diag_msg = ""
+                if "error" not in m5_diag:
+                    diag_msg = (
+                        f" Diagnostic: Found {m5_diag.get('total_count', 0)} total records in database. "
+                        f"Earliest: {m5_diag.get('earliest', 'N/A')}, Latest: {m5_diag.get('latest', 'N/A')}."
+                    )
+                raise ValueError(
+                    f"No 5-minute data available for {symbol} in the last 30 days.{diag_msg} "
+                    "Run ingestion first. Check that data exists in market_data_5min table."
+                )
+            else:
+                diag_msg = ""
+                if "error" not in m5_diag:
+                    diag_msg = f" Latest data in DB: {m5_diag.get('latest', 'N/A')}."
+                raise ValueError(
+                    f"No 5-minute data available for {symbol} in the last 7 days. "
+                    f"Found {len(m5_extended)} records in the last 30 days, but need recent data.{diag_msg} "
+                    "The data may be too old. Consider ingesting more recent data."
+                )
 
         if len(m1) < 20:
             raise ValueError("Need at least 20 consecutive 1-minute bars (start ingesting from Aug 1 to current time).")
