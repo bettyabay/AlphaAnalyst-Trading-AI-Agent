@@ -281,9 +281,15 @@ class FeatureLab:
         if len(m5) < 6:
             raise ValueError("Need at least 6 consecutive 5-minute bars (ingest data from Oct 1, 2023 onward).")
 
+        # Fetch daily data for trend and context
+        daily = self._fetch_df(symbol, "1d", lookback_days=60)
+        if daily.empty:
+            # Daily data is optional but recommended - warn but continue
+            print(f"Warning: No daily data available for {symbol}. Daily context will be missing.")
+
         timestamp_label = command_ts or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        metrics = self._compute_quantum_metrics(m1, m5)
-        extraction = self._build_quantum_extraction(symbol, m1, m5, metrics)
+        metrics = self._compute_quantum_metrics(m1, m5, daily)
+        extraction = self._build_quantum_extraction(symbol, m1, m5, daily, metrics)
         prompt = self._build_quantum_prompt(symbol, metrics, extraction, timestamp_label)
         summary = (
             f"{symbol} | Vol: {metrics['volume_score']:.2f} | VWAP: {metrics['vwap_score']:.2f} | "
@@ -465,7 +471,7 @@ USER INSTRUCTIONS:
     # ------------------------------------------------------------------ #
     # QUANTUMTRADER calculations
     # ------------------------------------------------------------------ #
-    def _compute_quantum_metrics(self, m1: pd.DataFrame, m5: pd.DataFrame) -> Dict[str, float]:
+    def _compute_quantum_metrics(self, m1: pd.DataFrame, m5: pd.DataFrame, daily: pd.DataFrame = None) -> Dict[str, float]:
         close = pd.to_numeric(m1["Close"], errors="coerce")
         volume = pd.to_numeric(m1["Volume"], errors="coerce")
 
@@ -499,6 +505,9 @@ USER INSTRUCTIONS:
         low_120 = float(window120.min()) if not window120.empty else None
         ema15_current, ema15_previous = self._compute_ema15_pair(m5)
 
+        # Compute daily metrics if available
+        daily_metrics = self._compute_daily_metrics(daily, float(close.iloc[-1])) if daily is not None and not daily.empty else {}
+
         metrics = {
             "current_volume": round(current_volume, 2),
             "volume_ma20": round(volume_ma20, 2) if volume_ma20 is not None else None,
@@ -520,21 +529,83 @@ USER INSTRUCTIONS:
             "low_120": round(low_120, 4) if low_120 is not None else None,
             "ema15_current": round(ema15_current, 4) if ema15_current is not None else None,
             "ema15_previous": round(ema15_previous, 4) if ema15_previous is not None else None,
+            **daily_metrics,  # Merge daily metrics into main metrics dict
         }
         return metrics
+
+    def _compute_daily_metrics(self, daily: pd.DataFrame, current_price: float) -> Dict[str, float]:
+        """Compute daily timeframe metrics for trend context."""
+        if daily.empty:
+            return {}
+        
+        daily_close = pd.to_numeric(daily["Close"], errors="coerce")
+        daily_volume = pd.to_numeric(daily["Volume"], errors="coerce")
+        
+        # Daily SMAs
+        sma20 = float(daily_close.tail(20).mean()) if len(daily_close) >= 20 else None
+        sma50 = float(daily_close.tail(50).mean()) if len(daily_close) >= 50 else None
+        sma200 = float(daily_close.tail(200).mean()) if len(daily_close) >= 200 else None
+        
+        # Daily returns
+        return_5d = _pct_change(daily_close, 5)
+        return_20d = _pct_change(daily_close, 20)
+        
+        # Daily ATR
+        atr14_daily = _calc_atr(daily, 14)
+        
+        # Daily RSI
+        rsi14_daily = _calc_rsi(daily_close)
+        
+        # Daily high/low (last 20 days)
+        daily_high_20d = float(daily_close.tail(20).max()) if len(daily_close) >= 20 else None
+        daily_low_20d = float(daily_close.tail(20).min()) if len(daily_close) >= 20 else None
+        
+        # Daily volume ratio
+        volume_ratio_daily = _volume_ratio(daily_volume)
+        
+        # Trend determination (price vs SMAs)
+        trend = "NEUTRAL"
+        if sma20 and sma50:
+            if current_price > sma20 > sma50:
+                trend = "BULLISH"
+            elif current_price < sma20 < sma50:
+                trend = "BEARISH"
+        
+        # Distance from daily SMAs
+        distance_sma20 = ((current_price - sma20) / sma20 * 100) if sma20 and sma20 != 0 else None
+        distance_sma50 = ((current_price - sma50) / sma50 * 100) if sma50 and sma50 != 0 else None
+        
+        return {
+            "daily_sma20": round(sma20, 4) if sma20 is not None else None,
+            "daily_sma50": round(sma50, 4) if sma50 is not None else None,
+            "daily_sma200": round(sma200, 4) if sma200 is not None else None,
+            "daily_return_5d_pct": round(return_5d, 2) if return_5d is not None else None,
+            "daily_return_20d_pct": round(return_20d, 2) if return_20d is not None else None,
+            "daily_atr14": round(atr14_daily, 4) if atr14_daily is not None else None,
+            "daily_rsi14": round(rsi14_daily, 2) if rsi14_daily is not None else None,
+            "daily_high_20d": round(daily_high_20d, 4) if daily_high_20d is not None else None,
+            "daily_low_20d": round(daily_low_20d, 4) if daily_low_20d is not None else None,
+            "daily_volume_ratio": round(volume_ratio_daily, 2) if volume_ratio_daily is not None else None,
+            "daily_trend": trend,
+            "daily_distance_sma20_pct": round(distance_sma20, 2) if distance_sma20 is not None else None,
+            "daily_distance_sma50_pct": round(distance_sma50, 2) if distance_sma50 is not None else None,
+        }
 
     def _build_quantum_extraction(
         self,
         symbol: str,
         m1: pd.DataFrame,
         m5: pd.DataFrame,
+        daily: pd.DataFrame,
         metrics: Dict[str, float],
     ) -> Dict[str, object]:
         m1_recent = m1.tail(20)
         m5_recent = m5.tail(6)
+        daily_recent = daily.tail(10) if daily is not None and not daily.empty else pd.DataFrame()
 
         m1_window = _format_window(m1_recent.index) if not m1_recent.empty else "N/A"
         m5_window = _format_window(m5_recent.index) if not m5_recent.empty else "N/A"
+        daily_window = _format_window(daily_recent.index) if not daily_recent.empty else "N/A"
 
         alignment_ok = False
         if not m1_recent.empty and not m5_recent.empty:
@@ -562,6 +633,8 @@ USER INSTRUCTIONS:
             "m1_window": m1_window,
             "m5_table": _format_ohlcv_table(m5_recent),
             "m5_window": m5_window,
+            "daily_table": _format_ohlcv_table(daily_recent) if not daily_recent.empty else "No daily data available",
+            "daily_window": daily_window,
             "validation": {
                 "timestamp_alignment": alignment_ok,
                 "sequence_ok": sequence_ok,
@@ -578,6 +651,16 @@ USER INSTRUCTIONS:
                 "high_120": metrics.get("high_120"),
                 "low_120": metrics.get("low_120"),
                 "volume_ma20": metrics.get("volume_ma20"),
+                "daily_sma20": metrics.get("daily_sma20"),
+                "daily_sma50": metrics.get("daily_sma50"),
+                "daily_sma200": metrics.get("daily_sma200"),
+                "daily_return_5d_pct": metrics.get("daily_return_5d_pct"),
+                "daily_return_20d_pct": metrics.get("daily_return_20d_pct"),
+                "daily_atr14": metrics.get("daily_atr14"),
+                "daily_rsi14": metrics.get("daily_rsi14"),
+                "daily_trend": metrics.get("daily_trend"),
+                "daily_high_20d": metrics.get("daily_high_20d"),
+                "daily_low_20d": metrics.get("daily_low_20d"),
             },
         }
 
@@ -682,12 +765,25 @@ USER INSTRUCTIONS:
 Command: EXTRACT_RAW_DATA [{symbol}] [{timestamp_label}]
 
 Required Data Output:
-• 1-minute OHLCV: Last 20 periods ({extraction.get('m1_window', 'N/A')})
-{extraction.get('m1_table', 'No data')}
+• Daily OHLCV: Last 10 periods ({extraction.get('daily_window', 'N/A')})
+{extraction.get('daily_table', 'No daily data available')}
 
 • 5-minute OHLCV: Last 6 periods ({extraction.get('m5_window', 'N/A')})
 {extraction.get('m5_table', 'No data')}
 
+• 1-minute OHLCV: Last 20 periods ({extraction.get('m1_window', 'N/A')})
+{extraction.get('m1_table', 'No data')}
+
+Daily Context:
+• Daily Trend: {extraction_metrics.get('daily_trend', 'N/A')}
+• Daily SMAs: SMA20={fmt(extraction_metrics.get('daily_sma20'))} | SMA50={fmt(extraction_metrics.get('daily_sma50'))} | SMA200={fmt(extraction_metrics.get('daily_sma200'))}
+• Daily Returns: 5d={fmt(extraction_metrics.get('daily_return_5d_pct'), units='%', precision=2)} | 20d={fmt(extraction_metrics.get('daily_return_20d_pct'), units='%', precision=2)}
+• Daily RSI(14): {fmt(extraction_metrics.get('daily_rsi14'))}
+• Daily ATR(14): {fmt(extraction_metrics.get('daily_atr14'))}
+• Daily Range (20d): High {fmt(extraction_metrics.get('daily_high_20d'))} | Low {fmt(extraction_metrics.get('daily_low_20d'))}
+• Price vs Daily SMA20: {fmt(extraction_metrics.get('daily_distance_sma20_pct'), units='%', precision=2) if extraction_metrics.get('daily_distance_sma20_pct') is not None else 'N/A'}
+
+Intraday Metrics:
 • VWAP: {fmt(extraction_metrics.get('vwap'))}
 • ATR(14)[5min]: {fmt(extraction_metrics.get('atr_5min'))}
 • EMA(20)[15min]: Current {fmt(extraction_metrics.get('ema15_current'))} | Previous {fmt(extraction_metrics.get('ema15_previous'))}
