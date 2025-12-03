@@ -832,6 +832,45 @@ Expected Output Format:
 DATA POLICY:
 • Responses must rely strictly on the Supabase-ingested OHLCV tables reflected above.
 • Do NOT fetch, assume, or hallucinate data from any external source.
+
+QUANTUMTRADER v0.1 - TRADE DECISION ENGINE
+Command: EVALUATE_TRADE_DECISION [{symbol}] [{timestamp_label}]
+
+CONDITIONS FOR "TRADE YES":
+
+1. Composite_Score ≥ 6.5
+   • Current Composite Score: {fmt(metrics['composite_score'])}
+   • Threshold: 6.5
+   • Status: {'✅ PASS' if metrics['composite_score'] >= 6.5 else '❌ FAIL'}
+
+2. All Phase 1 gates passed ✓
+   • Volume spike, trend, RSI, and liquidity checks required
+   • Run Phase 1 screening separately to verify
+
+3. R:R ratio achievable ≥ 1:2
+   • Minimum Risk:Reward ratio must be 1:2 or better
+   • Calculate based on ATR-based stop loss and targets
+
+4. Position size calculable within $2,000 exposure limit
+   • Maximum position exposure: $2,000 per trade
+   • Position size based on risk per share and exposure limit
+
+5. No conflicting daily trend (avoid counter-trend)
+   • 5-minute trend must align with higher timeframes
+   • Avoid trading against daily trend
+
+DIRECTION DECISION:
+- If 5-min trend = UP and aligned with higher timeframes → BUY
+- If 5-min trend = DOWN and aligned with higher timeframes → SELL
+- If conflicting → "NO TRADE - Trend conflict"
+
+RISK MANAGEMENT OVERLAY:
+- Max daily loss: $400 (4% of $10k)
+- Max concurrent trades: 3
+- Auto-close all positions at 4:00 PM ET
+
+DECISION OUTPUT FORMAT:
+{symbol} | Decision: [TRADE YES / NO TRADE] | Direction: [BUY/SELL/CONFLICT] | Reason: [Explanation]
 """
         return prompt.strip()
 

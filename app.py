@@ -38,7 +38,8 @@ from tradingagents.dataflows.ai_analysis import AIResearchAnalyzer
 from tradingagents.agents.utils.trading_engine import (
     VolumeScreeningEngine,
     FireTestingEngine,
-    AIEnhancedScoringEngine
+    AIEnhancedScoringEngine,
+    TradeDecisionEngine
 )
 from tradingagents.agents.utils.historical_datascan import HistoricalDataScanEngine
 

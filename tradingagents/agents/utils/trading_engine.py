@@ -11,6 +11,8 @@ import yfinance as yf
 from ...dataflows.ai_analysis import AIResearchAnalyzer
 from ...dataflows.document_manager import DocumentManager
 from ...dataflows.market_data_service import fetch_ohlcv, period_to_days
+from ...dataflows.feature_lab import FeatureLab
+from ...agents.utils.session_manager import TradingSessionManager, TradeExecutionService
 
 
 class VolumeScreeningEngine:
@@ -446,4 +448,406 @@ class AIEnhancedScoringEngine:
         """Close connections"""
         self.ai_analyzer.close()
         self.fire_tester.close()
+
+
+class TradeDecisionEngine:
+    """
+    TRADE YES Decision Engine
+    Evaluates all conditions for trade execution based on QUANTUMTRADER metrics
+    """
+    
+    def __init__(self, max_exposure: float = 2000.0, max_daily_loss: float = 400.0):
+        """
+        Initialize Trade Decision Engine
+        
+        Args:
+            max_exposure: Maximum position exposure limit ($2,000 default)
+            max_daily_loss: Maximum daily loss limit ($400 = 4% of $10k default)
+        """
+        self.max_exposure = max_exposure
+        self.max_daily_loss = max_daily_loss
+        self.composite_score_threshold = 6.5
+        self.min_rr_ratio = 2.0  # Minimum 1:2 risk:reward
+        self.feature_lab = FeatureLab()
+        self.volume_screener = VolumeScreeningEngine()
+        self.trade_execution_service = TradeExecutionService()
+    
+    def evaluate_trade_decision(self, symbol: str, command_ts: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Evaluate all conditions for "TRADE YES" decision
+        
+        Returns comprehensive decision with all condition checks
+        """
+        symbol = (symbol or "").upper()
+        if not symbol:
+            raise ValueError("Symbol is required")
+        
+        decision = {
+            "symbol": symbol,
+            "timestamp": command_ts or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "conditions": {},
+            "trade_decision": "NO TRADE",
+            "direction": None,
+            "reason": "",
+            "risk_metrics": {},
+            "position_size": None,
+            "recommendation": {}
+        }
+        
+        # Condition 1: Composite Score >= 6.5
+        try:
+            quantum_result = self.feature_lab.run_quantum_screen(symbol, command_ts)
+            composite_score = quantum_result["metrics"].get("composite_score", 0.0)
+            condition1_pass = composite_score >= self.composite_score_threshold
+            decision["conditions"]["composite_score"] = {
+                "value": composite_score,
+                "threshold": self.composite_score_threshold,
+                "pass": condition1_pass,
+                "details": quantum_result["metrics"]
+            }
+        except Exception as e:
+            condition1_pass = False
+            decision["conditions"]["composite_score"] = {
+                "value": None,
+                "threshold": self.composite_score_threshold,
+                "pass": False,
+                "error": str(e)
+            }
+        
+        # Condition 2: All Phase 1 gates passed
+        phase1_result = self.volume_screener.screen_symbol(symbol)
+        condition2_pass = phase1_result.get("pass", False)
+        decision["conditions"]["phase1_gates"] = {
+            "pass": condition2_pass,
+            "reason": phase1_result.get("reason", "Unknown"),
+            "metrics": phase1_result.get("metrics", {})
+        }
+        
+        # Condition 3: R:R ratio achievable >= 1:2
+        rr_result = self._calculate_rr_ratio(symbol, quantum_result if condition1_pass else None)
+        condition3_pass = rr_result["achievable"] and rr_result["ratio"] >= self.min_rr_ratio
+        decision["conditions"]["rr_ratio"] = rr_result
+        
+        # Condition 4: Position size calculable within exposure limit
+        position_result = self._calculate_position_size(
+            symbol, 
+            quantum_result if condition1_pass else None,
+            rr_result
+        )
+        condition4_pass = position_result["calculable"] and position_result["exposure"] <= self.max_exposure
+        decision["conditions"]["position_size"] = position_result
+        decision["position_size"] = position_result.get("recommended_shares")
+        
+        # Condition 5: No conflicting daily trend
+        trend_result = self._check_trend_alignment(symbol, quantum_result if condition1_pass else None)
+        condition5_pass = not trend_result["conflict"]
+        decision["conditions"]["trend_alignment"] = trend_result
+        
+        # Check risk management overlay
+        risk_check = self._check_risk_overlay(symbol)
+        decision["risk_metrics"] = risk_check
+        
+        # Direction Decision
+        direction = self._determine_direction(trend_result)
+        decision["direction"] = direction
+        
+        # Final Trade Decision
+        all_conditions_pass = (
+            condition1_pass and 
+            condition2_pass and 
+            condition3_pass and 
+            condition4_pass and 
+            condition5_pass and
+            risk_check["can_trade"]
+        )
+        
+        if all_conditions_pass:
+            if direction == "CONFLICT":
+                decision["trade_decision"] = "NO TRADE"
+                decision["reason"] = "Trend conflict - 5-min trend contradicts higher timeframes"
+            else:
+                decision["trade_decision"] = "TRADE YES"
+                decision["reason"] = "All conditions met"
+                decision["recommendation"] = {
+                    "action": "BUY" if direction == "UP" else "SELL",
+                    "entry_price": position_result.get("entry_price"),
+                    "stop_loss": position_result.get("stop_loss"),
+                    "target1": position_result.get("target1"),
+                    "target2": position_result.get("target2"),
+                    "position_size_shares": position_result.get("recommended_shares"),
+                    "exposure": position_result.get("exposure"),
+                    "risk_amount": position_result.get("risk_amount"),
+                    "reward_amount": position_result.get("reward_amount"),
+                    "rr_ratio": rr_result.get("ratio")
+                }
+        else:
+            failed_conditions = []
+            if not condition1_pass:
+                failed_conditions.append(f"Composite Score {decision['conditions']['composite_score']['value']:.2f} < {self.composite_score_threshold}")
+            if not condition2_pass:
+                failed_conditions.append(f"Phase 1 Gates: {phase1_result.get('reason', 'Failed')}")
+            if not condition3_pass:
+                failed_conditions.append(f"R:R Ratio {rr_result.get('ratio', 0):.2f} < {self.min_rr_ratio}")
+            if not condition4_pass:
+                failed_conditions.append(f"Position size exceeds ${self.max_exposure} limit")
+            if not condition5_pass:
+                failed_conditions.append(f"Trend conflict: {trend_result.get('conflict_reason', 'Unknown')}")
+            if not risk_check["can_trade"]:
+                failed_conditions.append(risk_check.get("reason", "Risk check failed"))
+            
+            decision["trade_decision"] = "NO TRADE"
+            decision["reason"] = " | ".join(failed_conditions)
+        
+        return decision
+    
+    def _calculate_rr_ratio(self, symbol: str, quantum_result: Optional[Dict] = None) -> Dict[str, Any]:
+        """Calculate Risk:Reward ratio and check if 1:2 is achievable"""
+        try:
+            # Get current price and ATR for stop loss calculation
+            hist = self.volume_screener._fetch_history(symbol, period="3mo")
+            if hist is None or hist.empty:
+                return {"achievable": False, "ratio": 0.0, "error": "No price data"}
+            
+            current_price = float(hist['Close'].iloc[-1])
+            
+            # Calculate ATR for stop loss distance
+            atr_df = pd.DataFrame({
+                'High': pd.to_numeric(hist['High'], errors='coerce'),
+                'Low': pd.to_numeric(hist['Low'], errors='coerce'),
+                'Close': pd.to_numeric(hist['Close'], errors='coerce'),
+            })
+            
+            fire_tester = FireTestingEngine()
+            atr_series = fire_tester._calc_atr(atr_df, 14)
+            atr_value = float(atr_series.iloc[-1]) if len(atr_series) > 0 else None
+            fire_tester.close()
+            
+            if not atr_value or atr_value <= 0:
+                return {"achievable": False, "ratio": 0.0, "error": "ATR calculation failed"}
+            
+            # Stop loss at 1.5x ATR
+            stop_distance = atr_value * 1.5
+            stop_loss = current_price - stop_distance  # For long position
+            
+            # Target 1: 2x stop distance (1:2 R:R)
+            target1 = current_price + (stop_distance * 2)
+            
+            # Target 2: 2.5x stop distance (1:2.5 R:R)
+            target2 = current_price + (stop_distance * 2.5)
+            
+            # Calculate R:R ratio
+            risk = stop_distance
+            reward = stop_distance * 2
+            rr_ratio = reward / risk if risk > 0 else 0.0
+            
+            return {
+                "achievable": rr_ratio >= self.min_rr_ratio,
+                "ratio": round(rr_ratio, 2),
+                "current_price": round(current_price, 2),
+                "stop_loss": round(stop_loss, 2),
+                "target1": round(target1, 2),
+                "target2": round(target2, 2),
+                "stop_distance": round(stop_distance, 2),
+                "atr": round(atr_value, 2)
+            }
+        except Exception as e:
+            return {"achievable": False, "ratio": 0.0, "error": str(e)}
+    
+    def _calculate_position_size(
+        self, 
+        symbol: str, 
+        quantum_result: Optional[Dict] = None,
+        rr_result: Optional[Dict] = None
+    ) -> Dict[str, Any]:
+        """Calculate position size within $2,000 exposure limit"""
+        try:
+            if not rr_result or not rr_result.get("achievable"):
+                return {
+                    "calculable": False,
+                    "exposure": 0.0,
+                    "error": "R:R ratio not achievable"
+                }
+            
+            current_price = rr_result.get("current_price")
+            stop_distance = rr_result.get("stop_distance", 0)
+            
+            if not current_price or stop_distance <= 0:
+                return {
+                    "calculable": False,
+                    "exposure": 0.0,
+                    "error": "Invalid price or stop distance"
+                }
+            
+            # Risk per share
+            risk_per_share = stop_distance
+            
+            # Maximum risk per trade (typically 1-2% of account, but we use a fixed $ amount)
+            # For $10k account, 1% = $100 risk per trade
+            max_risk_per_trade = 100.0  # Conservative: $100 risk per trade
+            
+            # Calculate position size based on risk
+            max_shares_by_risk = int(max_risk_per_trade / risk_per_share) if risk_per_share > 0 else 0
+            
+            # Calculate position size based on exposure limit
+            max_shares_by_exposure = int(self.max_exposure / current_price) if current_price > 0 else 0
+            
+            # Use the smaller of the two (more conservative)
+            recommended_shares = min(max_shares_by_risk, max_shares_by_exposure)
+            
+            # Calculate actual exposure
+            exposure = recommended_shares * current_price
+            
+            # Calculate actual risk
+            risk_amount = recommended_shares * risk_per_share
+            reward_amount = recommended_shares * (stop_distance * 2)
+            
+            return {
+                "calculable": exposure <= self.max_exposure and recommended_shares > 0,
+                "exposure": round(exposure, 2),
+                "recommended_shares": recommended_shares,
+                "entry_price": current_price,
+                "stop_loss": rr_result.get("stop_loss"),
+                "target1": rr_result.get("target1"),
+                "target2": rr_result.get("target2"),
+                "risk_amount": round(risk_amount, 2),
+                "reward_amount": round(reward_amount, 2),
+                "max_risk_per_trade": max_risk_per_trade,
+                "max_exposure_limit": self.max_exposure
+            }
+        except Exception as e:
+            return {
+                "calculable": False,
+                "exposure": 0.0,
+                "error": str(e)
+            }
+    
+    def _check_trend_alignment(self, symbol: str, quantum_result: Optional[Dict] = None) -> Dict[str, Any]:
+        """Check for trend conflicts between 5-min and higher timeframes"""
+        try:
+            # Get 5-minute and daily data
+            m5 = self.feature_lab._fetch_df(symbol, "5min", lookback_days=7)
+            daily = self.feature_lab._fetch_df(symbol, "1d", lookback_days=60)
+            
+            if m5.empty or daily.empty:
+                return {
+                    "conflict": True,
+                    "conflict_reason": "Insufficient data for trend analysis",
+                    "m5_trend": None,
+                    "daily_trend": None
+                }
+            
+            # Determine 5-minute trend (using EMA or SMA)
+            m5_close = pd.to_numeric(m5["Close"], errors="coerce")
+            if len(m5_close) < 20:
+                m5_ema = m5_close.ewm(span=10, adjust=False).mean()
+            else:
+                m5_ema = m5_close.ewm(span=20, adjust=False).mean()
+            
+            current_m5_price = float(m5_close.iloc[-1])
+            m5_ema_current = float(m5_ema.iloc[-1])
+            m5_trend = "UP" if current_m5_price > m5_ema_current else "DOWN"
+            
+            # Get daily trend from quantum metrics if available
+            daily_trend = "NEUTRAL"
+            if quantum_result:
+                daily_metrics = quantum_result.get("metrics", {})
+                daily_trend = daily_metrics.get("daily_trend", "NEUTRAL")
+            else:
+                # Calculate daily trend manually
+                daily_close = pd.to_numeric(daily["Close"], errors="coerce")
+                if len(daily_close) >= 50:
+                    sma20 = daily_close.tail(20).mean()
+                    sma50 = daily_close.tail(50).mean()
+                    current_daily_price = float(daily_close.iloc[-1])
+                    
+                    if current_daily_price > sma20 > sma50:
+                        daily_trend = "BULLISH"
+                    elif current_daily_price < sma20 < sma50:
+                        daily_trend = "BEARISH"
+                    else:
+                        daily_trend = "NEUTRAL"
+            
+            # Normalize daily trend to UP/DOWN
+            daily_direction = "UP" if daily_trend in ["BULLISH", "UP"] else ("DOWN" if daily_trend in ["BEARISH", "DOWN"] else "NEUTRAL")
+            
+            # Check for conflict
+            conflict = False
+            conflict_reason = None
+            
+            if daily_direction == "NEUTRAL":
+                conflict = False  # Neutral daily trend doesn't conflict
+            elif m5_trend == "UP" and daily_direction == "DOWN":
+                conflict = True
+                conflict_reason = "5-min UP but daily DOWN (counter-trend)"
+            elif m5_trend == "DOWN" and daily_direction == "UP":
+                conflict = True
+                conflict_reason = "5-min DOWN but daily UP (counter-trend)"
+            
+            return {
+                "conflict": conflict,
+                "conflict_reason": conflict_reason,
+                "m5_trend": m5_trend,
+                "daily_trend": daily_direction,
+                "daily_trend_full": daily_trend
+            }
+        except Exception as e:
+            return {
+                "conflict": True,
+                "conflict_reason": f"Error analyzing trends: {str(e)}",
+                "m5_trend": None,
+                "daily_trend": None
+            }
+    
+    def _determine_direction(self, trend_result: Dict[str, Any]) -> str:
+        """Determine trade direction based on trend alignment"""
+        if trend_result.get("conflict"):
+            return "CONFLICT"
+        
+        m5_trend = trend_result.get("m5_trend")
+        daily_trend = trend_result.get("daily_trend")
+        
+        # If 5-min and daily are aligned UP → BUY
+        if m5_trend == "UP" and daily_trend in ["UP", "NEUTRAL"]:
+            return "UP"
+        
+        # If 5-min and daily are aligned DOWN → SELL
+        if m5_trend == "DOWN" and daily_trend in ["DOWN", "NEUTRAL"]:
+            return "DOWN"
+        
+        return "CONFLICT"
+    
+    def _check_risk_overlay(self, symbol: str) -> Dict[str, Any]:
+        """Check risk management overlay conditions"""
+        try:
+            # Check max concurrent trades
+            can_open, message = self.trade_execution_service.can_open_trade()
+            active_trades = self.trade_execution_service.get_active_trades()
+            active_trades_count = len([t for t in active_trades 
+                                     if t.get("status") not in ("closed", "stopped_out")])
+            
+            # Check if we can trade (within 3 concurrent limit)
+            can_trade = can_open and active_trades_count < TradingSessionManager.MAX_CONCURRENT_TRADES
+            
+            return {
+                "can_trade": can_trade,
+                "active_trades": active_trades_count,
+                "max_concurrent": TradingSessionManager.MAX_CONCURRENT_TRADES,
+                "max_daily_loss": self.max_daily_loss,
+                "max_exposure_per_trade": self.max_exposure,
+                "auto_close_time": "4:00 PM ET",
+                "reason": message if not can_trade else "Risk checks passed"
+            }
+        except Exception as e:
+            return {
+                "can_trade": False,
+                "reason": f"Error checking risk overlay: {str(e)}",
+                "max_daily_loss": self.max_daily_loss,
+                "max_exposure_per_trade": self.max_exposure
+            }
+    
+    def close(self):
+        """Close connections"""
+        self.feature_lab = None
+        self.volume_screener = None
+        self.trade_execution_service = None
 
