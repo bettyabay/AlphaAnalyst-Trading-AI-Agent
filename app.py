@@ -26,7 +26,8 @@ from tradingagents.dataflows.polygon_integration import PolygonDataClient
 from tradingagents.dataflows.market_data_service import (
     fetch_ohlcv,
     get_latest_price,
-    period_to_days
+    period_to_days,
+    fetch_latest_bar
 )
 from tradingagents.dataflows.data_guardrails import DataCoverageService
 from tradingagents.dataflows.feature_lab import FeatureLab
@@ -1151,14 +1152,136 @@ def phase1_foundation_data():
             st.info("No GROQ_API_KEY detected. Copy the prompt above into your LLM of choice.")
 
     st.markdown("##### QUANTUMTRADER v0.1 Prompt")
+    
+    # Improved timestamp explanation
+    with st.expander("ℹ️ What is the Command Timestamp?", expanded=False):
+        st.markdown("""
+        **Command Timestamp = Execution Label (Not Data Filter)**
+        
+        The timestamp you enter here is **ONLY a label** that appears in the prompt output. 
+        It does **NOT** control which data is retrieved from the database.
+        
+        **How it works:**
+        - ✅ **Current time (default)**: Use when analyzing real-time data - shows when you ran the analysis
+        - 📅 **Historical timestamp**: Use for backtesting - label the prompt with a past date (e.g., `2025-12-01 14:30:00`)
+        
+        **Important:**
+        - The system **always fetches the most recent 20 periods** from your database
+        - If your database has data from `2025-12-02 17:13`, that's what you'll see, even if you enter `2025-12-03 12:48:34`
+        - This timestamp is just for documentation/record-keeping in the prompt output
+        
+        **Example:**
+        - You run QUANTUMTRADER at `2025-12-03 12:48:34`
+        - But your latest data in DB is `2025-12-02 17:13`
+        - The prompt will show: `Command: EXTRACT_RAW_DATA [COIN] [2025-12-03 12:48:34]`
+        - But data will show: `Last 20 periods (16:54-17:13 (2025-12-02))`
+        """)
+    
     quantum_ts_default = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     quantum_timestamp = st.text_input(
-        "Command Timestamp",
+        "Command Timestamp (Label Only)",
         value=quantum_ts_default,
-        help="Adjust if you want to backfill a historical command time.",
+        help="This is just a LABEL in the output. It does NOT filter data. System always uses the most recent data from your database.",
         key="quantum_ts_input",
     )
-    if st.button("⚙️ Run QUANTUMTRADER Prompt", key="quantum_prompt_button"):
+    
+    # Check data freshness before allowing QUANTUMTRADER to run
+    if lab_symbol:
+        latest_1min = fetch_latest_bar(lab_symbol, "1min")
+        latest_5min = fetch_latest_bar(lab_symbol, "5min")
+        
+        data_ready = True
+        freshness_warnings = []
+        
+        if not latest_1min:
+            data_ready = False
+            freshness_warnings.append(f"❌ No 1-minute data found for {lab_symbol}")
+        else:
+            latest_1min_ts = pd.to_datetime(latest_1min.get("timestamp"))
+            age_minutes = (datetime.now() - latest_1min_ts.replace(tzinfo=None)).total_seconds() / 60
+            if age_minutes > 15:
+                data_ready = False
+                freshness_warnings.append(f"⚠️ 1-minute data is {age_minutes:.0f} minutes old (latest: {latest_1min_ts.strftime('%Y-%m-%d %H:%M:%S')})")
+        
+        if not latest_5min:
+            data_ready = False
+            freshness_warnings.append(f"❌ No 5-minute data found for {lab_symbol}")
+        else:
+            latest_5min_ts = pd.to_datetime(latest_5min.get("timestamp"))
+            age_minutes = (datetime.now() - latest_5min_ts.replace(tzinfo=None)).total_seconds() / 60
+            if age_minutes > 15:
+                data_ready = False
+                freshness_warnings.append(f"⚠️ 5-minute data is {age_minutes:.0f} minutes old (latest: {latest_5min_ts.strftime('%Y-%m-%d %H:%M:%S')})")
+        
+        if not data_ready:
+            st.error("**⚠️ Data Not Ready - Cannot Run QUANTUMTRADER**")
+            for warning in freshness_warnings:
+                st.warning(warning)
+            
+            col_ingest1, col_ingest2 = st.columns([2, 1])
+            
+            with col_ingest1:
+                st.info(f"""
+                **📥 QUANTUMTRADER requires fresh data (latest 20 periods):**
+                
+                The system calculates metrics using the **last 20 consecutive 1-minute bars** from your database.
+                If data is missing or stale, calculations will be incorrect.
+                
+                **You must ingest data first before running QUANTUMTRADER.**
+                """)
+            
+            with col_ingest2:
+                st.markdown("#### Quick Ingest")
+                if st.button(f"📥 Ingest Latest Data for {lab_symbol}", key="quick_ingest_quantum", type="primary"):
+                    with st.spinner(f"Ingesting latest 1-min and 5-min data for {lab_symbol}..."):
+                        try:
+                            pipeline = DataIngestionPipeline()
+                            
+                            # Ingest 1-minute data (last 3 days to ensure we get recent data)
+                            st.info(f"Ingesting 1-minute data for {lab_symbol}...")
+                            success_1min = pipeline.ingest_historical_data(
+                                symbol=lab_symbol,
+                                interval="1min",
+                                days_back=3,
+                                resume_from_latest=True
+                            )
+                            
+                            # Ingest 5-minute data (last 7 days)
+                            st.info(f"Ingesting 5-minute data for {lab_symbol}...")
+                            success_5min = pipeline.ingest_historical_data(
+                                symbol=lab_symbol,
+                                interval="5min",
+                                days_back=7,
+                                resume_from_latest=True
+                            )
+                            
+                            pipeline.close()
+                            
+                            if success_1min and success_5min:
+                                st.success(f"✅ Data ingestion complete for {lab_symbol}! Refresh the page to check data freshness.")
+                                st.balloons()
+                                st.rerun()
+                            elif success_1min or success_5min:
+                                st.warning(f"⚠️ Partial success. Check ingestion logs above.")
+                            else:
+                                st.error(f"❌ Ingestion failed. Check your POLYGON_API_KEY and database connection.")
+                        except Exception as e:
+                            st.error(f"❌ Ingestion error: {str(e)}")
+                            import traceback
+                            st.code(traceback.format_exc())
+                
+                st.markdown("---")
+                st.markdown("**Or manually ingest:**")
+                st.markdown("Go to **'Ingest Historical Data'** section above")
+        else:
+            if latest_1min and latest_5min:
+                latest_1min_ts = pd.to_datetime(latest_1min.get("timestamp"))
+                latest_5min_ts = pd.to_datetime(latest_5min.get("timestamp"))
+                age_1min = (datetime.now() - latest_1min_ts.replace(tzinfo=None)).total_seconds() / 60
+                age_5min = (datetime.now() - latest_5min_ts.replace(tzinfo=None)).total_seconds() / 60
+                st.success(f"✅ Data is fresh! Latest 1-min: {latest_1min_ts.strftime('%Y-%m-%d %H:%M:%S')} ({age_1min:.0f}m ago) | Latest 5-min: {latest_5min_ts.strftime('%Y-%m-%d %H:%M:%S')} ({age_5min:.0f}m ago)")
+    
+    if st.button("⚙️ Run QUANTUMTRADER Prompt", key="quantum_prompt_button", disabled=not data_ready if lab_symbol else False):
         with st.spinner("Calculating QUANTUMTRADER metrics..."):
             try:
                 qt_result = feature_lab.run_quantum_screen(lab_symbol, quantum_timestamp)
@@ -1174,6 +1297,159 @@ def phase1_foundation_data():
         st.dataframe(metrics_df, width='stretch', hide_index=True)
         st.markdown("###### QUANTUMTRADER Prompt Payload")
         st.code(quantum_result["prompt"], language="markdown")
+        
+        # Trade Decision Engine
+        st.markdown("---")
+        st.markdown("##### 🎯 TRADE DECISION ENGINE")
+        st.markdown("""
+        **CONDITIONS FOR "TRADE YES":**
+        
+        1. Composite_Score ≥ 6.5
+        2. All Phase 1 gates passed ✓
+        3. R:R ratio achievable ≥ 1:2
+        4. Position size calculable within $2,000 exposure limit
+        5. No conflicting daily trend (avoid counter-trend)
+        
+        **DIRECTION DECISION:**
+        - If 5-min trend = UP and aligned with higher timeframes → BUY
+        - If 5-min trend = DOWN and aligned with higher timeframes → SELL
+        - If conflicting → "NO TRADE - Trend conflict"
+        
+        **RISK MANAGEMENT OVERLAY:**
+        - Max daily loss: $400 (4% of $10k)
+        - Max concurrent trades: 3
+        - Auto-close all positions at 4:00 PM ET
+        """)
+        
+        if st.button("🎯 Evaluate Trade Decision", key="evaluate_trade_decision", type="primary"):
+            with st.spinner("Evaluating all trade conditions..."):
+                try:
+                    decision_engine = TradeDecisionEngine()
+                    decision = decision_engine.evaluate_trade_decision(lab_symbol, quantum_timestamp)
+                    st.session_state.trade_decision = decision
+                    decision_engine.close()
+                    st.success("✅ Trade decision evaluation complete!")
+                except Exception as exc:
+                    st.error(f"Trade decision evaluation failed: {exc}")
+                    import traceback
+                    st.code(traceback.format_exc())
+        
+        # Display decision results
+        trade_decision = st.session_state.get("trade_decision")
+        if trade_decision and trade_decision.get("symbol") == lab_symbol:
+            st.markdown("---")
+            st.markdown("###### Trade Decision Results")
+            
+            # Decision header
+            if trade_decision["trade_decision"] == "TRADE YES":
+                st.success(f"## ✅ **TRADE YES** - {lab_symbol}")
+            else:
+                st.error(f"## ❌ **NO TRADE** - {lab_symbol}")
+            
+            # Direction
+            direction = trade_decision.get("direction")
+            if direction:
+                direction_emoji = "📈" if direction == "UP" else "📉" if direction == "DOWN" else "⚠️"
+                st.info(f"{direction_emoji} **Direction**: {direction}")
+            
+            # Reason
+            st.markdown(f"**Reason**: {trade_decision.get('reason', 'N/A')}")
+            
+            # Conditions breakdown
+            st.markdown("#### Condition Evaluation:")
+            conditions = trade_decision.get("conditions", {})
+            
+            # Create conditions table
+            cond_rows = []
+            
+            # Condition 1: Composite Score
+            cond1 = conditions.get("composite_score", {})
+            cond_rows.append({
+                "Condition": "1. Composite_Score ≥ 6.5",
+                "Status": "✅ PASS" if cond1.get("pass") else "❌ FAIL",
+                "Value": f"{cond1.get('value', 'N/A'):.2f}" if cond1.get('value') else "N/A",
+                "Details": f"Threshold: {cond1.get('threshold', 6.5)}"
+            })
+            
+            # Condition 2: Phase 1 Gates
+            cond2 = conditions.get("phase1_gates", {})
+            cond_rows.append({
+                "Condition": "2. All Phase 1 gates passed",
+                "Status": "✅ PASS" if cond2.get("pass") else "❌ FAIL",
+                "Value": cond2.get("reason", "N/A"),
+                "Details": ""
+            })
+            
+            # Condition 3: R:R Ratio
+            cond3 = conditions.get("rr_ratio", {})
+            cond_rows.append({
+                "Condition": "3. R:R ratio ≥ 1:2",
+                "Status": "✅ PASS" if cond3.get("achievable") else "❌ FAIL",
+                "Value": f"{cond3.get('ratio', 'N/A')}:1",
+                "Details": f"Stop: ${cond3.get('stop_loss', 'N/A'):.2f}" if cond3.get('stop_loss') else "N/A"
+            })
+            
+            # Condition 4: Position Size
+            cond4 = conditions.get("position_size", {})
+            cond_rows.append({
+                "Condition": "4. Position size ≤ $2,000",
+                "Status": "✅ PASS" if cond4.get("calculable") else "❌ FAIL",
+                "Value": f"${cond4.get('exposure', 'N/A'):.2f}" if cond4.get('exposure') else "N/A",
+                "Details": f"Shares: {cond4.get('recommended_shares', 'N/A')}"
+            })
+            
+            # Condition 5: Trend Alignment
+            cond5 = conditions.get("trend_alignment", {})
+            cond_rows.append({
+                "Condition": "5. No conflicting daily trend",
+                "Status": "✅ PASS" if not cond5.get("conflict") else "❌ FAIL",
+                "Value": f"{cond5.get('m5_trend', 'N/A')} vs {cond5.get('daily_trend', 'N/A')}",
+                "Details": cond5.get("conflict_reason", "") if cond5.get("conflict") else "Aligned"
+            })
+            
+            cond_df = pd.DataFrame(cond_rows)
+            st.dataframe(cond_df, width='stretch', hide_index=True, hide_columns=["Details"])
+            
+            # Risk Management Overlay
+            st.markdown("#### Risk Management Overlay:")
+            risk_metrics = trade_decision.get("risk_metrics", {})
+            col_risk1, col_risk2, col_risk3 = st.columns(3)
+            
+            with col_risk1:
+                st.metric("Active Trades", f"{risk_metrics.get('active_trades', 0)} / {risk_metrics.get('max_concurrent', 3)}")
+            with col_risk2:
+                st.metric("Max Daily Loss", f"${risk_metrics.get('max_daily_loss', 400)}")
+            with col_risk3:
+                st.metric("Auto-Close Time", "4:00 PM ET")
+            
+            can_trade = risk_metrics.get("can_trade", False)
+            if not can_trade:
+                st.warning(f"⚠️ {risk_metrics.get('reason', 'Cannot open new trade')}")
+            
+            # Recommendation (if TRADE YES)
+            if trade_decision["trade_decision"] == "TRADE YES" and trade_decision.get("recommendation"):
+                rec = trade_decision["recommendation"]
+                st.markdown("---")
+                st.markdown("#### 📋 Trade Recommendation:")
+                
+                col_rec1, col_rec2, col_rec3, col_rec4 = st.columns(4)
+                
+                with col_rec1:
+                    st.metric("Action", rec.get("action", "N/A"))
+                    st.metric("Entry Price", f"${rec.get('entry_price', 0):.2f}")
+                
+                with col_rec2:
+                    st.metric("Stop Loss", f"${rec.get('stop_loss', 0):.2f}")
+                    st.metric("Target 1", f"${rec.get('target1', 0):.2f}")
+                
+                with col_rec3:
+                    st.metric("Target 2", f"${rec.get('target2', 0):.2f}")
+                    st.metric("R:R Ratio", f"1:{rec.get('rr_ratio', 0):.2f}")
+                
+                with col_rec4:
+                    st.metric("Shares", rec.get("position_size_shares", 0))
+                    st.metric("Exposure", f"${rec.get('exposure', 0):.2f}")
+                    st.metric("Risk", f"${rec.get('risk_amount', 0):.2f}")
 
     st.markdown('</div>', unsafe_allow_html=True)
     
