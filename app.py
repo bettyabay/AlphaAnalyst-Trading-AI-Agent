@@ -1192,14 +1192,16 @@ def phase1_foundation_data():
         
         data_ready = True
         freshness_warnings = []
+        freshness_cutoff_minutes = 20  # allow a small buffer beyond the 15m ingestion cutoff
+        now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
         
         if not latest_1min:
             data_ready = False
             freshness_warnings.append(f"❌ No 1-minute data found for {lab_symbol}")
         else:
-            latest_1min_ts = pd.to_datetime(latest_1min.get("timestamp"))
-            age_minutes = (datetime.now() - latest_1min_ts.replace(tzinfo=None)).total_seconds() / 60
-            if age_minutes > 15:
+            latest_1min_ts = pd.to_datetime(latest_1min.get("timestamp")).replace(tzinfo=None)
+            age_minutes = (now_utc - latest_1min_ts).total_seconds() / 60
+            if age_minutes > freshness_cutoff_minutes:
                 data_ready = False
                 freshness_warnings.append(f"⚠️ 1-minute data is {age_minutes:.0f} minutes old (latest: {latest_1min_ts.strftime('%Y-%m-%d %H:%M:%S')})")
         
@@ -1207,9 +1209,9 @@ def phase1_foundation_data():
             data_ready = False
             freshness_warnings.append(f"❌ No 5-minute data found for {lab_symbol}")
         else:
-            latest_5min_ts = pd.to_datetime(latest_5min.get("timestamp"))
-            age_minutes = (datetime.now() - latest_5min_ts.replace(tzinfo=None)).total_seconds() / 60
-            if age_minutes > 15:
+            latest_5min_ts = pd.to_datetime(latest_5min.get("timestamp")).replace(tzinfo=None)
+            age_minutes = (now_utc - latest_5min_ts).total_seconds() / 60
+            if age_minutes > freshness_cutoff_minutes:
                 data_ready = False
                 freshness_warnings.append(f"⚠️ 5-minute data is {age_minutes:.0f} minutes old (latest: {latest_5min_ts.strftime('%Y-%m-%d %H:%M:%S')})")
         
@@ -1275,10 +1277,10 @@ def phase1_foundation_data():
                 st.markdown("Go to **'Ingest Historical Data'** section above")
         else:
             if latest_1min and latest_5min:
-                latest_1min_ts = pd.to_datetime(latest_1min.get("timestamp"))
-                latest_5min_ts = pd.to_datetime(latest_5min.get("timestamp"))
-                age_1min = (datetime.now() - latest_1min_ts.replace(tzinfo=None)).total_seconds() / 60
-                age_5min = (datetime.now() - latest_5min_ts.replace(tzinfo=None)).total_seconds() / 60
+                latest_1min_ts = pd.to_datetime(latest_1min.get("timestamp")).replace(tzinfo=None)
+                latest_5min_ts = pd.to_datetime(latest_5min.get("timestamp")).replace(tzinfo=None)
+                age_1min = (now_utc - latest_1min_ts).total_seconds() / 60
+                age_5min = (now_utc - latest_5min_ts).total_seconds() / 60
                 st.success(f"✅ Data is fresh! Latest 1-min: {latest_1min_ts.strftime('%Y-%m-%d %H:%M:%S')} ({age_1min:.0f}m ago) | Latest 5-min: {latest_5min_ts.strftime('%Y-%m-%d %H:%M:%S')} ({age_5min:.0f}m ago)")
     
     if st.button("⚙️ Run QUANTUMTRADER Prompt", key="quantum_prompt_button", disabled=not data_ready if lab_symbol else False):

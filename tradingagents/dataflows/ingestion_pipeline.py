@@ -79,12 +79,17 @@ class DataIngestionPipeline:
             try:
                 # Determine if this is intraday data
                 is_intraday = interval in ("5min", "5-minute", "5m", "1min", "1-minute", "1m")
-                
-                # For intraday data, preserve current time if end_date is None (to ingest up to "now")
-                # For daily data, default to midnight of today
-                # Use UTC to match database timezone
+
+                # Enforce coverage policy:
+                #   - Intraday: ingest up to "now - 15m" (EAT buffer; UTC equivalent)
+                #   - Daily   : ingest up to previous trading day close
+                now_utc = datetime.utcnow()
+                intraday_cutoff = now_utc - timedelta(minutes=15)
+                prev_trading_day = self._previous_trading_day(now_utc.date())
+                daily_default_end = datetime.combine(prev_trading_day, datetime.min.time())
+
                 if end_date is None:
-                    default_end = datetime.utcnow() if is_intraday else datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+                    default_end = intraday_cutoff if is_intraday else daily_default_end
                 else:
                     default_end = None
                 
@@ -98,23 +103,34 @@ class DataIngestionPipeline:
             start_date = start_date.replace(hour=0, minute=0, second=0, microsecond=0)
             
             if is_intraday:
-                # For intraday data: if end_date is today, keep current time (or set to end of day if at midnight)
-                # If end_date is in the past, truncate to midnight
-                # Use UTC to match database timezone
+                # Clamp intraday end to the policy cutoff (now - 15m, UTC)
                 now = datetime.utcnow()
+                policy_cutoff = now - timedelta(minutes=15)
+                if end_date > policy_cutoff:
+                    end_date = policy_cutoff
+
                 if end_date.date() < now.date():
                     # Past date: truncate to midnight
                     end_date = end_date.replace(hour=0, minute=0, second=0, microsecond=0)
                 elif end_date.date() == now.date():
-                    # Today: if already at midnight (from explicit date input), set to end of day
-                    # Otherwise keep the current time (from datetime.now())
+                    # Today: keep the time component (already clamped), unless it was midnight
                     if end_date.hour == 0 and end_date.minute == 0 and end_date.second == 0:
-                        # Was explicitly set to today at midnight, set to end of day to get all of today's data
                         end_date = end_date.replace(hour=23, minute=59, second=59, microsecond=999999)
-                    # Otherwise keep end_date as-is (it has the current time from datetime.now())
+
+                # Always re-fetch the recent window to close any gaps caused by partial days
+                recent_window_hours = 6
+                recent_window_start = end_date - timedelta(hours=recent_window_hours)
+                if recent_window_start > start_date:
+                    print(f"ℹ️ Expanding intraday window to re-fetch last {recent_window_hours}h for {symbol} ({recent_window_start.strftime('%Y-%m-%d %H:%M:%S')} to {end_date.strftime('%Y-%m-%d %H:%M:%S')})")
+                    start_date = recent_window_start.replace(hour=0, minute=0, second=0, microsecond=0)
             else:
-                # Daily data: always truncate to midnight
-                end_date = end_date.replace(hour=0, minute=0, second=0, microsecond=0)
+                # Daily data: always end on the previous trading day (midnight)
+                prev_td = self._previous_trading_day(datetime.utcnow().date())
+                # If user requested a future/too-recent date, clamp to previous trading day
+                if end_date.date() > prev_td:
+                    end_date = datetime.combine(prev_td, datetime.min.time())
+                else:
+                    end_date = end_date.replace(hour=0, minute=0, second=0, microsecond=0)
 
             if start_date > end_date:
                 print(f"Start date {start_date} is after end date {end_date}. Cannot ingest.")
@@ -157,9 +173,10 @@ class DataIngestionPipeline:
                                     if latest_ts.tzinfo is not None:
                                         latest_ts = latest_ts.replace(tzinfo=None)
                                     
-                                    # Resume from the day after the latest timestamp
-                                    # Add 1 day to start from the next day (to avoid duplicates)
-                                    resume_date = (latest_ts + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+                                    # Resume from the next bar after the latest timestamp
+                                    delta_minutes = multiplier if multiplier else 0
+                                    resume_ts = latest_ts + timedelta(minutes=delta_minutes)
+                                    resume_date = resume_ts.replace(hour=0, minute=0, second=0, microsecond=0)
                                     
                                     # Always resume from existing data if it exists and is before end_date
                                     # This ensures we continue from where data stops, regardless of initial start_date
@@ -168,23 +185,24 @@ class DataIngestionPipeline:
                                     interval_label = "1-min" if interval in ("1min", "1-minute", "1m") else "5-min"
                                     
                                     print(f"🔍 {symbol} {interval_label} - Latest DB timestamp: {latest_ts.strftime('%Y-%m-%d %H:%M:%S')}")
-                                    print(f"🔍 {symbol} {interval_label} - Calculated resume date: {resume_date.strftime('%Y-%m-%d')}")
-                                    print(f"🔍 {symbol} {interval_label} - End date: {end_date.strftime('%Y-%m-%d')}")
-                                    print(f"🔍 {symbol} {interval_label} - Today: {now.strftime('%Y-%m-%d')}")
+                                    print(f"🔍 {symbol} {interval_label} - Calculated resume date: {resume_date.strftime('%Y-%m-%d')} (from {resume_ts.strftime('%Y-%m-%d %H:%M:%S')})")
+                                    print(f"🔍 {symbol} {interval_label} - End date: {end_date.strftime('%Y-%m-%d %H:%M:%S')}")
+                                    print(f"🔍 {symbol} {interval_label} - Today: {now.strftime('%Y-%m-%d %H:%M:%S')}")
                                     
-                                    # Check if resume_date is in the future (shouldn't happen normally, but handle gracefully)
-                                    if resume_date > now:
-                                        print(f"⚠️ {symbol} {interval_label} resume date {resume_date.strftime('%Y-%m-%d')} is in the future (today: {now.strftime('%Y-%m-%d')}). Latest DB timestamp: {latest_ts.strftime('%Y-%m-%d %H:%M:%S')}.")
+                                    # Check if resume timestamp is in the future (shouldn't happen normally, but handle gracefully)
+                                    if resume_ts > now:
+                                        print(f"⚠️ {symbol} {interval_label} resume ts {resume_ts.strftime('%Y-%m-%d %H:%M:%S')} is in the future (now: {now.strftime('%Y-%m-%d %H:%M:%S')}). Latest DB timestamp: {latest_ts.strftime('%Y-%m-%d %H:%M:%S')}.")
                                         print(f"{symbol} already has {interval} data up to {latest_ts.strftime('%Y-%m-%d %H:%M:%S')}, which is in the future. No new data to fetch. Skipping.")
                                         return True  # Already complete (or has future dates)
                                     
                                     # Check if resume_date is before or equal to end_date
-                                    if resume_date <= end_date:
-                                        print(f"✅ Resuming {symbol} {interval_label} ingestion from {resume_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')} (latest existing: {latest_ts.strftime('%Y-%m-%d %H:%M:%S')})")
+                                    if resume_ts <= end_date:
+                                        print(f"✅ Resuming {symbol} {interval_label} ingestion from {resume_ts.strftime('%Y-%m-%d %H:%M:%S')} to {end_date.strftime('%Y-%m-%d %H:%M:%S')} (latest existing: {latest_ts.strftime('%Y-%m-%d %H:%M:%S')})")
+                                        # Keep start_date at the beginning of that day to minimize queries while duplicates are filtered
                                         start_date = resume_date
                                     else:
                                         # Data is already up to date (latest timestamp is at or after end_date)
-                                        print(f"ℹ️ {symbol} already has {interval} data up to {latest_ts.strftime('%Y-%m-%d %H:%M:%S')}, which is at or after the target end date ({end_date.strftime('%Y-%m-%d')}). Skipping.")
+                                        print(f"ℹ️ {symbol} already has {interval} data up to {latest_ts.strftime('%Y-%m-%d %H:%M:%S')}, which is at or after the target end date ({end_date.strftime('%Y-%m-%d %H:%M:%S')}). Skipping.")
                                         return True  # Already complete
                                 except Exception as e:
                                     print(f"Warning: Could not parse latest timestamp for {symbol}: {e}. Starting from beginning.")
@@ -485,13 +503,45 @@ class DataIngestionPipeline:
                     print(f"⚠️ Completed {symbol}: No data inserted. Check if dates are in the future or if there's no data available for this period.")
                 return all_success
             else:
-                # Daily data (original logic)
+                # Daily data with resume-from-latest behavior
+                if resume_from_latest:
+                    try:
+                        latest_daily = (
+                            self.supabase.table("market_data")
+                            .select("date")
+                            .eq("symbol", symbol)
+                            .order("date", desc=True)
+                            .limit(1)
+                            .execute()
+                        )
+                        latest_data = latest_daily.data if hasattr(latest_daily, "data") else []
+                        if latest_data:
+                            latest_date_raw = latest_data[0].get("date")
+                            if latest_date_raw:
+                                if isinstance(latest_date_raw, str):
+                                    latest_date = datetime.fromisoformat(latest_date_raw).date()
+                                else:
+                                    latest_date = latest_date_raw
+                                resume_date = latest_date + timedelta(days=1)
+                                if resume_date > end_date.date():
+                                    print(f"ℹ️ {symbol} daily already up to {latest_date}; target end {end_date.date()}. Skipping.")
+                                    return True
+                                if resume_date > start_date.date():
+                                    start_date = datetime.combine(resume_date, datetime.min.time())
+                                    print(f"✅ Resuming daily ingestion for {symbol} from {start_date.date()} to {end_date.date()}")
+                    except Exception as e:
+                        print(f"Warning: Could not determine latest daily for {symbol}: {e}. Using provided start date.")
+
+                if start_date > end_date:
+                    print(f"Start date {start_date.date()} is after end date {end_date.date()} for {symbol}. Nothing to ingest.")
+                    return True
+
                 start_date_str = start_date.strftime("%Y-%m-%d")
                 end_date_str = end_date.strftime("%Y-%m-%d")
                 data = self.polygon_client.get_historical_data(symbol, start_date_str, end_date_str)
                 target_table = "market_data"
                 if data.empty:
-                    print(f"No data returned from Polygon API for {symbol}")
+                    print(f"No data returned from Polygon API for {symbol} ({start_date_str} to {end_date_str})")
                     return False
                 rows = []
                 for _, row in data.iterrows():
@@ -507,9 +557,9 @@ class DataIngestionPipeline:
                     })
                 if rows:
                     try:
-                        resp = self.supabase.table(target_table).upsert(rows).execute()
+                        self.supabase.table(target_table).upsert(rows).execute()
                         records_processed = len(rows)
-                        print(f"Successfully processed {records_processed} records for {symbol} (upserted)")
+                        print(f"Successfully processed {records_processed} daily records for {symbol} (upserted)")
                         return True
                     except Exception as e:
                         print(f"Bulk upsert failed for {symbol}: {e}")
@@ -529,11 +579,11 @@ class DataIngestionPipeline:
                                     display_when = row.get('date') or row.get('timestamp') or 'unknown'
                                     print(f"Failed to upsert record for {symbol} on {display_when}: {individual_error}")
                         if success_count > 0 or duplicate_count > 0:
-                            print(f"Processed {symbol}: {success_count} new records, {duplicate_count} duplicates skipped")
+                            print(f"Processed {symbol}: {success_count} new daily records, {duplicate_count} duplicates skipped")
                             return True
                         return False
                 else:
-                    print(f"No data to insert for {symbol}")
+                    print(f"No data to insert for {symbol} ({start_date_str} to {end_date_str})")
                     return False
         except Exception as e:
             print(f"Error ingesting historical data for {symbol}: {e}")
@@ -554,6 +604,14 @@ class DataIngestionPipeline:
             return max(chunk_days or premium_default, premium_default)
         return chunk_days or base_default
 
+    @staticmethod
+    def _previous_trading_day(ref_date) -> datetime.date:
+        """Return the most recent weekday before ref_date (Mon-Fri)."""
+        prev = ref_date - timedelta(days=1)
+        while prev.weekday() >= 5:  # 5 = Saturday, 6 = Sunday
+            prev -= timedelta(days=1)
+        return prev
+
     def ingest_symbol_full_stack(
         self,
         symbol: str,
@@ -564,18 +622,21 @@ class DataIngestionPipeline:
     ) -> Dict[str, bool]:
         chunk_overrides = chunk_overrides or {}
         now = datetime.utcnow()
+        intraday_cutoff = now - timedelta(minutes=15)
+        prev_trading_day = self._previous_trading_day(now.date())
+        daily_default_end = datetime.combine(prev_trading_day, datetime.min.time())
         defaults = {
             "daily": (
                 daily_range[0] if daily_range else datetime(2023, 10, 1),
-                daily_range[1] if daily_range else now,
+                daily_range[1] if daily_range else daily_default_end,
             ),
             "5min": (
                 m5_range[0] if m5_range else datetime(2023, 10, 1),
-                m5_range[1] if m5_range else now,
+                m5_range[1] if m5_range else intraday_cutoff,
             ),
             "1min": (
                 m1_range[0] if m1_range else datetime(2025, 8, 1),
-                m1_range[1] if m1_range else now,
+                m1_range[1] if m1_range else intraday_cutoff,
             ),
         }
 
@@ -587,10 +648,10 @@ class DataIngestionPipeline:
                 "interval": interval_key if interval_key != "daily" else "daily",
                 "start_date": start,
                 "end_date": end,
+                "resume_from_latest": True,
             }
             if interval_key != "daily":
                 kwargs["chunk_days"] = chunk_overrides.get(interval_key)
-                kwargs["resume_from_latest"] = True
             success = self.ingest_historical_data(**kwargs)
             results[interval_key] = success
         return results
@@ -605,49 +666,6 @@ class DataIngestionPipeline:
             results[symbol] = self.ingest_historical_data(symbol, days_back)
         
         return results
-    
-    def get_data_completion_status(self) -> Dict[str, Dict]:
-        """Get data completion status for all stocks"""
-        status = {}
-        
-        if not self.supabase:
-            print("Supabase not configured. Cannot get completion status.")
-            return status
-        
-        for symbol in get_watchlist_symbols():
-            try:
-                # Count records for this symbol
-                resp = self.supabase.table("market_data").select("date").eq("symbol", symbol).execute()
-                data = resp.data if hasattr(resp, "data") else []
-                hist_count = len(data) if isinstance(data, list) else 0
-                
-                # Get latest date
-                latest_date = None
-                if data:
-                    dates = [item.get("date") for item in data if item.get("date")]
-                    if dates:
-                        latest_date = max(dates)
-                
-                status[symbol] = {
-                    "symbol": symbol,
-                    "name": WATCHLIST_STOCKS.get(symbol, symbol),
-                    "historical_records": hist_count,
-                    "latest_date": latest_date,
-                    "is_complete": hist_count > 0,
-                    "completion_percentage": min(100, (hist_count / 1260) * 100)  # Assuming 1260 trading days (5 years)
-                }
-            except Exception as e:
-                print(f"Error getting status for {symbol}: {e}")
-                status[symbol] = {
-                    "symbol": symbol,
-                    "name": WATCHLIST_STOCKS.get(symbol, symbol),
-                    "historical_records": 0,
-                    "latest_date": None,
-                    "is_complete": False,
-                    "completion_percentage": 0
-                }
-        
-        return status
     
     def close(self):
         """Close any open connections or resources"""
