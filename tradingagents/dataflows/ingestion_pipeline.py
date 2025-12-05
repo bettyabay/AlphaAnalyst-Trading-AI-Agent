@@ -77,15 +77,44 @@ class DataIngestionPipeline:
                 raise ValueError(f"Unsupported date type: {type(value)}")
 
             try:
-                end_date = _normalize_date(end_date, datetime.now())
+                # Determine if this is intraday data
+                is_intraday = interval in ("5min", "5-minute", "5m", "1min", "1-minute", "1m")
+                
+                # For intraday data, preserve current time if end_date is None (to ingest up to "now")
+                # For daily data, default to midnight of today
+                # Use UTC to match database timezone
+                if end_date is None:
+                    default_end = datetime.utcnow() if is_intraday else datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+                else:
+                    default_end = None
+                
+                end_date = _normalize_date(end_date, default_end)
                 start_date = _normalize_date(start_date, end_date - timedelta(days=days_back))
             except ValueError as date_error:
                 print(f"Invalid date provided: {date_error}")
                 return False
 
-            # Work with date boundaries only (midnight UTC naive)
-            end_date = end_date.replace(hour=0, minute=0, second=0, microsecond=0)
+            # Normalize dates: truncate start_date to midnight, handle end_date based on data type
             start_date = start_date.replace(hour=0, minute=0, second=0, microsecond=0)
+            
+            if is_intraday:
+                # For intraday data: if end_date is today, keep current time (or set to end of day if at midnight)
+                # If end_date is in the past, truncate to midnight
+                # Use UTC to match database timezone
+                now = datetime.utcnow()
+                if end_date.date() < now.date():
+                    # Past date: truncate to midnight
+                    end_date = end_date.replace(hour=0, minute=0, second=0, microsecond=0)
+                elif end_date.date() == now.date():
+                    # Today: if already at midnight (from explicit date input), set to end of day
+                    # Otherwise keep the current time (from datetime.now())
+                    if end_date.hour == 0 and end_date.minute == 0 and end_date.second == 0:
+                        # Was explicitly set to today at midnight, set to end of day to get all of today's data
+                        end_date = end_date.replace(hour=23, minute=59, second=59, microsecond=999999)
+                    # Otherwise keep end_date as-is (it has the current time from datetime.now())
+            else:
+                # Daily data: always truncate to midnight
+                end_date = end_date.replace(hour=0, minute=0, second=0, microsecond=0)
 
             if start_date > end_date:
                 print(f"Start date {start_date} is after end date {end_date}. Cannot ingest.")
@@ -134,7 +163,8 @@ class DataIngestionPipeline:
                                     
                                     # Always resume from existing data if it exists and is before end_date
                                     # This ensures we continue from where data stops, regardless of initial start_date
-                                    now = datetime.now()
+                                    # Use UTC to match database timezone
+                                    now = datetime.utcnow()
                                     interval_label = "1-min" if interval in ("1min", "1-minute", "1m") else "5-min"
                                     
                                     print(f"🔍 {symbol} {interval_label} - Latest DB timestamp: {latest_ts.strftime('%Y-%m-%d %H:%M:%S')}")
@@ -176,19 +206,33 @@ class DataIngestionPipeline:
                 existing_timestamps_cache = set()
 
                 chunk_count = 0
+                # Use UTC to match database timezone
+                now = datetime.utcnow()
                 while chunk_start <= end_date:
                     chunk_count += 1
                     chunk_end = min(chunk_start + chunk_delta - timedelta(days=1), end_date)
                     if chunk_end < chunk_start:
                         chunk_end = chunk_start
 
+                    # For the last chunk (today), ensure we include the current time
+                    # If chunk_end is today and end_date is also today with a time component,
+                    # use end_date to ensure we get data up to "now"
+                    if chunk_end.date() == now.date() and end_date.date() == now.date() and end_date > chunk_end:
+                        # This is the last chunk for today, use end_date to get data up to current time
+                        chunk_end = end_date
+                    
                     start_str = chunk_start.strftime("%Y-%m-%d")
+                    # For Polygon API, we still use date-only format, but for today's chunk,
+                    # Polygon will return all available data up to the current time
                     end_str = chunk_end.strftime("%Y-%m-%d")
                     
-                    print(f"📦 Processing chunk {chunk_count} for {symbol}: {start_str} to {end_str}")
+                    # Log with time info if it's today's chunk
+                    if chunk_end.date() == now.date():
+                        print(f"📦 Processing chunk {chunk_count} for {symbol}: {start_str} to {end_str} (up to {chunk_end.strftime('%H:%M:%S')})")
+                    else:
+                        print(f"📦 Processing chunk {chunk_count} for {symbol}: {start_str} to {end_str}")
                     
                     # Skip if chunk is entirely in the future
-                    now = datetime.now()
                     if chunk_start > now:
                         print(f"⏭️ Skipping future chunk for {symbol}: {start_str} to {end_str} (today: {now.strftime('%Y-%m-%d %H:%M:%S')})")
                         chunk_start = chunk_end + timedelta(days=1)
@@ -244,7 +288,8 @@ class DataIngestionPipeline:
                                 try:
                                     start_dt = datetime.strptime(start_str, "%Y-%m-%d")
                                     end_dt = datetime.strptime(end_str, "%Y-%m-%d")
-                                    now = datetime.now()
+                                    # Use UTC to match database timezone
+                                    now = datetime.utcnow()
                                     if start_dt > now or end_dt > now:
                                         # Future dates - skip this chunk
                                         print(f"Skipping future dates for {symbol} {start_str} to {end_str} (today: {now.strftime('%Y-%m-%d')})")
@@ -422,7 +467,15 @@ class DataIngestionPipeline:
                                 if attempt >= max_retries:
                                     print(f"Max retries reached for {symbol} {start_str} to {end_str}. Skipping chunk.")
                                     all_success = False
-                    chunk_start = chunk_end + timedelta(days=1)
+                    
+                    # Advance to next chunk: if chunk_end has time component (today's last chunk),
+                    # set next chunk_start to start of next day
+                    if chunk_end.hour != 0 or chunk_end.minute != 0 or chunk_end.second != 0:
+                        # chunk_end has time component, advance to start of next day
+                        chunk_start = (chunk_end.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1))
+                    else:
+                        # chunk_end is at midnight, normal increment
+                        chunk_start = chunk_end + timedelta(days=1)
 
                 if total_inserted > 0:
                     print(f"✅ Completed {symbol}: Inserted {total_inserted} new records, skipped {total_skipped} duplicates")
