@@ -1243,6 +1243,20 @@ def phase1_foundation_data():
         freshness_cutoff_minutes = 20  # allow a small buffer beyond the 15m ingestion cutoff
         now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
         
+        # Check if it's likely a weekend/non-trading day
+        # US markets: Mon-Fri 9:30 AM - 4:00 PM ET (14:30-21:00 UTC)
+        current_day = now_utc.weekday()  # 0=Monday, 6=Sunday
+        current_hour_utc = now_utc.hour
+        is_weekend = current_day >= 5  # Saturday (5) or Sunday (6)
+        is_after_hours = current_hour_utc < 14 or current_hour_utc >= 21  # Outside 14:30-21:00 UTC trading window
+        
+        # Allow older data if it's clearly outside market hours
+        market_status_msg = None
+        if is_weekend or (current_day == 4 and current_hour_utc >= 21) or (current_day == 0 and current_hour_utc < 14):
+            # Weekend or clearly outside trading hours - relax freshness requirement
+            freshness_cutoff_minutes = 2880  # Allow up to 48 hours old (covers weekends)
+            market_status_msg = "Market is closed (weekend/after hours). Allowing older data."
+        
         # Debug: Show current UTC time and what was found
         st.caption(f"🕐 Current UTC time: {now_utc.strftime('%Y-%m-%d %H:%M:%S')}")
         
@@ -1306,9 +1320,33 @@ def phase1_foundation_data():
                 st.caption(f"✅ 5-min data fresh: {latest_5min_ts.strftime('%Y-%m-%d %H:%M:%S')} ({age_minutes:.0f}m ago)")
         
         if not data_ready:
-            st.error("**⚠️ Data Not Ready - Cannot Run QUANTUMTRADER**")
-            for warning in freshness_warnings:
-                st.warning(warning)
+            # If markets are closed, show a different message and allow override
+            if market_status_msg:
+                st.warning(f"**📊 Market Status: {market_status_msg}**")
+                st.info("""
+                **QUANTUMTRADER can still run with older data during market closure.**
+                
+                The data freshness check has been relaxed because markets are currently closed.
+                You can proceed with analysis using the available historical data.
+                """)
+                
+                # Add override option
+                col_override1, col_override2 = st.columns([2, 1])
+                with col_override1:
+                    st.write("**Option:** Proceed with available data despite age warnings.")
+                with col_override2:
+                    if st.button("✅ Override & Allow QUANTUMTRADER", key="override_freshness", type="primary"):
+                        st.session_state.quantum_data_override = True
+                        st.rerun()
+            else:
+                st.error("**⚠️ Data Not Ready - Cannot Run QUANTUMTRADER**")
+                for warning in freshness_warnings:
+                    st.warning(warning)
+            
+            # Show warnings regardless
+            if freshness_warnings and not market_status_msg:
+                for warning in freshness_warnings:
+                    st.warning(warning)
             
             col_ingest1, col_ingest2 = st.columns([2, 1])
             
@@ -1451,7 +1489,21 @@ def phase1_foundation_data():
                 age_5min = (now_utc - latest_5min_ts).total_seconds() / 60
                 st.success(f"✅ Data is fresh! Latest 1-min: {latest_1min_ts.strftime('%Y-%m-%d %H:%M:%S')} ({age_1min:.0f}m ago) | Latest 5-min: {latest_5min_ts.strftime('%Y-%m-%d %H:%M:%S')} ({age_5min:.0f}m ago)")
     
-    if st.button("⚙️ Run QUANTUMTRADER Prompt", key="quantum_prompt_button", disabled=not (lab_symbol and data_ready)):
+    # Check if user has overridden freshness check
+    override_active = st.session_state.get("quantum_data_override", False)
+    
+    # If override is active, show cancel option
+    if override_active:
+        st.success("✅ Override Active: QUANTUMTRADER can run with older data")
+        if st.button("❌ Cancel Override", key="cancel_override"):
+            st.session_state.quantum_data_override = False
+            st.rerun()
+        # Allow running despite freshness warnings when override is active
+        effective_data_ready = True
+    else:
+        effective_data_ready = data_ready
+    
+    if st.button("⚙️ Run QUANTUMTRADER Prompt", key="quantum_prompt_button", disabled=not (lab_symbol and effective_data_ready)):
         with st.spinner("Calculating QUANTUMTRADER metrics..."):
             try:
                 qt_result = feature_lab.run_quantum_screen(lab_symbol, quantum_timestamp)
