@@ -1193,7 +1193,6 @@ def phase1_foundation_data():
                 st.rerun()
         
         # Direct database check for debugging
-        from tradingagents.database.config import get_supabase
         supabase = get_supabase()
         db_check_info = {}
         
@@ -1347,6 +1346,13 @@ def phase1_foundation_data():
             with col_ingest2:
                 st.markdown("#### Quick Ingest")
                 if st.button(f"📥 Ingest Latest Data for {lab_symbol}", key="quick_ingest_quantum", type="primary"):
+                    # Check current state BEFORE ingestion
+                    latest_before_1min = fetch_latest_bar(lab_symbol, "1min")
+                    latest_before_5min = fetch_latest_bar(lab_symbol, "5min")
+                    
+                    before_1min_ts = pd.to_datetime(latest_before_1min.get("timestamp")).replace(tzinfo=None) if latest_before_1min else None
+                    before_5min_ts = pd.to_datetime(latest_before_5min.get("timestamp")).replace(tzinfo=None) if latest_before_5min else None
+                    
                     with st.spinner(f"Ingesting latest 1-min and 5-min data for {lab_symbol} up to current time..."):
                         try:
                             pipeline = DataIngestionPipeline()
@@ -1354,8 +1360,15 @@ def phase1_foundation_data():
                             # Get current UTC time as end_date to ensure we fetch up to now
                             now_utc_end = datetime.now(timezone.utc).replace(tzinfo=None)
                             
+                            st.write(f"**Ingestion Details:**")
+                            st.write(f"- Target end time: {now_utc_end.strftime('%Y-%m-%d %H:%M:%S')} UTC")
+                            if before_1min_ts:
+                                st.write(f"- Current 1-min latest: {before_1min_ts.strftime('%Y-%m-%d %H:%M:%S')}")
+                            if before_5min_ts:
+                                st.write(f"- Current 5-min latest: {before_5min_ts.strftime('%Y-%m-%d %H:%M:%S')}")
+                            
                             # Ingest 1-minute data - explicitly set end_date to current time
-                            st.info(f"Ingesting 1-minute data for {lab_symbol} up to {now_utc_end.strftime('%Y-%m-%d %H:%M:%S')} UTC...")
+                            st.info(f"📥 Ingesting 1-minute data for {lab_symbol}...")
                             success_1min = pipeline.ingest_historical_data(
                                 symbol=lab_symbol,
                                 interval="1min",
@@ -1363,9 +1376,10 @@ def phase1_foundation_data():
                                 end_date=now_utc_end,
                                 resume_from_latest=True
                             )
+                            st.write(f"1-min ingestion result: {'✅ Success' if success_1min else '❌ Failed'}")
                             
                             # Ingest 5-minute data - explicitly set end_date to current time
-                            st.info(f"Ingesting 5-minute data for {lab_symbol} up to {now_utc_end.strftime('%Y-%m-%d %H:%M:%S')} UTC...")
+                            st.info(f"📥 Ingesting 5-minute data for {lab_symbol}...")
                             success_5min = pipeline.ingest_historical_data(
                                 symbol=lab_symbol,
                                 interval="5min",
@@ -1373,21 +1387,54 @@ def phase1_foundation_data():
                                 end_date=now_utc_end,
                                 resume_from_latest=True
                             )
+                            st.write(f"5-min ingestion result: {'✅ Success' if success_5min else '❌ Failed'}")
                             
                             pipeline.close()
                             
-                            if success_1min and success_5min:
-                                st.success(f"✅ Data ingestion complete for {lab_symbol}! Refreshing page to check data freshness...")
-                                st.balloons()
-                                # Small delay to allow database to commit
-                                import time
-                                time.sleep(1)
-                                st.rerun()
-                            elif success_1min or success_5min:
-                                st.warning(f"⚠️ Partial success. 1-min: {'✅' if success_1min else '❌'}, 5-min: {'✅' if success_5min else '❌'}. Check console logs for details.")
-                                st.info("💡 Click '🔄 Refresh Data Check' button above to verify what was saved.")
+                            # Check state AFTER ingestion
+                            import time
+                            time.sleep(2)  # Wait for database to commit
+                            
+                            latest_after_1min = fetch_latest_bar(lab_symbol, "1min")
+                            latest_after_5min = fetch_latest_bar(lab_symbol, "5min")
+                            
+                            after_1min_ts = pd.to_datetime(latest_after_1min.get("timestamp")).replace(tzinfo=None) if latest_after_1min else None
+                            after_5min_ts = pd.to_datetime(latest_after_5min.get("timestamp")).replace(tzinfo=None) if latest_after_5min else None
+                            
+                            st.write(f"**Post-Ingestion Check:**")
+                            if before_1min_ts and after_1min_ts:
+                                if after_1min_ts > before_1min_ts:
+                                    st.success(f"✅ 1-min data updated: {before_1min_ts.strftime('%Y-%m-%d %H:%M:%S')} → {after_1min_ts.strftime('%Y-%m-%d %H:%M:%S')}")
+                                else:
+                                    st.warning(f"⚠️ 1-min data unchanged: {after_1min_ts.strftime('%Y-%m-%d %H:%M:%S')} (no new data found or already up to date)")
+                            elif after_1min_ts:
+                                st.info(f"ℹ️ 1-min data now exists: {after_1min_ts.strftime('%Y-%m-%d %H:%M:%S')}")
+                            
+                            if before_5min_ts and after_5min_ts:
+                                if after_5min_ts > before_5min_ts:
+                                    st.success(f"✅ 5-min data updated: {before_5min_ts.strftime('%Y-%m-%d %H:%M:%S')} → {after_5min_ts.strftime('%Y-%m-%d %H:%M:%S')}")
+                                else:
+                                    st.warning(f"⚠️ 5-min data unchanged: {after_5min_ts.strftime('%Y-%m-%d %H:%M:%S')} (no new data found or already up to date)")
+                            elif after_5min_ts:
+                                st.info(f"ℹ️ 5-min data now exists: {after_5min_ts.strftime('%Y-%m-%d %H:%M:%S')}")
+                            
+                            # Check if data is fresh enough
+                            if after_1min_ts and after_5min_ts:
+                                age_1min_final = (now_utc_end - after_1min_ts).total_seconds() / 60
+                                age_5min_final = (now_utc_end - after_5min_ts).total_seconds() / 60
+                                
+                                if age_1min_final <= 20 and age_5min_final <= 20:
+                                    st.success(f"🎉 Data is now fresh! Refreshing page...")
+                                    st.balloons()
+                                    time.sleep(1)
+                                    st.rerun()
+                                else:
+                                    st.warning(f"⚠️ Data ingested but still not fresh enough (1-min: {age_1min_final:.0f}m, 5-min: {age_5min_final:.0f}m). Market may be closed or no recent data available.")
+                                    st.info("💡 Check the console/terminal logs for detailed ingestion output. You may need to wait for market hours or check Polygon API availability.")
                             else:
-                                st.error(f"❌ Ingestion failed for both intervals. Check your POLYGON_API_KEY and database connection. See console for error details.")
+                                st.warning(f"⚠️ Ingestion completed but couldn't verify new data. Check console logs for details.")
+                                st.info("💡 Click '🔄 Refresh Data Check' button above to see current database state.")
+                            
                         except Exception as e:
                             st.error(f"❌ Ingestion error: {str(e)}")
                             import traceback
