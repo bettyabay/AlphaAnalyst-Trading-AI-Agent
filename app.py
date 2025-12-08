@@ -3,7 +3,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import yfinance as yf
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 import os
 import io
@@ -742,29 +742,27 @@ def phase1_foundation_data():
                 st.success(f"✅ Successfully processed {success_count}/{len(results)} stocks")
                 st.balloons()
                 
-                # Save button for data ingestion results
-                st.markdown("---")
-                if st.button("💾 Save Ingestion Results to Database", key="save_ingestion_results"):
-                    try:
-                        from tradingagents.database.db_service import update_data_health, log_event
-                        
-                        # Update data health for each symbol
-                        for symbol, success in results.items():
-                            update_data_health(
-                                symbol=symbol,
-                                data_fetch_status={"status": "success" if success else "failed", "source": "phase1_ingestion"},
-                                health_score=10.0 if success else 0.0
-                            )
-                        
-                        # Log completion
-                        log_event("data_ingestion_completed", {
-                            "success_count": success_count,
-                            "failed_count": failed_count,
-                            "total": len(results)
-                        })
-                        st.success("✅ Ingestion results saved to database!")
-                    except Exception as e:
-                        st.error(f"❌ Failed to save: {str(e)}")
+                # Automatically save ingestion metadata to database
+                try:
+                    from tradingagents.database.db_service import update_data_health, log_event
+                    
+                    # Update data health for each symbol
+                    for symbol, success in results.items():
+                        update_data_health(
+                            symbol=symbol,
+                            data_fetch_status={"status": "success" if success else "failed", "source": "phase1_ingestion"},
+                            health_score=10.0 if success else 0.0
+                        )
+                    
+                    # Log completion
+                    log_event("data_ingestion_completed", {
+                        "success_count": success_count,
+                        "failed_count": failed_count,
+                        "total": len(results)
+                    })
+                    st.info("✅ Ingestion metadata automatically saved to database (data health & event logs)")
+                except Exception as e:
+                    st.warning(f"⚠️ Market data saved successfully, but failed to save metadata: {str(e)}")
             else:
                 st.error(f"❌ Failed to process all {len(results)} stocks")
             
@@ -1186,7 +1184,58 @@ def phase1_foundation_data():
     )
     
     # Check data freshness before allowing QUANTUMTRADER to run
+    data_ready = False  # Initialize as False, will be set to True if symbol selected and data is ready
     if lab_symbol:
+        # Add refresh button to re-check data freshness
+        col_refresh1, col_refresh2 = st.columns([3, 1])
+        with col_refresh2:
+            if st.button("🔄 Refresh Data Check", key="refresh_data_check"):
+                st.rerun()
+        
+        # Direct database check for debugging
+        from tradingagents.database.config import get_supabase
+        supabase = get_supabase()
+        db_check_info = {}
+        
+        if supabase:
+            try:
+                # Check 1-min table directly
+                check_1min = supabase.table("market_data_1min")\
+                    .select("symbol,timestamp")\
+                    .eq("symbol", lab_symbol.upper())\
+                    .order("timestamp", desc=True)\
+                    .limit(5)\
+                    .execute()
+                db_check_info["1min_raw"] = check_1min.data if hasattr(check_1min, "data") else []
+                
+                # Check 5-min table directly
+                check_5min = supabase.table("market_data_5min")\
+                    .select("symbol,timestamp")\
+                    .eq("symbol", lab_symbol.upper())\
+                    .order("timestamp", desc=True)\
+                    .limit(5)\
+                    .execute()
+                db_check_info["5min_raw"] = check_5min.data if hasattr(check_5min, "data") else []
+                
+                # Check what symbols actually exist in the tables
+                all_symbols_1min = supabase.table("market_data_1min")\
+                    .select("symbol")\
+                    .limit(100)\
+                    .execute()
+                unique_symbols_1min = list(set([r.get("symbol") for r in (all_symbols_1min.data if hasattr(all_symbols_1min, "data") else []) if r.get("symbol")]))
+                db_check_info["all_symbols_1min"] = sorted(unique_symbols_1min)[:20]  # Show first 20
+                
+                all_symbols_5min = supabase.table("market_data_5min")\
+                    .select("symbol")\
+                    .limit(100)\
+                    .execute()
+                unique_symbols_5min = list(set([r.get("symbol") for r in (all_symbols_5min.data if hasattr(all_symbols_5min, "data") else []) if r.get("symbol")]))
+                db_check_info["all_symbols_5min"] = sorted(unique_symbols_5min)[:20]  # Show first 20
+            except Exception as e:
+                import traceback
+                db_check_info["error"] = str(e)
+                db_check_info["error_traceback"] = traceback.format_exc()
+        
         latest_1min = fetch_latest_bar(lab_symbol, "1min")
         latest_5min = fetch_latest_bar(lab_symbol, "5min")
         
@@ -1194,6 +1243,44 @@ def phase1_foundation_data():
         freshness_warnings = []
         freshness_cutoff_minutes = 20  # allow a small buffer beyond the 15m ingestion cutoff
         now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+        
+        # Debug: Show current UTC time and what was found
+        st.caption(f"🕐 Current UTC time: {now_utc.strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        # Debug output for troubleshooting
+        with st.expander("🔍 Debug: Latest Data Query Results", expanded=True):
+            st.write(f"**Direct Database Query Results:**")
+            if db_check_info.get("error"):
+                st.error(f"Database query error: {db_check_info['error']}")
+            
+            st.write(f"**1-minute table - Top 5 records for {lab_symbol.upper()}:**")
+            if db_check_info.get("1min_raw"):
+                for i, record in enumerate(db_check_info["1min_raw"][:5], 1):
+                    st.write(f"{i}. Symbol: {record.get('symbol')}, Timestamp: {record.get('timestamp')}")
+            else:
+                st.write("❌ No records found in market_data_1min table")
+                if db_check_info.get("1min_symbols"):
+                    st.write(f"⚠️ Found symbols: {[r.get('symbol') for r in db_check_info['1min_symbols']]}")
+            
+            st.write(f"**5-minute table - Top 5 records for {lab_symbol.upper()}:**")
+            if db_check_info.get("5min_raw"):
+                for i, record in enumerate(db_check_info["5min_raw"][:5], 1):
+                    st.write(f"{i}. Symbol: {record.get('symbol')}, Timestamp: {record.get('timestamp')}")
+            else:
+                st.write("❌ No records found in market_data_5min table")
+            
+            st.write(f"**fetch_latest_bar() function results:**")
+            st.write(f"**1-minute data query result:**")
+            if latest_1min:
+                st.json({k: str(v) for k, v in latest_1min.items()})
+            else:
+                st.write("❌ No 1-minute data returned from fetch_latest_bar()")
+            
+            st.write(f"**5-minute data query result:**")
+            if latest_5min:
+                st.json({k: str(v) for k, v in latest_5min.items()})
+            else:
+                st.write("❌ No 5-minute data returned from fetch_latest_bar()")
         
         if not latest_1min:
             data_ready = False
@@ -1204,6 +1291,8 @@ def phase1_foundation_data():
             if age_minutes > freshness_cutoff_minutes:
                 data_ready = False
                 freshness_warnings.append(f"⚠️ 1-minute data is {age_minutes:.0f} minutes old (latest: {latest_1min_ts.strftime('%Y-%m-%d %H:%M:%S')})")
+            else:
+                st.caption(f"✅ 1-min data fresh: {latest_1min_ts.strftime('%Y-%m-%d %H:%M:%S')} ({age_minutes:.0f}m ago)")
         
         if not latest_5min:
             data_ready = False
@@ -1214,6 +1303,8 @@ def phase1_foundation_data():
             if age_minutes > freshness_cutoff_minutes:
                 data_ready = False
                 freshness_warnings.append(f"⚠️ 5-minute data is {age_minutes:.0f} minutes old (latest: {latest_5min_ts.strftime('%Y-%m-%d %H:%M:%S')})")
+            else:
+                st.caption(f"✅ 5-min data fresh: {latest_5min_ts.strftime('%Y-%m-%d %H:%M:%S')} ({age_minutes:.0f}m ago)")
         
         if not data_ready:
             st.error("**⚠️ Data Not Ready - Cannot Run QUANTUMTRADER**")
@@ -1223,50 +1314,80 @@ def phase1_foundation_data():
             col_ingest1, col_ingest2 = st.columns([2, 1])
             
             with col_ingest1:
-                st.info(f"""
+                # Build status message
+                status_msg = """
                 **📥 QUANTUMTRADER requires fresh data (latest 20 periods):**
                 
                 The system calculates metrics using the **last 20 consecutive 1-minute bars** from your database.
                 If data is missing or stale, calculations will be incorrect.
                 
-                **You must ingest data first before running QUANTUMTRADER.**
-                """)
+                **Current Status:**\n"""
+                
+                if latest_1min:
+                    latest_1min_ts_display = pd.to_datetime(latest_1min.get("timestamp")).replace(tzinfo=None)
+                    age_1min_display = (now_utc - latest_1min_ts_display).total_seconds() / 60
+                    status_msg += f"- Latest 1-min data: {latest_1min_ts_display.strftime('%Y-%m-%d %H:%M:%S')} ({age_1min_display:.0f} minutes old)\n"
+                else:
+                    status_msg += "- Latest 1-min data: None\n"
+                
+                if latest_5min:
+                    latest_5min_ts_display = pd.to_datetime(latest_5min.get("timestamp")).replace(tzinfo=None)
+                    age_5min_display = (now_utc - latest_5min_ts_display).total_seconds() / 60
+                    status_msg += f"- Latest 5-min data: {latest_5min_ts_display.strftime('%Y-%m-%d %H:%M:%S')} ({age_5min_display:.0f} minutes old)\n"
+                else:
+                    status_msg += "- Latest 5-min data: None\n"
+                
+                status_msg += """- Required: Data must be less than 20 minutes old
+                
+                **Solution:** Click the "📥 Ingest Latest Data" button on the right to fetch fresh data up to the current time.
+                """
+                
+                st.info(status_msg)
             
             with col_ingest2:
                 st.markdown("#### Quick Ingest")
                 if st.button(f"📥 Ingest Latest Data for {lab_symbol}", key="quick_ingest_quantum", type="primary"):
-                    with st.spinner(f"Ingesting latest 1-min and 5-min data for {lab_symbol}..."):
+                    with st.spinner(f"Ingesting latest 1-min and 5-min data for {lab_symbol} up to current time..."):
                         try:
                             pipeline = DataIngestionPipeline()
                             
-                            # Ingest 1-minute data (last 3 days to ensure we get recent data)
-                            st.info(f"Ingesting 1-minute data for {lab_symbol}...")
+                            # Get current UTC time as end_date to ensure we fetch up to now
+                            now_utc_end = datetime.now(timezone.utc).replace(tzinfo=None)
+                            
+                            # Ingest 1-minute data - explicitly set end_date to current time
+                            st.info(f"Ingesting 1-minute data for {lab_symbol} up to {now_utc_end.strftime('%Y-%m-%d %H:%M:%S')} UTC...")
                             success_1min = pipeline.ingest_historical_data(
                                 symbol=lab_symbol,
                                 interval="1min",
                                 days_back=3,
+                                end_date=now_utc_end,
                                 resume_from_latest=True
                             )
                             
-                            # Ingest 5-minute data (last 7 days)
-                            st.info(f"Ingesting 5-minute data for {lab_symbol}...")
+                            # Ingest 5-minute data - explicitly set end_date to current time
+                            st.info(f"Ingesting 5-minute data for {lab_symbol} up to {now_utc_end.strftime('%Y-%m-%d %H:%M:%S')} UTC...")
                             success_5min = pipeline.ingest_historical_data(
                                 symbol=lab_symbol,
                                 interval="5min",
                                 days_back=7,
+                                end_date=now_utc_end,
                                 resume_from_latest=True
                             )
                             
                             pipeline.close()
                             
                             if success_1min and success_5min:
-                                st.success(f"✅ Data ingestion complete for {lab_symbol}! Refresh the page to check data freshness.")
+                                st.success(f"✅ Data ingestion complete for {lab_symbol}! Refreshing page to check data freshness...")
                                 st.balloons()
+                                # Small delay to allow database to commit
+                                import time
+                                time.sleep(1)
                                 st.rerun()
                             elif success_1min or success_5min:
-                                st.warning(f"⚠️ Partial success. Check ingestion logs above.")
+                                st.warning(f"⚠️ Partial success. 1-min: {'✅' if success_1min else '❌'}, 5-min: {'✅' if success_5min else '❌'}. Check console logs for details.")
+                                st.info("💡 Click '🔄 Refresh Data Check' button above to verify what was saved.")
                             else:
-                                st.error(f"❌ Ingestion failed. Check your POLYGON_API_KEY and database connection.")
+                                st.error(f"❌ Ingestion failed for both intervals. Check your POLYGON_API_KEY and database connection. See console for error details.")
                         except Exception as e:
                             st.error(f"❌ Ingestion error: {str(e)}")
                             import traceback
@@ -1283,7 +1404,7 @@ def phase1_foundation_data():
                 age_5min = (now_utc - latest_5min_ts).total_seconds() / 60
                 st.success(f"✅ Data is fresh! Latest 1-min: {latest_1min_ts.strftime('%Y-%m-%d %H:%M:%S')} ({age_1min:.0f}m ago) | Latest 5-min: {latest_5min_ts.strftime('%Y-%m-%d %H:%M:%S')} ({age_5min:.0f}m ago)")
     
-    if st.button("⚙️ Run QUANTUMTRADER Prompt", key="quantum_prompt_button", disabled=not data_ready if lab_symbol else False):
+    if st.button("⚙️ Run QUANTUMTRADER Prompt", key="quantum_prompt_button", disabled=not (lab_symbol and data_ready)):
         with st.spinner("Calculating QUANTUMTRADER metrics..."):
             try:
                 qt_result = feature_lab.run_quantum_screen(lab_symbol, quantum_timestamp)
