@@ -1630,7 +1630,8 @@ def phase1_foundation_data():
             })
             
             cond_df = pd.DataFrame(cond_rows)
-            st.dataframe(cond_df, width='stretch', hide_index=True, hide_columns=["Details"])
+            # Streamlit's dataframe API does not support hide_columns; drop display-only columns instead.
+            st.dataframe(cond_df.drop(columns=["Details"], errors="ignore"), width='stretch', hide_index=True)
             
             # Risk Management Overlay
             st.markdown("#### Risk Management Overlay:")
