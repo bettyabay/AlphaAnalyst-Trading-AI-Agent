@@ -287,7 +287,7 @@ class FeatureLab:
             # Daily data is optional but recommended - warn but continue
             print(f"Warning: No daily data available for {symbol}. Daily context will be missing.")
 
-        timestamp_label = command_ts or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        timestamp_label = command_ts or datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
         metrics = self._compute_quantum_metrics(m1, m5, daily)
         extraction = self._build_quantum_extraction(symbol, m1, m5, daily, metrics)
         prompt = self._build_quantum_prompt(symbol, metrics, extraction, timestamp_label)

@@ -1100,87 +1100,27 @@ def phase1_foundation_data():
         st.dataframe(log_df, width='stretch', hide_index=True)
 
     st.markdown("---")
-    st.markdown("#### Promptable Feature Lab")
+    st.markdown("#### QUANTUMTRADER v0.1 Prompt")
     symbols_for_lab = get_watchlist_symbols()
-    lab_symbol = st.selectbox("Symbol", symbols_for_lab, key="feature_lab_symbol")
-    default_prompt = (
-        "Highlight whether momentum across daily/5m/1m is aligned, "
-        "flag conflicting signals, and call out any volume or ATR extremes."
-    )
-    lab_prompt = st.text_area(
-        "Analysis Prompt",
-        value=default_prompt,
-        help="Describe what you want the LLM to analyze using the stored features.",
-        key="feature_lab_prompt",
-    )
-
-    if st.button("🧠 Generate Feature Packet", key="feature_lab_run"):
-        with st.spinner("Computing features and preparing prompt..."):
-            try:
-                result = feature_lab.run(lab_symbol, lab_prompt)
-                st.session_state.feature_lab_result = result
-                st.success("Feature packet ready!")
-            except Exception as exc:
-                st.error(f"Feature lab failed: {exc}")
-
-    feature_result = st.session_state.get("feature_lab_result")
-    if feature_result:
-        blocks = feature_result.feature_blocks
-        block_rows = []
-        for label, data in blocks.items():
-            row = {"Timeframe": label.upper()}
-            row.update({k: v for k, v in data.items() if k not in {"label"}})
-            block_rows.append(row)
-        if block_rows:
-            st.dataframe(pd.DataFrame(block_rows), width='stretch', hide_index=True)
-
-        st.markdown("##### Feature Context")
-        st.code(feature_result.context, language="markdown")
-
-        st.markdown("##### Final Prompt")
-        st.code(feature_result.prompt, language="markdown")
-
-        if feature_result.llm_response:
-            if feature_result.llm_response.startswith("LLM call failed"):
-                st.warning(feature_result.llm_response)
-            else:
-                st.markdown("##### LLM Response")
-                st.markdown(feature_result.llm_response)
-        else:
-            st.info("No GROQ_API_KEY detected. Copy the prompt above into your LLM of choice.")
-
-    st.markdown("##### QUANTUMTRADER v0.1 Prompt")
+    lab_symbol = st.selectbox("Symbol", symbols_for_lab, key="quantum_symbol")
     
-    # Improved timestamp explanation
-    with st.expander("ℹ️ What is the Command Timestamp?", expanded=False):
+    # Command timestamp is now auto-stamped (label only, not a filter)
+    with st.expander("ℹ️ Command Timestamp (Auto Label)", expanded=False):
         st.markdown("""
-        **Command Timestamp = Execution Label (Not Data Filter)**
+        **Auto label only — never a data filter.**
         
-        The timestamp you enter here is **ONLY a label** that appears in the prompt output. 
-        It does **NOT** control which data is retrieved from the database.
-        
-        **How it works:**
-        - ✅ **Current time (default)**: Use when analyzing real-time data - shows when you ran the analysis
-        - 📅 **Historical timestamp**: Use for backtesting - label the prompt with a past date (e.g., `2025-12-01 14:30:00`)
-        
-        **Important:**
-        - The system **always fetches the most recent 20 periods** from your database
-        - If your database has data from `2025-12-02 17:13`, that's what you'll see, even if you enter `2025-12-03 12:48:34`
-        - This timestamp is just for documentation/record-keeping in the prompt output
-        
-        **Example:**
-        - You run QUANTUMTRADER at `2025-12-03 12:48:34`
-        - But your latest data in DB is `2025-12-02 17:13`
-        - The prompt will show: `Command: EXTRACT_RAW_DATA [COIN] [2025-12-03 12:48:34]`
-        - But data will show: `Last 20 periods (16:54-17:13 (2025-12-02))`
+        The system always fetches the most recent data in the database. The
+        command timestamp is just stamped into the prompt output so you can see
+        when you ran the command. No manual input is required.
         """)
     
-    quantum_ts_default = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    quantum_timestamp = st.text_input(
-        "Command Timestamp (Label Only)",
-        value=quantum_ts_default,
-        help="This is just a LABEL in the output. It does NOT filter data. System always uses the most recent data from your database.",
+    quantum_timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    st.text_input(
+        "Command Timestamp (auto, UTC)",
+        value=f"{quantum_timestamp}",
+        help="Label only. Data pull always uses the freshest records available.",
         key="quantum_ts_input",
+        disabled=True,
     )
     
     # Check data freshness before allowing QUANTUMTRADER to run
