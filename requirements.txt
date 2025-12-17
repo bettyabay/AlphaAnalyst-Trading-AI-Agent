@@ -13,6 +13,7 @@ polygon-api-client==1.16.1
 
 # AI / LLM
 openai>=1.27.0
+langchain-openai
 langchain==0.2.16
 langchain-core==1.2.2
 langchain-community==0.2.16
