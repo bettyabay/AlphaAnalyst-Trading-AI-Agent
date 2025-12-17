@@ -40,6 +40,16 @@ from tradingagents.dataflows.ai_analysis import AIResearchAnalyzer
 # For the app UI we call the routing layer directly (not the LangChain tool wrappers)
 from tradingagents.dataflows.interface import route_to_vendor
 
+# Analyst agents imports
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage
+from tradingagents.agents import (
+    create_market_analyst,
+    create_news_analyst,
+    create_fundamentals_analyst,
+    create_social_media_analyst
+)
+
 # Phase 3 imports
 from tradingagents.agents.utils.trading_engine import (
     VolumeScreeningEngine,
@@ -403,6 +413,105 @@ RAW DATA (do NOT echo verbatim, just use it as source material):
     except Exception:
         # On any Groq/API error, fall back to raw text
         return raw_text if len(raw_text) < 4000 else raw_text[:4000] + "\n\n...[truncated]..."
+
+def _get_llm_for_analyst():
+    """Get LLM instance for analyst agents (supports Groq via OpenAI-compatible API)"""
+    groq_key = os.getenv("GROQ_API_KEY", "") or os.getenv("GROK_API_KEY", "")
+    openai_key = os.getenv("OPENAI_API_KEY", "")
+    
+    # Prefer Groq if available (via OpenAI-compatible endpoint)
+    if groq_key and groq_key.startswith("gsk_"):
+        return ChatOpenAI(
+            model="llama-3.1-8b-instant",
+            api_key=groq_key,
+            base_url="https://api.groq.com/openai/v1",
+            temperature=0.2
+        )
+    elif openai_key:
+        return ChatOpenAI(
+            model="gpt-4o-mini",
+            api_key=openai_key,
+            temperature=0.2
+        )
+    else:
+        return None
+
+def _run_analyst_report(analyst_type: str, symbol: str) -> dict:
+    """
+    Run an analyst agent and return the report.
+    
+    Args:
+        analyst_type: One of "market", "news", "fundamentals", "social_media"
+        symbol: Stock ticker symbol
+    
+    Returns:
+        dict with "success", "report", and "error" keys
+    """
+    llm = _get_llm_for_analyst()
+    if not llm:
+        return {
+            "success": False,
+            "report": None,
+            "error": "No LLM configured. Please set GROQ_API_KEY or OPENAI_API_KEY in your .env file."
+        }
+    
+    try:
+        # Create the appropriate analyst
+        if analyst_type == "market":
+            analyst_node = create_market_analyst(llm)
+        elif analyst_type == "news":
+            analyst_node = create_news_analyst(llm)
+        elif analyst_type == "fundamentals":
+            analyst_node = create_fundamentals_analyst(llm)
+        elif analyst_type == "social_media":
+            analyst_node = create_social_media_analyst(llm)
+        else:
+            return {
+                "success": False,
+                "report": None,
+                "error": f"Unknown analyst type: {analyst_type}"
+            }
+        
+        # Prepare state for the analyst
+        current_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        state = {
+            "trade_date": current_date,
+            "company_of_interest": symbol.upper(),
+            "messages": [HumanMessage(content=f"Analyze {symbol.upper()} and provide a comprehensive report.")]
+        }
+        
+        # Run the analyst
+        result = analyst_node(state)
+        
+        # Extract report based on analyst type
+        report_key = {
+            "market": "market_report",
+            "news": "news_report",
+            "fundamentals": "fundamentals_report",
+            "social_media": "sentiment_report"
+        }.get(analyst_type, "report")
+        
+        report = result.get(report_key, "")
+        
+        # If no report in result, try to get from messages
+        if not report and result.get("messages"):
+            last_message = result["messages"][-1]
+            if hasattr(last_message, "content"):
+                report = last_message.content
+        
+        return {
+            "success": True,
+            "report": report or "Report generated but content is empty.",
+            "error": None
+        }
+        
+    except Exception as e:
+        import traceback
+        return {
+            "success": False,
+            "report": None,
+            "error": f"Error running {analyst_type} analyst: {str(e)}\n\n{traceback.format_exc()}"
+        }
 
 def get_stock_data(symbol):
     try:
