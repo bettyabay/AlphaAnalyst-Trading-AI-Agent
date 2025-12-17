@@ -26,4 +26,5 @@ xlsxwriter==3.2.9
 tzdata>=2024.1
 langchain-core==1.2.2
 stockstats==0.6.5
+openai>=1.27.0
 
