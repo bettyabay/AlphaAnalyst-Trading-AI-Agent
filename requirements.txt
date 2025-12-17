@@ -24,5 +24,6 @@ python-pptx==0.6.18
 xlrd==1.2.0
 xlsxwriter==3.2.9
 tzdata>=2024.1
-langchain-core
-stockstats==0.5.5
+langchain-core==1.2.2
+stockstats==0.6.5
+
