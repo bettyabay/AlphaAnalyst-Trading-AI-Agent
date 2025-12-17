@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 import os
 import io
 from uuid import uuid4
+from groq import Groq
 
 # Load environment variables early
 load_dotenv()
@@ -34,6 +35,10 @@ from tradingagents.dataflows.feature_lab import FeatureLab
 
 # Phase 2 imports
 from tradingagents.dataflows.ai_analysis import AIResearchAnalyzer
+
+# Phase 2 raw data / non-financial tools (vendor-routed)
+# For the app UI we call the routing layer directly (not the LangChain tool wrappers)
+from tradingagents.dataflows.interface import route_to_vendor
 
 # Phase 3 imports
 from tradingagents.agents.utils.trading_engine import (
@@ -352,6 +357,52 @@ def initialize_agents():
     if not st.session_state.get('agents_initialized', False):
         st.session_state.agents_initialized = True
         return True
+
+
+def _summarize_with_groq(raw_text: str, title: str) -> str:
+    """
+    Use Groq LLM to turn raw vendor output (JSON/text) into a human-readable summary.
+    Falls back to the original text if Groq is not configured or fails.
+    """
+    if not raw_text:
+        return "No data available to summarize."
+
+    groq_key = os.getenv("GROQ_API_KEY", "") or os.getenv("GROK_API_KEY", "")
+    if not groq_key or not groq_key.startswith("gsk_"):
+        # Groq not configured properly – return truncated raw text
+        return raw_text if len(raw_text) < 4000 else raw_text[:4000] + "\n\n...[truncated]..."
+
+    try:
+        client = Groq(api_key=groq_key)
+        prompt = f"""
+You are an expert macro and equity analyst.
+
+TITLE: {title}
+
+Below is raw vendor output (it may be JSON, CSV-like text, or markdown) containing news or fundamentals.
+Your job:
+- Extract the key points.
+- Group them into 3–7 concise bullet points.
+- Call out overall sentiment (Bullish / Bearish / Neutral) and why.
+- Mention any important risks, catalysts, or macro context.
+- If the text is company-specific, clearly state the company/ticker in your answer.
+
+RAW DATA (do NOT echo verbatim, just use it as source material):
+{raw_text[:6000]}
+"""
+        chat = client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[
+                {"role": "system", "content": "You turn messy raw data into clean, trader-friendly summaries."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.2,
+        )
+        content = chat.choices[0].message.content if chat.choices else ""
+        return content.strip() if content else raw_text
+    except Exception:
+        # On any Groq/API error, fall back to raw text
+        return raw_text if len(raw_text) < 4000 else raw_text[:4000] + "\n\n...[truncated]..."
 
 def get_stock_data(symbol):
     try:
@@ -1789,13 +1840,15 @@ def phase2_master_data_ai():
     
     # Initialize AI analyzer
     ai_analyzer = AIResearchAnalyzer()
+    today_str = datetime.utcnow().strftime("%Y-%m-%d")
     
     # Create tabs for different features
-    tab1, tab2, tab3, tab4 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "Master Data Dashboard", 
         "AI Document Analysis", 
         "Instrument Profiles", 
-        "Research Insights"
+        "Research Insights",
+        "Raw Data Tools (Macro & Instrument)"
     ])
     
     with tab1:
@@ -2000,32 +2053,187 @@ def phase2_master_data_ai():
                                     with st.expander("View Errors"):
                                         for error in save_result.get("errors", [])[:5]:
                                             st.error(error)
-                        else:
-                            error_msg = save_result.get("error", "Unknown error")
-                            # Check if it's a table missing error
-                            if "does not exist" in error_msg.lower():
-                                st.error(f"❌ Database table missing: {error_msg}")
-                                st.info("💡 Please create the `master_data` table first. See the SQL migration below.")
-                                with st.expander("📋 SQL Migration for master_data table"):
-                                    st.code("""
-CREATE TABLE master_data (
-  id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
-  symbol text NOT NULL,
-  content_text text,
-  embedding_vector jsonb,
-  full_data jsonb,
-  generated_at timestamp with time zone DEFAULT now(),
-  analysis_timestamp timestamp with time zone
-);
-
--- Optional: Create index for faster queries
-CREATE INDEX idx_master_data_symbol ON master_data(symbol);
-CREATE INDEX idx_master_data_generated_at ON master_data(generated_at DESC);
-                                    """, language="sql")
-                            else:
-                                st.error(f"❌ Failed to save master data: {error_msg}")
                     except Exception as e:
-                        st.error(f"❌ Error saving master data: {str(e)}")
+                        st.error(f"❌ Failed to save master data: {e}")
+
+    with tab5:
+        st.subheader("Raw Data Tools – Macro Environment & Per-Instrument")
+        st.write("""
+        **Goal**: Fetch non-price data (macro news, company-specific news, insider sentiment, and fundamentals)
+        directly from free/vendor APIs (Alpha Vantage, OpenAI-powered tools, Google News, Reddit/Finnhub local data)
+        **without** going through Supabase.
+        """)
+
+        mode = st.radio(
+            "Select data focus",
+            ["Global Macro Environment", "Per-Instrument News & Fundamentals"],
+            horizontal=True,
+        )
+
+        # Common symbol list for instrument mode
+        symbols = get_watchlist_symbols()
+
+        if mode == "Global Macro Environment":
+            st.markdown("##### Global / Macro News Snapshot")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                curr_date = st.date_input(
+                    "Current date",
+                    value=datetime.utcnow().date(),
+                    key="raw_macro_curr_date",
+                    help="Used as the reference date for global news lookback.",
+                )
+            with col2:
+                look_back_days = st.number_input(
+                    "Look back (days)",
+                    min_value=1,
+                    max_value=30,
+                    value=7,
+                    step=1,
+                    key="raw_macro_lookback",
+                )
+            with col3:
+                limit = st.number_input(
+                    "Max articles",
+                    min_value=1,
+                    max_value=20,
+                    value=10,
+                    step=1,
+                    key="raw_macro_limit",
+                )
+
+            if st.button("🌍 Fetch Global Macro News", type="primary", key="btn_raw_macro"):
+                curr_date_str = curr_date.strftime("%Y-%m-%d")
+                try:
+                    with st.spinner("Fetching global macro news via configured news vendors..."):
+                        # Route directly through the vendor interface (OpenAI, Google, local Reddit/Finnhub, etc.)
+                        macro_news = route_to_vendor(
+                            "get_global_news",
+                            curr_date_str,
+                            int(look_back_days),
+                            int(limit),
+                        )
+                    if macro_news:
+                        st.markdown("###### Global Macro – Groq Summary")
+                        summary = _summarize_with_groq(
+                            macro_news,
+                            f"Global macro news (last {int(look_back_days)} days, max {int(limit)} articles)",
+                        )
+                        st.markdown(summary)
+
+                        with st.expander("Raw vendor output"):
+                            st.code(
+                                macro_news if isinstance(macro_news, str) else str(macro_news),
+                                language="json",
+                            )
+                    else:
+                        st.info("No global news returned for the selected window.")
+                except Exception as e:
+                    st.error(f"Error fetching global news: {e}")
+
+        else:
+            st.markdown("##### Per-Instrument Non-Financial Data")
+            if not symbols:
+                st.warning("No symbols in watchlist – configure `WATCHLIST_STOCKS` to use this tool.")
+            else:
+                col_sym, col_sd, col_ed = st.columns(3)
+                with col_sym:
+                    ticker = st.selectbox(
+                        "Select symbol",
+                        symbols,
+                        key="raw_instr_symbol",
+                    )
+                with col_sd:
+                    start_date = st.date_input(
+                        "Start date",
+                        value=datetime.utcnow().date() - timedelta(days=7),
+                        key="raw_instr_start",
+                    )
+                with col_ed:
+                    end_date = st.date_input(
+                        "End date",
+                        value=datetime.utcnow().date(),
+                        key="raw_instr_end",
+                    )
+
+                curr_date_str = end_date.strftime("%Y-%m-%d")
+                start_str = start_date.strftime("%Y-%m-%d")
+                end_str = end_date.strftime("%Y-%m-%d")
+
+                st.markdown("###### Choose raw data sources")
+                col_a, col_b, col_c = st.columns(3)
+                with col_a:
+                    use_company_news = st.checkbox("Company News / Social", value=True, key="raw_use_news")
+                with col_b:
+                    use_insider = st.checkbox("Insider Sentiment", value=True, key="raw_use_insider")
+                with col_c:
+                    use_fundamentals = st.checkbox("Fundamentals Snapshot", value=True, key="raw_use_fund")
+
+                if st.button("🔎 Fetch Instrument Data (Raw Vendor Output)", type="primary", key="btn_raw_instr"):
+                    with st.spinner(f"Fetching non-financial data for {ticker}..."):
+                        outputs = []
+
+                        # 1) Company / social/news – may hit Alpha Vantage, OpenAI, Google, or local (Reddit/Finnhub)
+                        if use_company_news:
+                            try:
+                                news_text = route_to_vendor(
+                                    "get_news",
+                                    ticker,
+                                    start_str,
+                                    end_str,
+                                )
+                                if news_text:
+                                    outputs.append(("Company / Social News", news_text))
+                            except Exception as e:
+                                # If vendor fails, just mark as unavailable
+                                st.info(f"Company/news feed not available for {ticker}: {e}")
+
+                        # 2) Insider sentiment – local vendor (e.g., Finnhub data cache), routed via interface
+                        if use_insider:
+                            try:
+                                insider_text = route_to_vendor(
+                                    "get_insider_sentiment",
+                                    ticker,
+                                    curr_date_str,
+                                )
+                                if insider_text:
+                                    outputs.append(("Insider Sentiment", insider_text))
+                            except Exception as e:
+                                st.info(f"Insider sentiment not available for {ticker}: {e}")
+
+                        # 3) Fundamentals – Alpha Vantage / OpenAI fundamental tools via interface routing
+                        if use_fundamentals:
+                            try:
+                                fundamentals_text = route_to_vendor(
+                                    "get_fundamentals",
+                                    ticker,
+                                    curr_date_str,
+                                )
+                                if fundamentals_text:
+                                    outputs.append(("Fundamentals Snapshot", fundamentals_text))
+                            except Exception as e:
+                                st.info(f"Fundamentals feed not available for {ticker}: {e}")
+
+                    if outputs:
+                        for section_title, text_value in outputs:
+                            with st.expander(section_title, expanded=False):
+                                # Show Groq summary first
+                                summary_title = f"{section_title} for {ticker}"
+                                summary = _summarize_with_groq(
+                                    text_value if isinstance(text_value, str) else str(text_value),
+                                    summary_title,
+                                )
+                                st.markdown("**Groq Summary**")
+                                st.markdown(summary)
+
+                                # Raw vendor data in a nested expander
+                                with st.expander("Raw vendor output"):
+                                    st.code(
+                                        text_value if isinstance(text_value, str) else str(text_value),
+                                        language="json",
+                                    )
+                    else:
+                        st.info("No raw data returned from the selected vendors for this symbol / date range.")
     
     with tab2:
         st.subheader("AI Document Analysis")
