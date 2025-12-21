@@ -83,7 +83,8 @@ st.markdown("""
     /* Main Layout */
     .main { 
         padding: 2rem; 
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        background: #ffffff;
+        color: #000000;
         min-height: 100vh;
     }
     
@@ -101,7 +102,7 @@ st.markdown("""
         padding: 1.5rem;
         margin: 1rem 0;
         box-shadow: 0 8px 32px rgba(0,0,0,0.1);
-        border: 1px solid rgba(255, 255, 255, 0.2);
+        border: 1px solid rgba(0, 0, 0, 0.1);
     }
     
     /* Feature Cards */
@@ -111,7 +112,7 @@ st.markdown("""
         padding: 2rem;
         margin: 1.5rem 0;
         box-shadow: 0 10px 30px rgba(0,0,0,0.1);
-        border: 1px solid rgba(255, 255, 255, 0.3);
+        border: 1px solid rgba(0, 0, 0, 0.1);
         backdrop-filter: blur(10px);
         transition: all 0.3s ease;
         position: relative;
@@ -188,7 +189,7 @@ st.markdown("""
         border-radius: 20px;
         padding: 1.5rem;
         margin: 1.5rem 0;
-        border: 1px solid rgba(255, 255, 255, 0.3);
+        border: 1px solid rgba(0, 0, 0, 0.1);
         box-shadow: 0 8px 32px rgba(0,0,0,0.1);
     }
     
@@ -232,7 +233,7 @@ st.markdown("""
     
     /* Tabs */
     .stTabs [data-baseweb="tab-list"] {
-        background: rgba(255, 255, 255, 0.1);
+        background: rgba(0, 0, 0, 0.05);
         border-radius: 15px;
         padding: 0.5rem;
         backdrop-filter: blur(10px);
@@ -852,7 +853,7 @@ def phase1_foundation_data():
         {"Symbol": symbol, "Company": name} 
         for symbol, name in WATCHLIST_STOCKS.items()
     ])
-    st.dataframe(watchlist_df, width='stretch')
+    st.dataframe(watchlist_df, use_container_width=True)
     st.markdown('</div>', unsafe_allow_html=True)
     
     # Data ingestion
@@ -861,7 +862,7 @@ def phase1_foundation_data():
     col1, col2 = st.columns(2)
     
     with col1:
-        if st.button("Ingest All Historical Daily Data (Oct 1, 2023 → Now)", width='stretch', key="ingest_all_data"):
+        if st.button("Ingest All Historical Daily Data (Oct 1, 2023 → Now)",use_container_width=True, key="ingest_all_data"):
             pipeline = DataIngestionPipeline()
             
             # Create progress tracking
@@ -937,7 +938,7 @@ def phase1_foundation_data():
                 {"Symbol": symbol, "Status": "✅ Success" if success else "⚠️ Issues"}
                 for symbol, success in results.items()
             ])
-            st.dataframe(results_df, width='stretch')
+            st.dataframe(results_df, use_container_width=True)
             
             # Clear progress indicators
             progress_bar.empty()
@@ -945,7 +946,7 @@ def phase1_foundation_data():
 
     # 5-minute intraday ingestion (Oct 1, 2023 - Oct 31, 2025) with resume capability
     with col1:
-        if st.button("Ingest All Historical 5-min Data (Oct 1, 2023 → Now)", width='stretch', key="ingest_all_5min"):
+        if st.button("Ingest All Historical 5-min Data (Oct 1, 2023 → Now)", use_container_width=True, key="ingest_all_5min"):
             pipeline = DataIngestionPipeline()
             progress_bar = st.progress(0)
             status_text = st.empty()
@@ -999,14 +1000,14 @@ def phase1_foundation_data():
                 {"Symbol": symbol, "Status": "✅ Success" if success else "⚠️ Issues"}
                 for symbol, success in results_5min.items()
             ])
-            st.dataframe(results_df, width='stretch')
+            st.dataframe(results_df, use_container_width=True)
 
             progress_bar.empty()
             status_text.empty()
 
     # New: 1-minute intraday ingestion (Aug-Oct 2025)
     with col1:
-        if st.button("Ingest 1-min Data (Aug 2025 → Now)", width='stretch', key="ingest_all_1min"):
+        if st.button("Ingest 1-min Data (Aug 2025 → Now)", use_container_width=True, key="ingest_all_1min"):
             pipeline = DataIngestionPipeline()
             progress_bar = st.progress(0)
             status_text = st.empty()
@@ -1061,13 +1062,13 @@ def phase1_foundation_data():
                 {"Symbol": symbol, "Status": "✅ Success" if success else "⚠️ Issues"}
                 for symbol, success in results_1min.items()
             ])
-            st.dataframe(results_df, width='stretch')
+            st.dataframe(results_df, use_container_width=True)
 
             progress_bar.empty()
             status_text.empty()
     
     with col2:
-        if st.button("Check Data Status", width='stretch', key="main_data_status"):
+        if st.button("Check Data Status", use_container_width=True, key="main_data_status"):
             sb = get_supabase()
             if sb:
                 # Supabase path: compute counts per symbol from market_data
@@ -1087,7 +1088,7 @@ def phase1_foundation_data():
                         "Completion %": f"{min(100, (count/1260)*100):.1f}%"  # 5 years = 1260 trading days
                     })
                 status_df = pd.DataFrame(rows)
-                st.dataframe(status_df, width='stretch')
+                st.dataframe(status_df, use_container_width=True)
 
                 # Also show 5-min data counts if table exists
                 rows_5min = []
@@ -1112,7 +1113,7 @@ def phase1_foundation_data():
                     })
                 status_df_5min = pd.DataFrame(rows_5min)
                 st.subheader("5-minute data status")
-                st.dataframe(status_df_5min, width='stretch')
+                st.dataframe(status_df_5min, use_container_width=True)
 
                 # Also show 1-min data counts if table exists
                 rows_1min = []
@@ -1137,7 +1138,7 @@ def phase1_foundation_data():
                     })
                 status_df_1min = pd.DataFrame(rows_1min)
                 st.subheader("1-minute data status")
-                st.dataframe(status_df_1min, width='stretch')
+                st.dataframe(status_df_1min, use_container_width=True)
             else:
                 pipeline = DataIngestionPipeline()
                 status = pipeline.get_data_completion_status()
@@ -1151,7 +1152,7 @@ def phase1_foundation_data():
                     }
                     for symbol, info in status.items()
                 ])
-                st.dataframe(status_df, width='stretch')
+                st.dataframe(status_df, use_container_width=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
     # Data coverage guardrail & feature lab
@@ -1249,7 +1250,7 @@ def phase1_foundation_data():
     coverage_rows = st.session_state.get("coverage_rows")
     if coverage_rows:
         coverage_df = pd.DataFrame(coverage_rows)
-        st.dataframe(coverage_df, width='stretch', hide_index=True)
+        st.dataframe(coverage_df, use_container_width=True, hide_index=True)
         statuses = coverage_df["status"].value_counts().to_dict()
         st.caption(f"Status summary: {statuses}")
 
@@ -1257,7 +1258,7 @@ def phase1_foundation_data():
     if backfill_logs:
         log_df = pd.DataFrame(backfill_logs)
         st.markdown("#### Backfill Activity")
-        st.dataframe(log_df, width='stretch', hide_index=True)
+        st.dataframe(log_df, use_container_width=True, hide_index=True)
 
     st.markdown("---")
     st.markdown("#### QUANTUMTRADER v0.1 Prompt")
@@ -1616,7 +1617,7 @@ def phase1_foundation_data():
     if quantum_result:
         st.success(quantum_result["summary"])
         metrics_df = pd.DataFrame([quantum_result["metrics"]])
-        st.dataframe(metrics_df, width='stretch', hide_index=True)
+        st.dataframe(metrics_df, use_container_width=True, hide_index=True)
         st.markdown("###### QUANTUMTRADER Prompt Payload")
         st.code(quantum_result["prompt"], language="markdown")
         
@@ -1731,7 +1732,7 @@ def phase1_foundation_data():
             
             cond_df = pd.DataFrame(cond_rows)
             # Streamlit's dataframe API does not support hide_columns; drop display-only columns instead.
-            st.dataframe(cond_df.drop(columns=["Details"], errors="ignore"), width='stretch', hide_index=True)
+            st.dataframe(cond_df.drop(columns=["Details"], errors="ignore"), use_container_width=True, hide_index=True)
             
             # Risk Management Overlay
             st.markdown("#### Risk Management Overlay:")
@@ -2115,7 +2116,7 @@ def phase2_master_data_ai():
                     for col in df_breakdown.columns:
                         if df_breakdown[col].dtype == 'object':
                             df_breakdown[col] = df_breakdown[col].astype(str)
-                    st.dataframe(df_breakdown, width='stretch', hide_index=True)
+                    st.dataframe(df_breakdown, use_container_width=True, hide_index=True)
                     
                     # Summary statistics
                     st.markdown("### 📊 Summary Statistics:")
@@ -3046,7 +3047,7 @@ def phase2_master_data_ai():
                 for col in insights_df.columns:
                     if insights_df[col].dtype == 'object':
                         insights_df[col] = insights_df[col].astype(str)
-                st.dataframe(insights_df, width='stretch')
+                st.dataframe(insights_df, use_container_width=True)
                 
                 # Sentiment distribution
                 st.subheader("Sentiment Distribution")
@@ -3387,7 +3388,7 @@ def phase3_trading_engine_core():
         
         col1, col2 = st.columns([3, 1])
         with col1:
-            if st.button("🚀 Run Volume Screening", type="primary", key="run_phase1_screening", width='stretch'):
+            if st.button("🚀 Run Volume Screening", type="primary", key="run_phase1_screening", use_container_width=True):
                 with st.spinner("Screening watchlist for volume spikes..."):
                     screening_df = st.session_state.volume_screener.screen_watchlist(symbols)
                     
@@ -3398,7 +3399,7 @@ def phase3_trading_engine_core():
                     st.success(f"✅ Screening complete! Found {len(screening_df[screening_df['Pass'] == '✅'])} candidates")
                     
                     # Display results
-                    st.dataframe(screening_df, width='stretch', height=400)
+                    st.dataframe(screening_df, use_container_width=True, height=400)
                     
                     # Show passed symbols
                     passed_symbols = screening_df[screening_df['Pass'] == '✅']['Symbol'].tolist()
@@ -3519,7 +3520,7 @@ def phase3_trading_engine_core():
         
         col1, col2 = st.columns([3, 1])
         with col1:
-            if st.button("🔥 Run 7-Stage Fire Test", type="primary", key="run_phase2_firetest", width='stretch'):
+            if st.button("🔥 Run 7-Stage Fire Test", type="primary", key="run_phase2_firetest", use_container_width=True):
                 with st.spinner(f"Running comprehensive analysis for {selected_symbol}..."):
                     fire_result = st.session_state.fire_tester.run_fire_test(selected_symbol)
                     
@@ -3554,7 +3555,7 @@ def phase3_trading_engine_core():
                             })
                         
                         stages_df = pd.DataFrame(stages_data)
-                        st.dataframe(stages_df, width='stretch')
+                        st.dataframe(stages_df, use_container_width=True)
                         
                         # Visual stage status
                         st.markdown("#### 📈 Stage Performance")
@@ -4140,7 +4141,7 @@ def phase4_session_management_execution():
                 st.warning("⚠️ No active session. Create a new session to start trading.")
         
         with col2:
-            if st.button("🆕 New Session", key="new_session", width='stretch'):
+            if st.button("🆕 New Session", key="new_session", use_container_width=True):
                 session_name = st.text_input("Session Name", value=f"Session {datetime.now().strftime('%Y-%m-%d %H:%M')}", key="session_name_input")
                 notes = st.text_area("Notes (optional)", key="session_notes_input")
                 if st.button("✅ Create", key="create_session_confirm"):
@@ -4166,7 +4167,7 @@ def phase4_session_management_execution():
                         st.error(f"❌ Error creating session: {str(e)}")
             
             if active_session and active_session.get('id') != "default_session":
-                if st.button("🔒 Close Session", key="close_session", width='stretch'):
+                if st.button("🔒 Close Session", key="close_session", use_container_width=True):
                     st.session_state.show_close_session_form = True
                 
                 if st.session_state.get('show_close_session_form', False):
@@ -4212,7 +4213,7 @@ def phase4_session_management_execution():
                 }
                 for s in sessions
             ])
-            st.dataframe(sessions_df, width='stretch')
+            st.dataframe(sessions_df, use_container_width=True)
         else:
             st.info("No previous sessions found.")
         
@@ -4225,7 +4226,7 @@ def phase4_session_management_execution():
         # Refresh button
         col_refresh, col_info = st.columns([1, 3])
         with col_refresh:
-            if st.button("🔄 Refresh", key="refresh_trades", width='stretch'):
+            if st.button("🔄 Refresh", key="refresh_trades", use_container_width=True):
                 st.rerun()
         
         with col_info:
@@ -4300,7 +4301,7 @@ def phase4_session_management_execution():
                         close_notes = st.text_input("Close Notes (optional)", key=f"close_notes_{symbol}")
                     
                     with col_close2:
-                        if st.button(f"✅ Close {symbol}", key=f"close_{symbol}", type="primary", width='stretch'):
+                        if st.button(f"✅ Close {symbol}", key=f"close_{symbol}", type="primary", use_container_width=True):
                             try:
                                 result = trade_service.close_trade(symbol, exit_price, close_quantity, close_notes)
                                 if result:
@@ -4404,7 +4405,7 @@ def phase4_session_management_execution():
         
         # Execute button
         st.markdown("---")
-        if st.button("⚡ Execute Trade", type="primary", key="execute_trade_button", width='stretch'):
+        if st.button("⚡ Execute Trade", type="primary", key="execute_trade_button", use_container_width=True):
             try:
                 # Validate inputs
                 if not symbol:
@@ -4486,7 +4487,7 @@ def phase4_session_management_execution():
             
             if history_data:
                 history_df = pd.DataFrame(history_data)
-                st.dataframe(history_df, width='stretch', height=400)
+                st.dataframe(history_df, use_container_width=True, height=400)
         else:
             st.info("📭 No trade history found.")
         
@@ -4561,7 +4562,7 @@ def phase5_results_analysis():
                     "Exit Date": (t.get('exit_date') or '')[:19]
                 })
             st.markdown("#### Recent Trades")
-            st.dataframe(pd.DataFrame(table), width='stretch', height=360)
+            st.dataframe(pd.DataFrame(table), use_container_width=True, height=360)
         else:
             st.info("No trades recorded yet.")
         st.markdown('</div>', unsafe_allow_html=True)
@@ -4661,7 +4662,7 @@ def phase5_results_analysis():
             fig = go.Figure()
             fig.add_trace(go.Scatter(x=df["date"], y=df["equity"], mode="lines", name="Equity"))
             fig.update_layout(title="Equity Curve (Realized)", template='plotly_white', height=360)
-            st.plotly_chart(fig, width='stretch')
+            st.plotly_chart(fig, use_container_width=True)
 
             # Per-symbol performance
             perf_rows = []
@@ -4687,7 +4688,7 @@ def phase5_results_analysis():
                 })
             if perf_rows:
                 st.markdown("#### Per-Symbol Performance")
-                st.dataframe(pd.DataFrame(perf_rows).sort_values(["Win Rate %", "Realized P&L"], ascending=[False, False]), width='stretch', height=360)
+                st.dataframe(pd.DataFrame(perf_rows).sort_values(["Win Rate %", "Realized P&L"], ascending=[False, False]), use_container_width=True, height=360)
             else:
                 st.info("No closed trades to summarize.")
         st.markdown('</div>', unsafe_allow_html=True)
@@ -4733,7 +4734,7 @@ def phase5_results_analysis():
 
         if suggestions:
             st.markdown("#### Suggested Adjustments")
-            st.dataframe(pd.DataFrame(suggestions), width='stretch')
+            st.dataframe(pd.DataFrame(suggestions), use_container_width=True)
 
             if st.button("💾 Apply Suggestions (log)", type="primary"):
                 try:
@@ -4769,24 +4770,24 @@ def main():
     st.markdown('<div class="phase-nav">', unsafe_allow_html=True)
     row1 = st.columns(3)
     with row1[0]:
-        if st.button(phases[0], width='stretch', key="phase_1"):
+        if st.button(phases[0], use_container_width=True, key="phase_1"):
             st.session_state.active_phase = phases[0]
     with row1[1]:
-        if st.button(phases[1], width='stretch', key="phase_2"):
+        if st.button(phases[1], use_container_width=True, key="phase_2"):
             st.session_state.active_phase = phases[1]
     with row1[2]:
-        if st.button(phases[2], width='stretch', key="phase_3"):
+        if st.button(phases[2], use_container_width=True, key="phase_3"):
             st.session_state.active_phase = phases[2]
     
     row2 = st.columns(3)
     with row2[0]:
-        if st.button(phases[3], width='stretch', key="phase_4"):
+        if st.button(phases[3], use_container_width=True, key="phase_4"):
             st.session_state.active_phase = phases[3]
     with row2[1]:
-        if st.button(phases[4], width='stretch', key="phase_5"):
+        if st.button(phases[4], use_container_width=True, key="phase_5"):
             st.session_state.active_phase = phases[4]
     with row2[2]:
-        if st.button(phases[5], width='stretch', key="phase_6"):
+        if st.button(phases[5], use_container_width=True, key="phase_6"):
             st.session_state.active_phase = phases[5]
     st.markdown('</div>', unsafe_allow_html=True)
     
@@ -4812,7 +4813,7 @@ def main():
         st.markdown("### Quick Stock Analysis")
         stock_input = st.text_input("Enter Company Name", help="e.g., APPLE, TCS")
         
-        if st.button("Analyze", width='stretch', key="legacy_analyze"):
+        if st.button("Analyze", use_container_width=True, key="legacy_analyze"):
             if not stock_input:
                 st.error("Please enter a stock name")
                 return
@@ -4833,7 +4834,7 @@ def main():
                             st.markdown(f'<div class="metric-card"><div class="metric-value">{info.get("recommendationKey", "N/A").title()}</div><div class="metric-label">Recommendation</div></div>', unsafe_allow_html=True)
                         
                         st.markdown('<div class="chart-container">', unsafe_allow_html=True)
-                        st.plotly_chart(create_price_chart(hist, symbol), width='stretch')
+                        st.plotly_chart(create_price_chart(hist, symbol), use_container_width=True)
                         st.markdown('</div>', unsafe_allow_html=True)
                         
                         if 'longBusinessSummary' in info:
@@ -4996,7 +4997,7 @@ def phase6_advanced_features():
                             "Entry": t.get('entry_date','')[:19],
                             "Exit": (t.get('exit_date') or '')[:19]
                         })
-                    st.dataframe(pd.DataFrame(rows), width='stretch', height=360)
+                    st.dataframe(pd.DataFrame(rows), use_container_width=True, height=360)
                 else:
                     st.info("No matching trades.")
 
@@ -5021,7 +5022,7 @@ def phase6_advanced_features():
                             "Uploaded": (d.get("uploaded_at") or d.get("created_at") or "")[:19]
                         })
                     if results:
-                        st.dataframe(pd.DataFrame(results), width='stretch', height=360)
+                        st.dataframe(pd.DataFrame(results), use_container_width=True, height=360)
                     else:
                         st.info("No matching documents.")
                 doc_manager.close()
@@ -5058,7 +5059,7 @@ def phase6_advanced_features():
                 symbols = get_watchlist_symbols()
                 df = cached_price_snapshot(symbols)
                 st.success(f"Prefetched {len(df)} prices (cached 5 minutes)")
-                st.dataframe(df, width='stretch', height=300)
+                st.dataframe(df, use_container_width=True, height=300)
 
         st.markdown("#### Tips")
         st.write("- Use cached snapshots for watchlist.\n- Reduce table sizes with compact mode.\n- Close heavy tabs when not in use.")
