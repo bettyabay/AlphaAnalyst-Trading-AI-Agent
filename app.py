@@ -1152,6 +1152,51 @@ def phase1_foundation_data():
                     for symbol, info in status.items()
                 ])
                 st.dataframe(status_df, width='stretch')
+    
+    st.markdown("---")
+    with st.expander("🛠️ Manual Gap Fixer (Advanced)", expanded=False):
+        st.write("Manually ingest a specific date range to fix gaps in the middle of your data.")
+        
+        mf_col1, mf_col2, mf_col3, mf_col4 = st.columns(4)
+        with mf_col1:
+            fix_symbol = st.selectbox("Symbol", options=list(WATCHLIST_STOCKS.keys()), key="fix_symbol")
+        with mf_col2:
+            fix_interval = st.selectbox("Interval", ["daily", "5min", "1min"], key="fix_interval")
+        with mf_col3:
+            fix_start = st.date_input("Start Date", value=datetime(2023, 6, 1), key="fix_start")
+        with mf_col4:
+            fix_end = st.date_input("End Date", value=datetime(2023, 6, 30), key="fix_end")
+            
+        if st.button("Run Targeted Ingestion", key="fix_ingest_btn"):
+            st.info(f"Starting manual ingestion for {fix_symbol} ({fix_interval}) from {fix_start} to {fix_end}...")
+            
+            # Convert dates to datetime
+            start_dt = datetime.combine(fix_start, datetime.min.time())
+            # For end date, we want the end of that day
+            end_dt = datetime.combine(fix_end, datetime.max.time().replace(microsecond=0))
+            
+            pipeline = DataIngestionPipeline()
+            try:
+                # Use resume_from_latest=False to force check this specific range
+                # regardless of what data exists after it.
+                # The pipeline handles duplicate detection automatically.
+                success = pipeline.ingest_historical_data(
+                    symbol=fix_symbol,
+                    interval=fix_interval,
+                    start_date=start_dt,
+                    end_date=end_dt,
+                    resume_from_latest=False
+                )
+                
+                if success:
+                    st.success(f"✅ Successfully ingested data for {fix_symbol}")
+                else:
+                    st.error(f"❌ Ingestion failed for {fix_symbol} (check logs)")
+            except Exception as e:
+                st.error(f"An error occurred: {str(e)}")
+            finally:
+                pipeline.close()
+
     st.markdown('</div>', unsafe_allow_html=True)
 
     # Data coverage guardrail & feature lab
