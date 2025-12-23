@@ -223,6 +223,38 @@ class FeatureLab:
             raise ValueError("Symbol is required")
 
         m1 = self._fetch_df(symbol, "1min", lookback_days=3)
+        
+        # Freshness check: If data is missing or older than 2 hours (approx), try to ingest
+        needs_ingestion = False
+        if m1.empty:
+            needs_ingestion = True
+        else:
+            latest_ts = m1.index[-1]
+            # Convert to UTC if tz-aware, else assume UTC
+            if latest_ts.tzinfo is None:
+                latest_ts = latest_ts.replace(tzinfo=timezone.utc)
+            
+            now_utc = datetime.now(timezone.utc)
+            # If latest data is older than 2 hours (during trading week), trigger ingestion
+            # Simple check: just check age.
+            age = now_utc - latest_ts
+            if age > pd.Timedelta(hours=2):
+                 needs_ingestion = True
+        
+        if needs_ingestion:
+             print(f"⚠️ Data for {symbol} is missing or stale. Triggering auto-ingestion...")
+             try:
+                 from tradingagents.dataflows.ingestion_pipeline import DataIngestionPipeline
+                 pipeline = DataIngestionPipeline()
+                 # Ingest last 5 days to be safe and cover recent gaps
+                 pipeline.ingest_historical_data(symbol, days_back=5, interval="1min", resume_from_latest=True)
+                 pipeline.ingest_historical_data(symbol, days_back=7, interval="5min", resume_from_latest=True)
+                 
+                 # Re-fetch after ingestion
+                 m1 = self._fetch_df(symbol, "1min", lookback_days=3)
+             except Exception as e:
+                 print(f"❌ Auto-ingestion failed: {e}")
+
         if m1.empty:
             # Check what data actually exists
             m1_diag = self._check_data_availability(symbol, "1min")

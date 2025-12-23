@@ -226,6 +226,8 @@ class DataIngestionPipeline:
                 chunk_count = 0
                 # Use UTC to match database timezone
                 now = datetime.utcnow()
+                last_timestamp_written = None
+
                 while chunk_start <= end_date:
                     chunk_count += 1
                     chunk_end = min(chunk_start + chunk_delta - timedelta(days=1), end_date)
@@ -496,7 +498,8 @@ class DataIngestionPipeline:
                         chunk_start = chunk_end + timedelta(days=1)
 
                 if total_inserted > 0:
-                    print(f"✅ Completed {symbol}: Inserted {total_inserted} new records, skipped {total_skipped} duplicates")
+                    last_ts_msg = f" (Last timestamp: {last_timestamp_written})" if last_timestamp_written else ""
+                    print(f"✅ Completed {symbol}: Inserted {total_inserted} new records, skipped {total_skipped} duplicates{last_ts_msg}")
                 elif total_skipped > 0:
                     print(f"ℹ️ Completed {symbol}: All {total_skipped} records were duplicates or already exist")
                 else:
