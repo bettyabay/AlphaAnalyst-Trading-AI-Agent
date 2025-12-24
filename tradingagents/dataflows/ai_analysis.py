@@ -84,16 +84,97 @@ class AIResearchAnalyzer:
     def _analyze_news_sentiment(self, symbol: str) -> Dict:
         """Analyze news sentiment for the symbol"""
         try:
-            # This would integrate with news APIs in a real implementation
-            # For now, return a placeholder structure
+            # Integrate with AlphaVantage for real news sentiment
+            from .alpha_vantage_news import get_news
+            import json
+            from datetime import timedelta
+            
+            # Calculate date range (last 7 days for relevant news)
+            end_date = datetime.now()
+            start_date = end_date - timedelta(days=7)
+            
+            # Fetch news from AlphaVantage
+            news_response = get_news(symbol, start_date, end_date)
+            
+            # Parse response if needed
+            if isinstance(news_response, str):
+                try:
+                    data = json.loads(news_response)
+                except json.JSONDecodeError:
+                    return {"error": f"Failed to parse news response: {news_response[:100]}"}
+            else:
+                data = news_response
+                
+            # Handle API errors or empty data
+            if "feed" not in data:
+                # Fallback to neutral if no data, but preserve error info if present
+                error_msg = data.get("Information", data.get("Note", "No news feed returned"))
+                if "limit" in str(error_msg).lower():
+                     return {"error": f"API Limit: {error_msg}"}
+                
+                return {
+                    "sentiment_score": 0.0,
+                    "news_count": 0,
+                    "positive_news": 0,
+                    "negative_news": 0,
+                    "neutral_news": 0,
+                    "key_headlines": []
+                }
+
+            feed = data["feed"]
+            news_count = len(feed)
+            
+            if news_count == 0:
+                 return {
+                    "sentiment_score": 0.0,
+                    "news_count": 0,
+                    "positive_news": 0,
+                    "negative_news": 0,
+                    "neutral_news": 0,
+                    "key_headlines": []
+                }
+
+            # Calculate sentiment metrics
+            total_sentiment = 0.0
+            positive = 0
+            negative = 0
+            neutral = 0
+            headlines = []
+            
+            for article in feed:
+                # AlphaVantage gives "overall_sentiment_score" (-1 to 1)
+                sentiment_score = float(article.get("overall_sentiment_score", 0))
+                total_sentiment += sentiment_score
+                
+                # Count sentiment categories (0.15 threshold)
+                if sentiment_score > 0.15:
+                    positive += 1
+                elif sentiment_score < -0.15:
+                    negative += 1
+                else:
+                    neutral += 1
+                    
+                # Collect top 5 headlines
+                if len(headlines) < 5:
+                    headlines.append({
+                        "title": article.get("title", ""),
+                        "url": article.get("url", ""),
+                        "sentiment": article.get("overall_sentiment_label", "Neutral"),
+                        "score": sentiment_score,
+                        "time": article.get("time_published", "")
+                    })
+            
+            avg_sentiment = total_sentiment / news_count
+            
             return {
-                "sentiment_score": 0.0,  # -1 to 1 scale
-                "news_count": 0,
-                "positive_news": 0,
-                "negative_news": 0,
-                "neutral_news": 0,
-                "key_headlines": []
+                "sentiment_score": round(avg_sentiment, 2),
+                "news_count": news_count,
+                "positive_news": positive,
+                "negative_news": negative,
+                "neutral_news": neutral,
+                "key_headlines": headlines
             }
+            
         except Exception as e:
             return {"error": f"News analysis error: {str(e)}"}
     

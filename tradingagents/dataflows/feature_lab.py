@@ -314,7 +314,8 @@ class FeatureLab:
             raise ValueError("Need at least 6 consecutive 5-minute bars (ingest data from Oct 1, 2023 onward).")
 
         # Fetch daily data for trend and context
-        daily = self._fetch_df(symbol, "1d", lookback_days=60)
+        # Increased to 365 days to ensure SMA200 has enough data
+        daily = self._fetch_df(symbol, "1d", lookback_days=365)
         if daily.empty:
             # Daily data is optional but recommended - warn but continue
             print(f"Warning: No daily data available for {symbol}. Daily context will be missing.")
