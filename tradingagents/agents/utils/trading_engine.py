@@ -19,7 +19,7 @@ class VolumeScreeningEngine:
     """Phase 1 Volume Screening Engine"""
     
     def __init__(self):
-        self.min_volume_spike = 1.3  # 130% of average volume (adjusted for more realistic screening)
+        self.min_volume_spike = 0.75  # Lowered from 1.3 to 0.75 to allow more candidates during testing
         self.min_liquidity = 1_000_000  # Minimum average daily volume
         self.rsi_min = 30
         self.rsi_max = 70
