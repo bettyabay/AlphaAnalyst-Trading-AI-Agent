@@ -13,4 +13,5 @@ POLYGON_API_KEY = "your_polygon_api_key_here"
 # Optional: Other API keys for future phases
 ALPACA_API_KEY = "your_alpaca_api_key_here"
 ALPACA_SECRET_KEY = "your_alpaca_secret_key_here"
+BARCHART_API_KEY = "your_barchart_api_key_here"
 OPENAI_API_KEY = "your_openai_api_key_here"

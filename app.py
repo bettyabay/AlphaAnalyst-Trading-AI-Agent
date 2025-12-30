@@ -852,6 +852,17 @@ def phase1_foundation_data():
     col_a, col_b, col_c = st.columns(3)
     # Financial Instruments dropdown
     with col_a:
+        sb = get_supabase()
+        def _read_df(file):
+            name = file.name.lower()
+            if name.endswith(".csv"):
+                return pd.read_csv(file)
+            elif name.endswith(".xls"):
+                return pd.read_excel(file, engine="xlrd")
+            elif name.endswith(".xlsx"):
+                return pd.read_excel(file, engine="openpyxl")
+            else:
+                return None
         categories = ["Commodities", "Indices", "Currencies", "Stocks", "Add..."]
         selected_category = st.selectbox(
             "Financial Instrument Category",
@@ -860,12 +871,55 @@ def phase1_foundation_data():
             key="select_financial_category"
         )
         if selected_category == "Add...":
-            st.info("Add Financial Instrument Category flow will be implemented next.")
+            with st.expander("Upload Instruments via Excel/CSV"):
+                st.write("Expected columns: symbol, name, sector (optional), exchange (optional)")
+                inst_file = st.file_uploader("Choose file", type=["csv", "xls", "xlsx"], key="upload_instruments_file")
+                if inst_file:
+                    df = _read_df(inst_file)
+                    if df is None or df.empty:
+                        st.error("Unable to read file or no rows found")
+                    else:
+                        required_cols = ["symbol", "name"]
+                        if not all(col in df.columns for col in required_cols):
+                            st.error(f"File must include: {', '.join(required_cols)}")
+                        else:
+                            df_preview = df[[c for c in df.columns if c in ["symbol", "name", "sector", "exchange"]]].copy()
+                            st.dataframe(df_preview, use_container_width=True)
+                            if st.button("Save to database", key="save_instruments_db"):
+                                if not sb:
+                                    st.error("Database not configured")
+                                else:
+                                    rows = []
+                                    for _, row in df.iterrows():
+                                        symbol = str(row["symbol"]).upper().strip()
+                                        if not symbol:
+                                            continue
+                                        rows.append({
+                                            "symbol": symbol,
+                                            "profile_text": f"{row.get('name', '')}",
+                                            "profile_data": {
+                                                "name": row.get("name", ""),
+                                                "sector": row.get("sector", ""),
+                                                "exchange": row.get("exchange", "")
+                                            },
+                                            "source": "excel_upload",
+                                            "generated_at": datetime.utcnow().isoformat(),
+                                            "analysis_timestamp": datetime.utcnow().isoformat()
+                                        })
+                                    try:
+                                        try:
+                                            sb.table("instrument_profiles").upsert(rows).execute()
+                                        except Exception:
+                                            sb.table("instrument_profiles").insert(rows).execute()
+                                        st.success(f"Saved {len(rows)} instruments")
+                                        st.session_state.custom_instruments = [r["symbol"] for r in rows]
+                                    except Exception as e:
+                                        st.error(f"Failed to save: {str(e)}")
         instruments_map = {
             "Commodities": ["GOLD", "Add..."],
             "Indices": ["S&P 500", "Add..."],
             "Currencies": ["EUR/USD", "Add..."],
-            "Stocks": [*WATCHLIST_STOCKS.keys(), "Add..."]
+            "Stocks": [*WATCHLIST_STOCKS.keys(), "Add..."] + (st.session_state.get("custom_instruments", []) or [])
         }
         current_instruments = instruments_map.get(selected_category, ["Add..."])
         selected_instrument_item = st.selectbox(
@@ -875,24 +929,57 @@ def phase1_foundation_data():
             key="select_financial_instrument_item"
         )
         if selected_instrument_item == "Add...":
-            st.info("Add Financial Instrument flow will be implemented next.")
+            with st.expander("Upload Additional Instruments via Excel/CSV"):
+                st.write("Expected columns: symbol, name, sector (optional), exchange (optional)")
+                inst_file2 = st.file_uploader("Choose file", type=["csv", "xls", "xlsx"], key="upload_instruments_file_2")
+                if inst_file2:
+                    df2 = _read_df(inst_file2)
+                    if df2 is None or df2.empty:
+                        st.error("Unable to read file or no rows found")
+                    else:
+                        required_cols = ["symbol", "name"]
+                        if not all(col in df2.columns for col in required_cols):
+                            st.error(f"File must include: {', '.join(required_cols)}")
+                        else:
+                            st.dataframe(df2[[c for c in df2.columns if c in ["symbol", "name", "sector", "exchange"]]], use_container_width=True)
+                            if st.button("Save instruments", key="save_instruments_btn_2"):
+                                new_syms = [str(s).upper().strip() for s in df2["symbol"].tolist()]
+                                st.session_state.custom_instruments = sorted(set((st.session_state.get("custom_instruments") or []) + new_syms))
+                                st.success(f"Added {len(new_syms)} instruments to selection")
     # Signal Provider dropdown
     with col_b:
         signal_provider_options = [
             "PipXpert",
             "Add..."
         ]
+        merged_providers = signal_provider_options + (st.session_state.get("signal_providers", []) or [])
         selected_provider = st.selectbox(
             "Signal Provider",
-            options=signal_provider_options,
+            options=merged_providers,
             index=0,
             key="select_signal_provider"
         )
         if selected_provider == "Add...":
-            st.info("Add Signal Provider flow will be implemented next.")
+            with st.expander("Upload Signal Providers via Excel/CSV"):
+                st.write("Expected columns: provider_name, description (optional)")
+                prov_file = st.file_uploader("Choose file", type=["csv", "xls", "xlsx"], key="upload_providers_file")
+                if prov_file:
+                    dfp = _read_df(prov_file)
+                    if dfp is None or dfp.empty:
+                        st.error("Unable to read file or no rows found")
+                    else:
+                        required_cols = ["provider_name"]
+                        if not all(col in dfp.columns for col in required_cols):
+                            st.error(f"File must include: {', '.join(required_cols)}")
+                        else:
+                            st.dataframe(dfp[[c for c in dfp.columns if c in ["provider_name", "description"]]], use_container_width=True)
+                            if st.button("Add providers to selection", key="save_providers_btn"):
+                                names = [str(x).strip() for x in dfp["provider_name"].tolist() if str(x).strip()]
+                                st.session_state.signal_providers = sorted(set((st.session_state.get("signal_providers") or []) + names))
+                                st.success(f"Added {len(names)} providers")
     # KPI Indicator dropdown
     with col_c:
-        kpi_options = ["ATR", "Volume", "VAMP", "EMA", "SMA", "Add..."]
+        kpi_options = ["ATR", "Volume", "VAMP", "EMA", "SMA", "Add..."] + (st.session_state.get("kpi_indicators", []) or [])
         selected_kpi = st.selectbox(
             "KPI Indicator",
             options=kpi_options,
@@ -900,7 +987,23 @@ def phase1_foundation_data():
             key="select_kpi"
         )
         if selected_kpi == "Add...":
-            st.info("Add KPI flow will be implemented next.")
+            with st.expander("Upload KPI Indicators via Excel/CSV"):
+                st.write("Expected columns: kpi_name")
+                kpi_file = st.file_uploader("Choose file", type=["csv", "xls", "xlsx"], key="upload_kpis_file")
+                if kpi_file:
+                    dfk = _read_df(kpi_file)
+                    if dfk is None or dfk.empty:
+                        st.error("Unable to read file or no rows found")
+                    else:
+                        required_cols = ["kpi_name"]
+                        if not all(col in dfk.columns for col in required_cols):
+                            st.error(f"File must include: {', '.join(required_cols)}")
+                        else:
+                            st.dataframe(dfk[[c for c in dfk.columns if c in ["kpi_name"]]], use_container_width=True)
+                            if st.button("Add KPIs to selection", key="save_kpis_btn"):
+                                names = [str(x).strip() for x in dfk["kpi_name"].tolist() if str(x).strip()]
+                                st.session_state.kpi_indicators = sorted(set((st.session_state.get("kpi_indicators") or []) + names))
+                                st.success(f"Added {len(names)} KPIs")
     st.markdown('</div>', unsafe_allow_html=True)
     
     # Data ingestion
