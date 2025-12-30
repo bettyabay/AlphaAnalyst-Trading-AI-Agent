@@ -846,14 +846,61 @@ def phase1_foundation_data():
     """Phase 1: Foundation & Data Infrastructure"""
     
     
-    # Watchlist display
+    # Selection UI (Financial Instruments, Signal Provider, KPI Indicator)
     st.markdown('<div class="feature-card">', unsafe_allow_html=True)
-    st.markdown("### Watchlist (19 High-Beta US Stocks)")
-    watchlist_df = pd.DataFrame([
-        {"Symbol": symbol, "Company": name} 
-        for symbol, name in WATCHLIST_STOCKS.items()
-    ])
-    st.dataframe(watchlist_df, use_container_width=True)
+    st.markdown("### Selection")
+    col_a, col_b, col_c = st.columns(3)
+    # Financial Instruments dropdown
+    with col_a:
+        categories = ["Commodities", "Indices", "Currencies", "Stocks", "Add..."]
+        selected_category = st.selectbox(
+            "Financial Instrument Category",
+            options=categories,
+            index=0,
+            key="select_financial_category"
+        )
+        if selected_category == "Add...":
+            st.info("Add Financial Instrument Category flow will be implemented next.")
+        instruments_map = {
+            "Commodities": ["GOLD", "Add..."],
+            "Indices": ["S&P 500", "Add..."],
+            "Currencies": ["EUR/USD", "Add..."],
+            "Stocks": [*WATCHLIST_STOCKS.keys(), "Add..."]
+        }
+        current_instruments = instruments_map.get(selected_category, ["Add..."])
+        selected_instrument_item = st.selectbox(
+            "Financial Instrument",
+            options=current_instruments,
+            index=0,
+            key="select_financial_instrument_item"
+        )
+        if selected_instrument_item == "Add...":
+            st.info("Add Financial Instrument flow will be implemented next.")
+    # Signal Provider dropdown
+    with col_b:
+        signal_provider_options = [
+            "PipXpert",
+            "Add..."
+        ]
+        selected_provider = st.selectbox(
+            "Signal Provider",
+            options=signal_provider_options,
+            index=0,
+            key="select_signal_provider"
+        )
+        if selected_provider == "Add...":
+            st.info("Add Signal Provider flow will be implemented next.")
+    # KPI Indicator dropdown
+    with col_c:
+        kpi_options = ["ATR", "Volume", "VAMP", "EMA", "SMA", "Add..."]
+        selected_kpi = st.selectbox(
+            "KPI Indicator",
+            options=kpi_options,
+            index=0,
+            key="select_kpi"
+        )
+        if selected_kpi == "Add...":
+            st.info("Add KPI flow will be implemented next.")
     st.markdown('</div>', unsafe_allow_html=True)
     
     # Data ingestion
