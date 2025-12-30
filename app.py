@@ -22,6 +22,9 @@ from phi.tools.googlesearch import GoogleSearch
 from tradingagents.database.config import get_supabase
 from tradingagents.dataflows.ingestion_pipeline import DataIngestionPipeline
 from tradingagents.dataflows.gold_ingestion import ingest_gold_data
+from tradingagents.dataflows.signal_provider_ingestion import ingest_signal_provider_data, validate_signal_provider_data
+from tradingagents.dataflows.kpi_calculator import calculate_kpi
+from tradingagents.dataflows.kpi_calculator import calculate_kpi
 from tradingagents.dataflows.document_manager import DocumentManager
 from tradingagents.config.watchlist import WATCHLIST_STOCKS, get_watchlist_symbols
 from tradingagents.dataflows.polygon_integration import PolygonDataClient
@@ -968,24 +971,162 @@ def phase1_foundation_data():
             index=0,
             key="select_signal_provider"
         )
-        if selected_provider == "Add...":
-            with st.expander("Upload Signal Providers via Excel/CSV"):
-                st.write("Expected columns: provider_name, description (optional)")
-                prov_file = st.file_uploader("Choose file", type=["csv", "xls", "xlsx"], key="upload_providers_file")
-                if prov_file:
-                    dfp = _read_df(prov_file)
-                    if dfp is None or dfp.empty:
-                        st.error("Unable to read file or no rows found")
-                    else:
-                        required_cols = ["provider_name"]
-                        if not all(col in dfp.columns for col in required_cols):
-                            st.error(f"File must include: {', '.join(required_cols)}")
-                        else:
-                            st.dataframe(dfp[[c for c in dfp.columns if c in ["provider_name", "description"]]], use_container_width=True)
-                            if st.button("Add providers to selection", key="save_providers_btn"):
-                                names = [str(x).strip() for x in dfp["provider_name"].tolist() if str(x).strip()]
-                                st.session_state.signal_providers = sorted(set((st.session_state.get("signal_providers") or []) + names))
-                                st.success(f"Added {len(names)} providers")
+        
+        # Show upload UI for PipXpert or when Add... is selected
+        if selected_provider == "PipXpert" or selected_provider == "Add...":
+            if selected_provider == "PipXpert":
+                with st.expander("PipXpert Signal Data"):
+                    st.info("Upload PipXpert signal data from Excel file.")
+                    provider_name = "PipXpert"
+                    symbol = st.text_input("Symbol/Currency Pair", value="", key="pipxpert_symbol", help="Enter the trading symbol or currency pair")
+                    
+                    # Date range selection (optional)
+                    col_date1, col_date2 = st.columns(2)
+                    with col_date1:
+                        start_date = st.date_input("Start Date (optional)", value=None, key="pipxpert_start_date")
+                    with col_date2:
+                        end_date = st.date_input("End Date (optional)", value=None, key="pipxpert_end_date")
+                    
+                    # Timezone (default GMT+4)
+                    timezone_offset = st.selectbox(
+                        "Timezone",
+                        options=["+04:00", "+00:00", "+05:00", "-05:00", "-08:00"],
+                        index=0,
+                        key="pipxpert_timezone",
+                        help="GMT+4 is standard"
+                    )
+                    
+                    signal_file = st.file_uploader("Upload Signal Data (Excel)", type=["xls", "xlsx"], key="pipxpert_upload")
+                    
+                    if signal_file:
+                        # Preview and validate
+                        try:
+                            df_preview = _read_df(signal_file)
+                            if df_preview is not None and not df_preview.empty:
+                                st.dataframe(df_preview.head(10), use_container_width=True)
+                                
+                                # Validate data
+                                if symbol:
+                                    validation = validate_signal_provider_data(
+                                        df_preview, 
+                                        provider_name, 
+                                        symbol, 
+                                        timezone_offset
+                                    )
+                                    
+                                    if validation["valid"]:
+                                        st.success("✓ Data validation passed")
+                                        if validation.get("warnings"):
+                                            for warning in validation["warnings"]:
+                                                st.warning(f"⚠ {warning}")
+                                        
+                                        # Show data summary
+                                        summary = validation.get("data_summary", {})
+                                        if summary:
+                                            st.info(f"**Summary:** {summary.get('total_rows', 0)} rows | "
+                                                   f"Actions: {summary.get('action_counts', {})} | "
+                                                   f"Date range: {summary.get('date_range', {}).get('start', 'N/A')} to {summary.get('date_range', {}).get('end', 'N/A')}")
+                                        
+                                        # Confirmation and submit button
+                                        if st.button("✅ Ingest Signal Data", key="ingest_pipxpert_btn", type="primary"):
+                                            result = ingest_signal_provider_data(
+                                                signal_file,
+                                                provider_name,
+                                                symbol,
+                                                timezone_offset
+                                            )
+                                            if result.get("success"):
+                                                st.success(result.get("message"))
+                                            else:
+                                                st.error(f"Failed: {result.get('message')}")
+                                    else:
+                                        st.error(f"Validation failed: {validation.get('message')}")
+                                        if validation.get("warnings"):
+                                            for warning in validation["warnings"]:
+                                                st.warning(f"⚠ {warning}")
+                                else:
+                                    st.warning("Please enter a symbol/currency pair")
+                        except Exception as e:
+                            st.error(f"Error reading file: {str(e)}")
+            
+            elif selected_provider == "Add...":
+                with st.expander("Add New Signal Provider"):
+                    st.write("Enter signal provider details and upload data file.")
+                    
+                    provider_name = st.text_input("Provider Name", key="new_provider_name", help="Enter the name of the signal provider")
+                    symbol = st.text_input("Symbol/Currency Pair", key="new_provider_symbol", help="Enter the trading symbol or currency pair")
+                    
+                    # Date range selection (optional)
+                    col_date1, col_date2 = st.columns(2)
+                    with col_date1:
+                        start_date = st.date_input("Start Date (optional)", value=None, key="new_provider_start_date")
+                    with col_date2:
+                        end_date = st.date_input("End Date (optional)", value=None, key="new_provider_end_date")
+                    
+                    # Timezone (default GMT+4)
+                    timezone_offset = st.selectbox(
+                        "Timezone",
+                        options=["+04:00", "+00:00", "+05:00", "-05:00", "-08:00"],
+                        index=0,
+                        key="new_provider_timezone",
+                        help="GMT+4 is standard"
+                    )
+                    
+                    signal_file = st.file_uploader("Upload Signal Data (Excel/CSV)", type=["xls", "xlsx", "csv"], key="new_provider_upload")
+                    
+                    if signal_file and provider_name and symbol:
+                        # Preview and validate
+                        try:
+                            df_preview = _read_df(signal_file)
+                            if df_preview is not None and not df_preview.empty:
+                                st.dataframe(df_preview.head(10), use_container_width=True)
+                                
+                                # Validate data
+                                validation = validate_signal_provider_data(
+                                    df_preview, 
+                                    provider_name, 
+                                    symbol, 
+                                    timezone_offset
+                                )
+                                
+                                if validation["valid"]:
+                                    st.success("✓ Data validation passed")
+                                    if validation.get("warnings"):
+                                        for warning in validation["warnings"]:
+                                            st.warning(f"⚠ {warning}")
+                                    
+                                    # Show data summary
+                                    summary = validation.get("data_summary", {})
+                                    if summary:
+                                        st.info(f"**Summary:** {summary.get('total_rows', 0)} rows | "
+                                               f"Actions: {summary.get('action_counts', {})} | "
+                                               f"Date range: {summary.get('date_range', {}).get('start', 'N/A')} to {summary.get('date_range', {}).get('end', 'N/A')}")
+                                    
+                                    # Confirmation and submit button
+                                    if st.button("✅ Submit Signal Data", key="ingest_new_provider_btn", type="primary"):
+                                        result = ingest_signal_provider_data(
+                                            signal_file,
+                                            provider_name,
+                                            symbol,
+                                            timezone_offset
+                                        )
+                                        if result.get("success"):
+                                            st.success(result.get("message"))
+                                            # Add provider to list
+                                            if provider_name not in (st.session_state.get("signal_providers", []) or []):
+                                                st.session_state.signal_providers = (st.session_state.get("signal_providers", []) or []) + [provider_name]
+                                                st.success(f"Added '{provider_name}' to provider list")
+                                        else:
+                                            st.error(f"Failed: {result.get('message')}")
+                                else:
+                                    st.error(f"Validation failed: {validation.get('message')}")
+                                    if validation.get("warnings"):
+                                        for warning in validation["warnings"]:
+                                            st.warning(f"⚠ {warning}")
+                        except Exception as e:
+                            st.error(f"Error reading file: {str(e)}")
+                    elif signal_file:
+                        st.warning("Please fill in provider name and symbol before uploading")
     with col_c:
         kpi_options = ["ATR", "Volume", "VAMP", "EMA", "SMA", "Add..."] + (st.session_state.get("kpi_indicators", []) or [])
         selected_kpi = st.selectbox(
@@ -1012,6 +1153,140 @@ def phase1_foundation_data():
                                 names = [str(x).strip() for x in dfk["kpi_name"].tolist() if str(x).strip()]
                                 st.session_state.kpi_indicators = sorted(set((st.session_state.get("kpi_indicators") or []) + names))
                                 st.success(f"Added {len(names)} KPIs")
+    st.markdown('</div>', unsafe_allow_html=True)
+    
+    # KPI Matrix Section
+    st.markdown('<div class="feature-card">', unsafe_allow_html=True)
+    st.markdown("### KPI Matrix")
+    st.info("Select financial instrument, signal provider, and KPI to calculate metrics.")
+    
+    col_matrix1, col_matrix2, col_matrix3 = st.columns(3)
+    
+    with col_matrix1:
+        # Get available instruments (including Gold)
+        available_instruments = []
+        if selected_category == "Commodities" and selected_instrument_item == "GOLD":
+            available_instruments = ["GOLD (^XAUUSD)"]
+        elif selected_category and selected_instrument_item and selected_instrument_item != "Add...":
+            available_instruments = [f"{selected_instrument_item}"]
+        
+        # Also add Gold as an option if not already there
+        if "GOLD (^XAUUSD)" not in available_instruments:
+            available_instruments.insert(0, "GOLD (^XAUUSD)")
+        
+        # Add other instruments if available
+        if not available_instruments:
+            available_instruments = ["GOLD (^XAUUSD)", "Select instrument first"]
+        
+        selected_matrix_instrument = st.selectbox(
+            "Financial Instrument",
+            options=available_instruments,
+            index=0,
+            key="kpi_matrix_instrument",
+            help="Select the financial instrument for KPI calculation"
+        )
+    
+    with col_matrix2:
+        # Get available signal providers
+        available_providers = ["None"] + merged_providers
+        if "Add..." in available_providers:
+            available_providers.remove("Add...")
+        
+        selected_matrix_provider = st.selectbox(
+            "Signal Provider",
+            options=available_providers,
+            index=0,
+            key="kpi_matrix_provider",
+            help="Select signal provider (optional)"
+        )
+    
+    with col_matrix3:
+        # Get available KPIs
+        available_kpis = [k for k in kpi_options if k != "Add..."]
+        selected_matrix_kpi = st.selectbox(
+            "KPI Indicator",
+            options=available_kpis,
+            index=0,
+            key="kpi_matrix_kpi",
+            help="Select KPI to calculate"
+        )
+    
+    # Calculate and display KPI
+    if selected_matrix_instrument and selected_matrix_kpi and selected_matrix_instrument != "Select instrument first":
+        # Extract symbol from instrument selection
+        symbol = "^XAUUSD" if "GOLD" in selected_matrix_instrument.upper() else selected_matrix_instrument
+        
+        if st.button("Calculate KPI", key="calculate_kpi_btn", type="primary"):
+            try:
+                # Fetch data for the selected instrument
+                # For Gold, use market_data_commodities_1min table
+                supabase = get_supabase()
+                if supabase:
+                    # Determine table based on symbol
+                    if "^" in symbol or symbol.upper() == "GOLD":
+                        table_name = "market_data_commodities_1min"
+                    else:
+                        table_name = "market_data_1min"
+                    
+                    # Fetch recent data (last 200 bars for calculation)
+                    result = supabase.table(table_name)\
+                        .select("timestamp,open,high,low,close,volume")\
+                        .eq("symbol", symbol.upper() if not symbol.startswith("^") else symbol)\
+                        .order("timestamp", desc=True)\
+                        .limit(200)\
+                        .execute()
+                    
+                    if result.data and len(result.data) > 0:
+                        # Convert to DataFrame
+                        df = pd.DataFrame(result.data)
+                        df['timestamp'] = pd.to_datetime(df['timestamp'])
+                        df = df.sort_values('timestamp')
+                        
+                        # Rename columns to match expected format
+                        df = df.rename(columns={
+                            'open': 'Open',
+                            'high': 'High',
+                            'low': 'Low',
+                            'close': 'Close',
+                            'volume': 'Volume'
+                        })
+                        
+                        # Calculate KPI
+                        kpi_result = calculate_kpi(selected_matrix_kpi, df)
+                        
+                        if kpi_result is not None:
+                            st.success(f"✓ {selected_matrix_kpi} calculated successfully")
+                            
+                            # Display results based on KPI type
+                            if isinstance(kpi_result, dict):
+                                # Volume returns a dictionary
+                                st.markdown("### KPI Results")
+                                col_res1, col_res2, col_res3 = st.columns(3)
+                                with col_res1:
+                                    st.metric("Current Volume", f"{kpi_result.get('current_volume', 0):,.0f}")
+                                with col_res2:
+                                    st.metric("Average Volume", f"{kpi_result.get('avg_volume', 0):,.0f}")
+                                with col_res3:
+                                    st.metric("Volume Ratio", f"{kpi_result.get('volume_ratio', 0):.2f}")
+                            else:
+                                # Single value result
+                                st.markdown("### KPI Result")
+                                st.metric(selected_matrix_kpi, f"{kpi_result:.4f}" if isinstance(kpi_result, float) else str(kpi_result))
+                            
+                            # Show signal provider context if selected
+                            if selected_matrix_provider and selected_matrix_provider != "None":
+                                st.info(f"**Context:** KPI calculated for {selected_matrix_instrument} with signal provider {selected_matrix_provider}")
+                        else:
+                            st.warning(f"Could not calculate {selected_matrix_kpi}. Please ensure sufficient data is available.")
+                    else:
+                        st.error(f"No data found for {symbol}. Please ingest data first.")
+                else:
+                    st.error("Database connection not available")
+            except Exception as e:
+                st.error(f"Error calculating KPI: {str(e)}")
+                import traceback
+                st.code(traceback.format_exc())
+    
     st.markdown('</div>', unsafe_allow_html=True)
     
     # Data ingestion
