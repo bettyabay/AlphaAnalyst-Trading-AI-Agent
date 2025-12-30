@@ -21,6 +21,7 @@ from phi.tools.googlesearch import GoogleSearch
 # Phase 1 imports
 from tradingagents.database.config import get_supabase
 from tradingagents.dataflows.ingestion_pipeline import DataIngestionPipeline
+from tradingagents.dataflows.gold_ingestion import ingest_gold_data
 from tradingagents.dataflows.document_manager import DocumentManager
 from tradingagents.config.watchlist import WATCHLIST_STOCKS, get_watchlist_symbols
 from tradingagents.dataflows.polygon_integration import PolygonDataClient
@@ -846,23 +847,21 @@ def phase1_foundation_data():
     """Phase 1: Foundation & Data Infrastructure"""
     
     
-    # Selection UI (Financial Instruments, Signal Provider, KPI Indicator)
     st.markdown('<div class="feature-card">', unsafe_allow_html=True)
     st.markdown("### Selection")
     col_a, col_b, col_c = st.columns(3)
-    # Financial Instruments dropdown
     with col_a:
         sb = get_supabase()
         def _read_df(file):
             name = file.name.lower()
             if name.endswith(".csv"):
                 return pd.read_csv(file)
-            elif name.endswith(".xls"):
-                return pd.read_excel(file, engine="xlrd")
-            elif name.endswith(".xlsx"):
-                return pd.read_excel(file, engine="openpyxl")
-            else:
-                return None
+            elif name.endswith(".xls") or name.endswith(".xlsx"):
+                try:
+                    return pd.read_excel(file)
+                except Exception:
+                    return None
+            return None
         categories = ["Commodities", "Indices", "Currencies", "Stocks", "Add..."]
         selected_category = st.selectbox(
             "Financial Instrument Category",
@@ -946,7 +945,17 @@ def phase1_foundation_data():
                                 new_syms = [str(s).upper().strip() for s in df2["symbol"].tolist()]
                                 st.session_state.custom_instruments = sorted(set((st.session_state.get("custom_instruments") or []) + new_syms))
                                 st.success(f"Added {len(new_syms)} instruments to selection")
-    # Signal Provider dropdown
+        if selected_category == "Commodities" and selected_instrument_item == "GOLD":
+            with st.expander("Gold Data (BarChart)"):
+                st.info("Ingest 5-year 1-minute Gold data from BarChart export.")
+                gold_file = st.file_uploader("Upload Gold 1-min Data (CSV/Excel)", type=["csv", "xls", "xlsx"], key="gold_upload_in_dropdown")
+                if gold_file:
+                    if st.button("Ingest Gold Data", key="ingest_gold_btn_dropdown"):
+                        result = ingest_gold_data(gold_file)
+                        if result.get("success"):
+                            st.success(result.get("message"))
+                        else:
+                            st.error(f"Failed: {result.get('message')}")
     with col_b:
         signal_provider_options = [
             "PipXpert",
@@ -977,7 +986,6 @@ def phase1_foundation_data():
                                 names = [str(x).strip() for x in dfp["provider_name"].tolist() if str(x).strip()]
                                 st.session_state.signal_providers = sorted(set((st.session_state.get("signal_providers") or []) + names))
                                 st.success(f"Added {len(names)} providers")
-    # KPI Indicator dropdown
     with col_c:
         kpi_options = ["ATR", "Volume", "VAMP", "EMA", "SMA", "Add..."] + (st.session_state.get("kpi_indicators", []) or [])
         selected_kpi = st.selectbox(
@@ -1457,7 +1465,18 @@ def phase1_foundation_data():
     st.markdown("---")
     st.markdown("#### QUANTUMTRADER v0.1 Prompt")
     symbols_for_lab = get_watchlist_symbols()
-    lab_symbol = st.selectbox("Symbol", symbols_for_lab, key="quantum_symbol")
+    
+    # Auto-select the instrument chosen in the top section
+    lab_index = 0
+    if selected_instrument_item and selected_instrument_item != "Add...":
+        # Add to list if not present
+        if selected_instrument_item not in symbols_for_lab:
+             symbols_for_lab.insert(0, selected_instrument_item)
+             lab_index = 0
+        else:
+             lab_index = symbols_for_lab.index(selected_instrument_item)
+             
+    lab_symbol = st.selectbox("Symbol", symbols_for_lab, index=lab_index, key="quantum_symbol")
     
     # Command timestamp is now auto-stamped (label only, not a filter)
     with st.expander("ℹ️ Command Timestamp (Auto Label)", expanded=False):
@@ -1494,38 +1513,67 @@ def phase1_foundation_data():
             db_check_info = {}
             if supabase:
                 try:
-                    check_1min = supabase.table("market_data_1min")\
+                    # Determine table based on asset class
+                    table_1min_name = "market_data_1min"
+                    table_5min_name = "market_data_5min"
+                    
+                    if selected_category == "Commodities":
+                        table_1min_name = "market_data_commodities_1min"
+                        # table_5min_name = "market_data_commodities_5min" # Not yet implemented, fallback or ignore
+                    elif selected_category == "Indices":
+                        table_1min_name = "market_data_indices_1min"
+                    elif selected_category == "Currencies":
+                        table_1min_name = "market_data_currencies_1min"
+                        
+                    check_1min = supabase.table(table_1min_name)\
                         .select("symbol,timestamp")\
                         .eq("symbol", lab_symbol.upper())\
                         .order("timestamp", desc=True)\
                         .limit(5)\
                         .execute()
                     db_check_info["1min_raw"] = check_1min.data if hasattr(check_1min, "data") else []
-                    check_5min = supabase.table("market_data_5min")\
-                        .select("symbol,timestamp")\
-                        .eq("symbol", lab_symbol.upper())\
-                        .order("timestamp", desc=True)\
-                        .limit(5)\
-                        .execute()
-                    db_check_info["5min_raw"] = check_5min.data if hasattr(check_5min, "data") else []
-                    all_symbols_1min = supabase.table("market_data_1min")\
-                        .select("symbol")\
-                        .limit(100)\
-                        .execute()
-                    unique_symbols_1min = list(set([r.get("symbol") for r in (all_symbols_1min.data if hasattr(all_symbols_1min, "data") else []) if r.get("symbol")]))
-                    db_check_info["all_symbols_1min"] = sorted(unique_symbols_1min)[:20]
-                    all_symbols_5min = supabase.table("market_data_5min")\
-                        .select("symbol")\
-                        .limit(100)\
-                        .execute()
-                    unique_symbols_5min = list(set([r.get("symbol") for r in (all_symbols_5min.data if hasattr(all_symbols_5min, "data") else []) if r.get("symbol")]))
-                    db_check_info["all_symbols_5min"] = sorted(unique_symbols_5min)[:20]
+                    
+                    # 5min check (only for stocks currently, or if tables exist)
+                    try:
+                        check_5min = supabase.table(table_5min_name)\
+                            .select("symbol,timestamp")\
+                            .eq("symbol", lab_symbol.upper())\
+                            .order("timestamp", desc=True)\
+                            .limit(5)\
+                            .execute()
+                        db_check_info["5min_raw"] = check_5min.data if hasattr(check_5min, "data") else []
+                    except Exception:
+                        db_check_info["5min_raw"] = []
+
+                    # Debug info for available symbols
+                    try:
+                        all_symbols_1min = supabase.table(table_1min_name)\
+                            .select("symbol")\
+                            .limit(100)\
+                            .execute()
+                        unique_symbols_1min = list(set([r.get("symbol") for r in (all_symbols_1min.data if hasattr(all_symbols_1min, "data") else []) if r.get("symbol")]))
+                        db_check_info["all_symbols_1min"] = sorted(unique_symbols_1min)[:20]
+                    except Exception:
+                        db_check_info["all_symbols_1min"] = []
+                        
+                    # 5min symbols
+                    try:
+                        all_symbols_5min = supabase.table(table_5min_name)\
+                            .select("symbol")\
+                            .limit(100)\
+                            .execute()
+                        unique_symbols_5min = list(set([r.get("symbol") for r in (all_symbols_5min.data if hasattr(all_symbols_5min, "data") else []) if r.get("symbol")]))
+                        db_check_info["all_symbols_5min"] = sorted(unique_symbols_5min)[:20]
+                    except Exception:
+                         db_check_info["all_symbols_5min"] = []
+
                 except Exception as e:
                     import traceback
                     db_check_info["error"] = str(e)
                     db_check_info["error_traceback"] = traceback.format_exc()
-            latest_1min = fetch_latest_bar(lab_symbol, "1min")
-            latest_5min = fetch_latest_bar(lab_symbol, "5min")
+            
+            latest_1min = fetch_latest_bar(lab_symbol, "1min", asset_class=selected_category)
+            latest_5min = fetch_latest_bar(lab_symbol, "5min", asset_class=selected_category)
             data_ready = True
             freshness_warnings = []
             freshness_cutoff_minutes = 20
@@ -1548,13 +1596,13 @@ def phase1_foundation_data():
                     for i, record in enumerate(db_check_info["1min_raw"][:5], 1):
                         st.write(f"{i}. Symbol: {record.get('symbol')}, Timestamp: {record.get('timestamp')}")
                 else:
-                    st.write("❌ No records found in market_data_1min table")
+                    st.write("❌ No records found in 1-min table")
                 st.write(f"**5-minute table - Top 5 records for {lab_symbol.upper()}:**")
                 if db_check_info.get("5min_raw"):
                     for i, record in enumerate(db_check_info["5min_raw"][:5], 1):
                         st.write(f"{i}. Symbol: {record.get('symbol')}, Timestamp: {record.get('timestamp')}")
                 else:
-                    st.write("❌ No records found in market_data_5min table")
+                    st.write("❌ No records found in 5-min table")
                 st.write(f"**fetch_latest_bar() function results:**")
                 st.write(f"**1-minute data query result:**")
                 if latest_1min:
@@ -1639,10 +1687,13 @@ def phase1_foundation_data():
                     st.info(status_msg)
                 with col_ingest2:
                     st.markdown("#### Quick Ingest")
-                    if st.button(f"📥 Ingest Latest Data for {lab_symbol}", key="quick_ingest_quantum", type="primary"):
-                        latest_before_1min = fetch_latest_bar(lab_symbol, "1min")
-                        latest_before_5min = fetch_latest_bar(lab_symbol, "5min")
+                    ingest_disabled = (selected_category != "Stocks")
+                    if st.button(f"📥 Ingest Latest Data for {lab_symbol}", key="quick_ingest_quantum", type="primary", disabled=ingest_disabled):
+                        latest_before_1min = fetch_latest_bar(lab_symbol, "1min", asset_class=selected_category)
+                        latest_before_5min = fetch_latest_bar(lab_symbol, "5min", asset_class=selected_category)
                         before_1min_ts = pd.to_datetime(latest_before_1min.get("timestamp")).replace(tzinfo=None) if latest_before_1min else None
+                    if ingest_disabled:
+                        st.caption("⚠️ Automated ingestion is only available for Stocks. Use manual upload for others.")
                         before_5min_ts = pd.to_datetime(latest_before_5min.get("timestamp")).replace(tzinfo=None) if latest_before_5min else None
                         with st.spinner(f"Ingesting latest 1-min and 5-min data for {lab_symbol} up to current time..."):
                             try:
@@ -1689,8 +1740,8 @@ def phase1_foundation_data():
                                 pipeline.close()
                                 import time
                                 time.sleep(2)
-                                latest_after_1min = fetch_latest_bar(lab_symbol, "1min")
-                                latest_after_5min = fetch_latest_bar(lab_symbol, "5min")
+                                latest_after_1min = fetch_latest_bar(lab_symbol, "1min", asset_class=selected_category)
+                                latest_after_5min = fetch_latest_bar(lab_symbol, "5min", asset_class=selected_category)
                                 after_1min_ts = pd.to_datetime(latest_after_1min.get("timestamp")).replace(tzinfo=None) if latest_after_1min else None
                                 after_5min_ts = pd.to_datetime(latest_after_5min.get("timestamp")).replace(tzinfo=None) if latest_after_5min else None
                                 st.write(f"**Post-Ingestion Check:**")
@@ -1757,7 +1808,7 @@ def phase1_foundation_data():
     if st.button("⚙️ Run QUANTUMTRADER Prompt", key="quantum_prompt_button", disabled=not (lab_symbol and effective_data_ready)):
         with st.spinner("Calculating QUANTUMTRADER metrics..."):
             try:
-                qt_result = feature_lab.run_quantum_screen(lab_symbol, quantum_timestamp)
+                qt_result = feature_lab.run_quantum_screen(lab_symbol, quantum_timestamp, asset_class=selected_category)
                 st.session_state.quantum_result = qt_result
                 st.success("QUANTUMTRADER packet ready!")
             except Exception as exc:

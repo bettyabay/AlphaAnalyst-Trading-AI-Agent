@@ -37,10 +37,10 @@ class VolumeScreeningEngine:
         rsi = 100 - (100 / (1 + rs))
         return rsi.fillna(50)
     
-    def _fetch_history(self, symbol: str, period: str = "3mo", interval: str = "1d") -> Optional[pd.DataFrame]:
+    def _fetch_history(self, symbol: str, period: str = "3mo", interval: str = "1d", asset_class: str = "stocks") -> Optional[pd.DataFrame]:
         """Fetch historical data"""
         lookback = period_to_days(period, default=180)
-        data = fetch_ohlcv(symbol, interval=interval, lookback_days=lookback)
+        data = fetch_ohlcv(symbol, interval=interval, lookback_days=lookback, asset_class=asset_class)
         if data is None or data.empty:
             return None
         required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
@@ -600,11 +600,11 @@ class TradeDecisionEngine:
         
         return decision
     
-    def _calculate_rr_ratio(self, symbol: str, quantum_result: Optional[Dict] = None) -> Dict[str, Any]:
+    def _calculate_rr_ratio(self, symbol: str, quantum_result: Optional[Dict] = None, asset_class: str = "stocks") -> Dict[str, Any]:
         """Calculate Risk:Reward ratio and check if 1:2 is achievable"""
         try:
             # Get current price and ATR for stop loss calculation
-            hist = self.volume_screener._fetch_history(symbol, period="3mo")
+            hist = self.volume_screener._fetch_history(symbol, period="3mo", asset_class=asset_class)
             if hist is None or hist.empty:
                 return {"achievable": False, "ratio": 0.0, "error": "No price data"}
             

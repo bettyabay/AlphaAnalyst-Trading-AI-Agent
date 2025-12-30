@@ -122,6 +122,16 @@ def fetch_ohlcv(
         print(f"🔍 [DB] fetch_ohlcv({symbol}, interval={interval}, lookback_days={lookback_days})")
 
     table = config["table"]
+    
+    # Dynamic table routing for 1min data
+    if interval == "1min":
+        if "*" in symbol:
+            table = "market_data_commodities_1min"
+        elif symbol.startswith("^"):
+            table = "market_data_indices_1min"
+        elif "/" in symbol:
+            table = "market_data_currencies_1min"
+            
     time_field = config["time_field"]
     is_date = bool(config["is_date"])
 
@@ -198,11 +208,22 @@ def fetch_latest_bar(symbol: str, interval: str = "1d") -> Optional[Dict[str, ob
         return None
 
     time_field = config["time_field"]
+    table = config["table"]
+
+    # Dynamic table routing for 1min data
+    if interval == "1min":
+        if "*" in symbol:
+            table = "market_data_commodities_1min"
+        elif symbol.startswith("^"):
+            table = "market_data_indices_1min"
+        elif "/" in symbol:
+            table = "market_data_currencies_1min"
+
     fields = f"{time_field},open,high,low,close,volume,source"
 
     try:
         resp = (
-            supabase.table(config["table"])
+            supabase.table(table)
             .select(fields)
             .eq("symbol", symbol)
             .order(time_field, desc=True)
