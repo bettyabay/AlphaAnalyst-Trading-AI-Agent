@@ -3526,112 +3526,108 @@ def phase3_trading_engine_core():
                     
                     # Store results
                     st.session_state.phase2_results = fire_result
-                    
-                    if fire_result.get("error"):
-                        st.error(f"❌ Error: {fire_result['error']}")
-                    else:
-                        # Display results
-                        score_ratio = fire_result["score"] / fire_result["max_score"]
-                        score_color = "green" if score_ratio >= 0.7 else "orange" if score_ratio >= 0.5 else "red"
-                        
-                        col_score1, col_score2, col_score3 = st.columns(3)
-                        with col_score1:
-                            st.metric("Fire Test Score", f"{fire_result['score']} / {fire_result['max_score']}")
-                        with col_score2:
-                            st.metric("Score Percentage", f"{score_ratio*100:.1f}%")
-                        with col_score3:
-                            recommendation = "✅ PASS" if score_ratio >= 0.7 else "⚠️ REVIEW" if score_ratio >= 0.5 else "❌ FAIL"
-                            st.metric("Recommendation", recommendation)
-                        
-                        # Stage details
-                        st.markdown("#### 📊 Stage Breakdown")
-                        stages_data = []
-                        for stage in fire_result["stages"]:
-                            stages_data.append({
-                                "Stage": stage["name"],
-                                "Status": "✅ PASS" if stage["pass"] else "❌ FAIL",
-                                "Detail": stage["detail"],
-                                "Description": stage.get("description", "")
-                            })
-                        
-                        stages_df = pd.DataFrame(stages_data)
-                        st.dataframe(stages_df, use_container_width=True)
-                        
-                        # Visual stage status
-                        st.markdown("#### 📈 Stage Performance")
-                        for stage in fire_result["stages"]:
-                            status_icon = "✅" if stage["pass"] else "❌"
-                            status_color = "green" if stage["pass"] else "red"
-                            st.markdown(f"""
-                            <div style="padding: 10px; margin: 5px 0; border-left: 4px solid {status_color}; background: rgba(255,255,255,0.5); border-radius: 5px;">
-                                <strong>{status_icon} {stage['name']}</strong>: {stage['detail']}<br>
-                                <small style="color: #666;">{stage.get('description', '')}</small>
-                            </div>
-                            """, unsafe_allow_html=True)
-                        
-                        # Save button for Phase 2 Deep Analysis (Fire Test)
-                        st.markdown("---")
-                        if st.button("💾 Save Phase 2 Analysis to Database", key="save_phase2_analysis"):
-                            try:
-                                from tradingagents.database.config import get_supabase
-                                from tradingagents.database.db_service import (
-                                    _make_json_serializable,
-                                    save_fire_test_with_rag
-                                )
-                                
-                                # Check database connection first
-                                supabase = get_supabase()
-                                if not supabase:
-                                    st.error("❌ Database not configured! Please set SUPABASE_URL and SUPABASE_KEY in your .env file")
-                                else:
-                                    # Build summary text for RAG
-                                    summary_lines = [
-                                        f"Fire Test for {selected_symbol}",
-                                        f"Score: {fire_result['score']} / {fire_result['max_score']} ({score_ratio*100:.1f}%)"
-                                    ]
-                                    for stg in fire_result.get("stages", [])[:10]:
-                                        status = "PASS" if stg.get("pass") else "FAIL"
-                                        summary_lines.append(f"- {stg.get('name')}: {status} | {stg.get('detail','')}")
-                                    summary_text = "\n".join(summary_lines)
-
-                                    # Generate embedding using DocumentManager
-                                    doc_manager = DocumentManager()
-                                    try:
-                                        embedding_vector = doc_manager._generate_embedding(summary_text)
-                                    finally:
-                                        doc_manager.close()
-
-                                    saved = save_fire_test_with_rag(
-                                        symbol=selected_symbol,
-                                        fire_result=_make_json_serializable(fire_result),
-                                        summary_text=summary_text,
-                                        embedding_vector=embedding_vector,
-                                        run_metadata={"source": "phase3_tab2"}
-                                    )
-
-                                    if saved:
-                                        st.success("✅ Phase 2 Deep Analysis saved to `fire_test_runs` with RAG embedding!")
-                                        st.balloons()
-                                    else:
-                                        st.error("❌ Failed to save - check console for details")
-                            except Exception as e:
-                                st.error(f"❌ Error saving: {str(e)}")
-                                import traceback
-                                st.code(traceback.format_exc())
         
         with col2:
             if st.button("🔄 Clear Results", key="clear_phase2"):
                 if 'phase2_results' in st.session_state:
                     del st.session_state.phase2_results
                 st.rerun()
-        
-        # Show cached results if available
+
+        # Display results (Persistent View)
         if 'phase2_results' in st.session_state:
-            result = st.session_state.phase2_results
-            if not result.get("error"):
-                st.markdown("#### 📋 Previous Fire Test Results")
-                score_ratio = result["score"] / result["max_score"]
-                st.metric("Previous Score", f"{result['score']} / {result['max_score']} ({score_ratio*100:.1f}%)")
+            fire_result = st.session_state.phase2_results
+            
+            if fire_result.get("error"):
+                st.error(f"❌ Error: {fire_result['error']}")
+            else:
+                # Display results
+                score_ratio = fire_result["score"] / fire_result["max_score"]
+                score_color = "green" if score_ratio >= 0.7 else "orange" if score_ratio >= 0.5 else "red"
+                
+                col_score1, col_score2, col_score3 = st.columns(3)
+                with col_score1:
+                    st.metric("Fire Test Score", f"{fire_result['score']} / {fire_result['max_score']}")
+                with col_score2:
+                    st.metric("Score Percentage", f"{score_ratio*100:.1f}%")
+                with col_score3:
+                    recommendation = "✅ PASS" if score_ratio >= 0.7 else "⚠️ REVIEW" if score_ratio >= 0.5 else "❌ FAIL"
+                    st.metric("Recommendation", recommendation)
+                
+                # Stage details
+                st.markdown("#### 📊 Stage Breakdown")
+                stages_data = []
+                for stage in fire_result["stages"]:
+                    stages_data.append({
+                        "Stage": stage["name"],
+                        "Status": "✅ PASS" if stage["pass"] else "❌ FAIL",
+                        "Detail": stage["detail"],
+                        "Description": stage.get("description", "")
+                    })
+                
+                stages_df = pd.DataFrame(stages_data)
+                st.dataframe(stages_df, use_container_width=True)
+                
+                # Visual stage status
+                st.markdown("#### 📈 Stage Performance")
+                for stage in fire_result["stages"]:
+                    status_icon = "✅" if stage["pass"] else "❌"
+                    status_color = "green" if stage["pass"] else "red"
+                    st.markdown(f"""
+                    <div style="padding: 10px; margin: 5px 0; border-left: 4px solid {status_color}; background: rgba(255,255,255,0.5); border-radius: 5px;">
+                        <strong>{status_icon} {stage['name']}</strong>: {stage['detail']}<br>
+                        <small style="color: #666;">{stage.get('description', '')}</small>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                # Save button for Phase 2 Deep Analysis (Fire Test)
+                st.markdown("---")
+                if st.button("💾 Save Phase 2 Analysis to Database", key="save_phase2_analysis"):
+                    try:
+                        from tradingagents.database.config import get_supabase
+                        from tradingagents.database.db_service import (
+                            _make_json_serializable,
+                            save_fire_test_with_rag
+                        )
+                        
+                        # Check database connection first
+                        supabase = get_supabase()
+                        if not supabase:
+                            st.error("❌ Database not configured! Please set SUPABASE_URL and SUPABASE_KEY in your .env file")
+                        else:
+                            # Build summary text for RAG
+                            summary_lines = [
+                                f"Fire Test for {selected_symbol}",
+                                f"Score: {fire_result['score']} / {fire_result['max_score']} ({score_ratio*100:.1f}%)"
+                            ]
+                            for stg in fire_result.get("stages", [])[:10]:
+                                status = "PASS" if stg.get("pass") else "FAIL"
+                                summary_lines.append(f"- {stg.get('name')}: {status} | {stg.get('detail','')}")
+                            summary_text = "\n".join(summary_lines)
+
+                            # Generate embedding using DocumentManager
+                            doc_manager = DocumentManager()
+                            try:
+                                embedding_vector = doc_manager._generate_embedding(summary_text)
+                            finally:
+                                doc_manager.close()
+
+                            saved = save_fire_test_with_rag(
+                                symbol=selected_symbol,
+                                fire_result=_make_json_serializable(fire_result),
+                                summary_text=summary_text,
+                                embedding_vector=embedding_vector,
+                                run_metadata={"source": "phase3_tab2"}
+                            )
+
+                            if saved:
+                                st.success("✅ Phase 2 Deep Analysis saved to `fire_test_runs` with RAG embedding!")
+                                st.balloons()
+                            else:
+                                st.error("❌ Failed to save - check console for details")
+                    except Exception as e:
+                        st.error(f"❌ Error saving: {str(e)}")
+                        import traceback
+                        st.code(traceback.format_exc())
 
         st.markdown("---")
         st.markdown("#### Historical DataScan Prompt")
