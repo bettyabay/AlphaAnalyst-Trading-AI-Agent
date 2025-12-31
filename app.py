@@ -9,6 +9,7 @@ import os
 import io
 from uuid import uuid4
 from groq import Groq
+import json
 
 # Load environment variables early
 load_dotenv()
@@ -81,6 +82,39 @@ COMMON_STOCKS = {
 }
 
 st.set_page_config(page_title="Stocks Analysis AI Agents", page_icon="", layout="wide")
+
+# --- KPI Persistence Logic ---
+KPI_REGISTRY_FILE = "user_kpis.json"
+
+def load_kpi_registry():
+    if "kpi_registry" not in st.session_state:
+        st.session_state.kpi_registry = {}
+        
+    # Try to load from file
+    if os.path.exists(KPI_REGISTRY_FILE):
+        try:
+            with open(KPI_REGISTRY_FILE, "r") as f:
+                saved_registry = json.load(f)
+                st.session_state.kpi_registry.update(saved_registry)
+        except Exception as e:
+            print(f"Error loading KPI registry: {e}")
+            
+    # Sync kpi_indicators list
+    current_list = st.session_state.get("kpi_indicators", [])
+    registry_names = list(st.session_state.kpi_registry.keys())
+    st.session_state.kpi_indicators = sorted(list(set(current_list + registry_names)))
+
+def save_kpi_registry():
+    if "kpi_registry" in st.session_state:
+        try:
+            with open(KPI_REGISTRY_FILE, "w") as f:
+                json.dump(st.session_state.kpi_registry, f)
+        except Exception as e:
+            print(f"Error saving KPI registry: {e}")
+
+# Load KPIs on startup
+load_kpi_registry()
+# -----------------------------
 
 st.markdown("""
     <style>
@@ -856,15 +890,21 @@ def phase1_foundation_data():
     with col_a:
         sb = get_supabase()
         def _read_df(file):
+            file.seek(0)
             name = file.name.lower()
             if name.endswith(".csv"):
-                return pd.read_csv(file)
+                df = pd.read_csv(file)
             elif name.endswith(".xls") or name.endswith(".xlsx"):
                 try:
-                    return pd.read_excel(file)
+                    df = pd.read_excel(file)
                 except Exception:
+                    file.seek(0)
                     return None
-            return None
+            else:
+                file.seek(0)
+                return None
+            file.seek(0)
+            return df
         # 1. Ensure Catalog is seeded if empty
         if sb:
             try:
@@ -1112,6 +1152,8 @@ def phase1_foundation_data():
                                                 st.warning(f"⚠ {warning}")
                                 else:
                                     st.warning("Please enter a symbol/currency pair")
+                            else:
+                                st.error("Could not read file. Please ensure it is a valid Excel file.")
                         except Exception as e:
                             st.error(f"Error reading file: {str(e)}")
             
@@ -1189,6 +1231,8 @@ def phase1_foundation_data():
                                     if validation.get("warnings"):
                                         for warning in validation["warnings"]:
                                             st.warning(f"⚠ {warning}")
+                            else:
+                                st.error("Could not read file. Please ensure it is a valid Excel or CSV file.")
                         except Exception as e:
                             st.error(f"Error reading file: {str(e)}")
                     elif signal_file:
@@ -1202,7 +1246,60 @@ def phase1_foundation_data():
             key="select_kpi"
         )
         if selected_kpi == "Add...":
-            with st.expander("Upload KPI Indicators via Excel/CSV"):
+            tab_manual, tab_upload = st.tabs(["Manual Entry", "Upload File"])
+            
+            with tab_manual:
+                st.markdown("#### Create Custom KPI")
+                with st.form("create_kpi_form"):
+                    new_kpi_name = st.text_input("KPI Name (e.g., 'Fast SMA')")
+                    kpi_type = st.selectbox("Base Indicator Type", ["SMA", "EMA", "RSI", "MACD", "Bollinger Bands", "ATR", "Volume", "VAMP"])
+                    
+                    # Dynamic parameters based on type
+                    params = {}
+                    col_p1, col_p2 = st.columns(2)
+                    
+                    if kpi_type in ["SMA", "EMA", "RSI", "ATR", "Volume", "VAMP"]:
+                        with col_p1:
+                            params['period'] = st.number_input("Period", min_value=1, value=14 if kpi_type in ["RSI", "ATR"] else (20 if kpi_type in ["Volume", "VAMP"] else (50 if kpi_type == "SMA" else 15)))
+                    
+                    if kpi_type == "MACD":
+                        with col_p1:
+                            params['fast_period'] = st.number_input("Fast Period", min_value=1, value=12)
+                            params['slow_period'] = st.number_input("Slow Period", min_value=1, value=26)
+                        with col_p2:
+                            params['signal_period'] = st.number_input("Signal Period", min_value=1, value=9)
+                            
+                    if kpi_type == "Bollinger Bands":
+                        with col_p1:
+                            params['period'] = st.number_input("Period", min_value=1, value=20)
+                        with col_p2:
+                            params['std_dev'] = st.number_input("Std Dev", min_value=0.1, value=2.0, step=0.1)
+                            
+                    submitted = st.form_submit_button("Add KPI")
+                    
+                    if submitted and new_kpi_name:
+                        if "kpi_registry" not in st.session_state:
+                            st.session_state.kpi_registry = {}
+                        
+                        # Store configuration
+                        st.session_state.kpi_registry[new_kpi_name] = {
+                            "type": kpi_type,
+                            **params
+                        }
+                        
+                        # Save to file
+                        save_kpi_registry()
+                        
+                        # Add to list
+                        current_kpis = st.session_state.get("kpi_indicators", [])
+                        if new_kpi_name not in current_kpis:
+                            st.session_state.kpi_indicators = sorted(list(set(current_kpis + [new_kpi_name])))
+                            st.success(f"Added '{new_kpi_name}' to KPI list")
+                            st.rerun()
+                        else:
+                            st.warning("KPI name already exists")
+
+            with tab_upload:
                 st.write("Expected columns: kpi_name")
                 kpi_file = st.file_uploader("Choose file", type=["csv", "xls", "xlsx"], key="upload_kpis_file")
                 if kpi_file:
@@ -1287,7 +1384,12 @@ def phase1_foundation_data():
                                 })
                                 
                                 # Calculate KPI
-                                kpi_result = calculate_kpi(selected_kpi, df)
+                                # Get params from registry if available
+                                kpi_params = {}
+                                if "kpi_registry" in st.session_state and selected_kpi in st.session_state.kpi_registry:
+                                    kpi_params = st.session_state.kpi_registry[selected_kpi]
+                                
+                                kpi_result = calculate_kpi(selected_kpi, df, **kpi_params)
                                 
                                 if kpi_result is not None:
                                     st.success(f"✓ {selected_kpi} calculated successfully")

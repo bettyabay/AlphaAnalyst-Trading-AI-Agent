@@ -210,8 +210,17 @@ def ingest_signal_provider_data(
                 if action not in ["buy", "sell"]:
                     continue  # Skip invalid actions
                 
-                # Get currency pair (use provided symbol or from data)
-                currency_pair = str(symbol).upper().strip() if symbol else str(row.get("Currency Pair", "")).upper().strip()
+                # Get currency pair
+                # If a symbol is provided by the user, we can choose to enforce it or use it as a fallback.
+                # However, if the file itself has a "Currency Pair" column with varied values, 
+                # we should prioritize the file's data to support multi-symbol files.
+                file_symbol = str(row.get("Currency Pair", "")).upper().strip()
+                
+                # Logic: Use file's symbol if present; otherwise fallback to the user-provided symbol.
+                # If the user specifically wants to FORCE a symbol (overriding the file), 
+                # we would need a different logic, but standard behavior is usually "file data wins".
+                currency_pair = file_symbol if file_symbol else str(symbol).upper().strip()
+                
                 if not currency_pair:
                     continue
                 
@@ -273,8 +282,12 @@ def ingest_signal_provider_data(
         for i in range(0, len(db_rows), chunk_size):
             chunk = db_rows[i:i+chunk_size]
             try:
-                # Upsert into signal_provider_signals
-                result = supabase.table("signal_provider_signals").upsert(chunk).execute()
+                # Upsert into signal_provider_signals, explicitly specifying conflict handling
+                # on_conflict needs to match the unique constraint columns
+                result = supabase.table("signal_provider_signals").upsert(
+                    chunk, 
+                    on_conflict="provider_name,symbol,signal_date,action"
+                ).execute()
                 total_inserted += len(chunk)
             except Exception as e:
                 error_msg = str(e)
