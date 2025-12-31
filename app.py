@@ -1153,140 +1153,110 @@ def phase1_foundation_data():
                                 names = [str(x).strip() for x in dfk["kpi_name"].tolist() if str(x).strip()]
                                 st.session_state.kpi_indicators = sorted(set((st.session_state.get("kpi_indicators") or []) + names))
                                 st.success(f"Added {len(names)} KPIs")
-    st.markdown('</div>', unsafe_allow_html=True)
-    
-    # KPI Matrix Section
-    st.markdown('<div class="feature-card">', unsafe_allow_html=True)
-    st.markdown("### KPI Matrix")
-    st.info("Select financial instrument, signal provider, and KPI to calculate metrics.")
-    
-    col_matrix1, col_matrix2, col_matrix3 = st.columns(3)
-    
-    with col_matrix1:
-        # Get available instruments (including Gold)
-        available_instruments = []
-        if selected_category == "Commodities" and selected_instrument_item == "GOLD":
-            available_instruments = ["GOLD (^XAUUSD)"]
-        elif selected_category and selected_instrument_item and selected_instrument_item != "Add...":
-            available_instruments = [f"{selected_instrument_item}"]
         
-        # Also add Gold as an option if not already there
-        if "GOLD (^XAUUSD)" not in available_instruments:
-            available_instruments.insert(0, "GOLD (^XAUUSD)")
-        
-        # Add other instruments if available
-        if not available_instruments:
-            available_instruments = ["GOLD (^XAUUSD)", "Select instrument first"]
-        
-        selected_matrix_instrument = st.selectbox(
-            "Financial Instrument",
-            options=available_instruments,
-            index=0,
-            key="kpi_matrix_instrument",
-            help="Select the financial instrument for KPI calculation"
-        )
-    
-    with col_matrix2:
-        # Get available signal providers
-        available_providers = ["None"] + merged_providers
-        if "Add..." in available_providers:
-            available_providers.remove("Add...")
-        
-        selected_matrix_provider = st.selectbox(
-            "Signal Provider",
-            options=available_providers,
-            index=0,
-            key="kpi_matrix_provider",
-            help="Select signal provider (optional)"
-        )
-    
-    with col_matrix3:
-        # Get available KPIs
-        available_kpis = [k for k in kpi_options if k != "Add..."]
-        selected_matrix_kpi = st.selectbox(
-            "KPI Indicator",
-            options=available_kpis,
-            index=0,
-            key="kpi_matrix_kpi",
-            help="Select KPI to calculate"
-        )
-    
-    # Calculate and display KPI
-    if selected_matrix_instrument and selected_matrix_kpi and selected_matrix_instrument != "Select instrument first":
-        # Extract symbol from instrument selection
-        symbol = "^XAUUSD" if "GOLD" in selected_matrix_instrument.upper() else selected_matrix_instrument
-        
-        if st.button("Calculate KPI", key="calculate_kpi_btn", type="primary"):
-            try:
-                # Fetch data for the selected instrument
-                # For Gold, use market_data_commodities_1min table
-                supabase = get_supabase()
-                if supabase:
-                    # Determine table based on symbol
-                    if "^" in symbol or symbol.upper() == "GOLD":
-                        table_name = "market_data_commodities_1min"
-                    else:
-                        table_name = "market_data_1min"
-                    
-                    # Fetch recent data (last 200 bars for calculation)
-                    result = supabase.table(table_name)\
-                        .select("timestamp,open,high,low,close,volume")\
-                        .eq("symbol", symbol.upper() if not symbol.startswith("^") else symbol)\
-                        .order("timestamp", desc=True)\
-                        .limit(200)\
-                        .execute()
-                    
-                    if result.data and len(result.data) > 0:
-                        # Convert to DataFrame
-                        df = pd.DataFrame(result.data)
-                        df['timestamp'] = pd.to_datetime(df['timestamp'])
-                        df = df.sort_values('timestamp')
-                        
-                        # Rename columns to match expected format
-                        df = df.rename(columns={
-                            'open': 'Open',
-                            'high': 'High',
-                            'low': 'Low',
-                            'close': 'Close',
-                            'volume': 'Volume'
-                        })
-                        
-                        # Calculate KPI
-                        kpi_result = calculate_kpi(selected_matrix_kpi, df)
-                        
-                        if kpi_result is not None:
-                            st.success(f"✓ {selected_matrix_kpi} calculated successfully")
-                            
-                            # Display results based on KPI type
-                            if isinstance(kpi_result, dict):
-                                # Volume returns a dictionary
-                                st.markdown("### KPI Results")
-                                col_res1, col_res2, col_res3 = st.columns(3)
-                                with col_res1:
-                                    st.metric("Current Volume", f"{kpi_result.get('current_volume', 0):,.0f}")
-                                with col_res2:
-                                    st.metric("Average Volume", f"{kpi_result.get('avg_volume', 0):,.0f}")
-                                with col_res3:
-                                    st.metric("Volume Ratio", f"{kpi_result.get('volume_ratio', 0):.2f}")
-                            else:
-                                # Single value result
-                                st.markdown("### KPI Result")
-                                st.metric(selected_matrix_kpi, f"{kpi_result:.4f}" if isinstance(kpi_result, float) else str(kpi_result))
-                            
-                            # Show signal provider context if selected
-                            if selected_matrix_provider and selected_matrix_provider != "None":
-                                st.info(f"**Context:** KPI calculated for {selected_matrix_instrument} with signal provider {selected_matrix_provider}")
-                        else:
-                            st.warning(f"Could not calculate {selected_matrix_kpi}. Please ensure sufficient data is available.")
-                    else:
-                        st.error(f"No data found for {symbol}. Please ingest data first.")
+        # KPI Matrix - Connected to Financial Instrument Category and Signal Provider
+        if selected_kpi and selected_kpi != "Add...":
+            st.markdown("---")
+            st.markdown("#### KPI Matrix")
+            st.info(f"Calculate {selected_kpi} for selected instrument and provider")
+            
+            # Use selected instrument from col_a (Financial Instrument Category)
+            if selected_category and selected_instrument_item and selected_instrument_item != "Add...":
+                # Determine symbol based on category and instrument
+                if selected_category == "Commodities" and selected_instrument_item == "GOLD":
+                    symbol = "^XAUUSD"
+                    instrument_display = "GOLD (^XAUUSD)"
                 else:
-                    st.error("Database connection not available")
-            except Exception as e:
-                st.error(f"Error calculating KPI: {str(e)}")
-                import traceback
-                st.code(traceback.format_exc())
-    
+                    symbol = selected_instrument_item
+                    instrument_display = selected_instrument_item
+                
+                # Use selected provider from col_b (Signal Provider)
+                provider_display = selected_provider if selected_provider and selected_provider != "Add..." else "None"
+                
+                # Show current selections
+                col_info1, col_info2 = st.columns(2)
+                with col_info1:
+                    st.caption(f"**Instrument:** {instrument_display}")
+                with col_info2:
+                    st.caption(f"**Provider:** {provider_display}")
+                
+                # Calculate KPI button
+                if st.button(f"Calculate {selected_kpi}", key="calculate_kpi_btn", type="primary", use_container_width=True):
+                    try:
+                        # Fetch data for the selected instrument
+                        supabase = get_supabase()
+                        if supabase:
+                            # Determine table based on category/symbol
+                            if selected_category == "Commodities" or "^" in symbol or symbol.upper() == "GOLD":
+                                table_name = "market_data_commodities_1min"
+                            elif selected_category == "Indices":
+                                table_name = "market_data_indices_1min"
+                            elif selected_category == "Currencies":
+                                table_name = "market_data_currencies_1min"
+                            else:
+                                table_name = "market_data_1min"
+                            
+                            # Fetch recent data (last 200 bars for calculation)
+                            query_symbol = symbol.upper() if not symbol.startswith("^") else symbol
+                            result = supabase.table(table_name)\
+                                .select("timestamp,open,high,low,close,volume")\
+                                .eq("symbol", query_symbol)\
+                                .order("timestamp", desc=True)\
+                                .limit(200)\
+                                .execute()
+                            
+                            if result.data and len(result.data) > 0:
+                                # Convert to DataFrame
+                                df = pd.DataFrame(result.data)
+                                df['timestamp'] = pd.to_datetime(df['timestamp'])
+                                df = df.sort_values('timestamp')
+                                
+                                # Rename columns to match expected format
+                                df = df.rename(columns={
+                                    'open': 'Open',
+                                    'high': 'High',
+                                    'low': 'Low',
+                                    'close': 'Close',
+                                    'volume': 'Volume'
+                                })
+                                
+                                # Calculate KPI
+                                kpi_result = calculate_kpi(selected_kpi, df)
+                                
+                                if kpi_result is not None:
+                                    st.success(f"✓ {selected_kpi} calculated successfully")
+                                    
+                                    # Display results based on KPI type
+                                    if isinstance(kpi_result, dict):
+                                        # Volume returns a dictionary
+                                        st.markdown("##### KPI Results")
+                                        col_res1, col_res2, col_res3 = st.columns(3)
+                                        with col_res1:
+                                            st.metric("Current Volume", f"{kpi_result.get('current_volume', 0):,.0f}")
+                                        with col_res2:
+                                            st.metric("Average Volume", f"{kpi_result.get('avg_volume', 0):,.0f}")
+                                        with col_res3:
+                                            st.metric("Volume Ratio", f"{kpi_result.get('volume_ratio', 0):.2f}")
+                                    else:
+                                        # Single value result
+                                        st.markdown("##### KPI Result")
+                                        st.metric(selected_kpi, f"{kpi_result:.4f}" if isinstance(kpi_result, float) else str(kpi_result))
+                                    
+                                    # Show signal provider context if selected
+                                    if provider_display and provider_display != "None":
+                                        st.info(f"**Context:** {selected_kpi} calculated for {instrument_display} with signal provider {provider_display}")
+                                else:
+                                    st.warning(f"Could not calculate {selected_kpi}. Please ensure sufficient data is available.")
+                            else:
+                                st.error(f"No data found for {symbol}. Please ingest data first.")
+                        else:
+                            st.error("Database connection not available")
+                    except Exception as e:
+                        st.error(f"Error calculating KPI: {str(e)}")
+                        import traceback
+                        st.code(traceback.format_exc())
+            else:
+                st.warning("Please select a Financial Instrument from the Category dropdown above to calculate KPIs.")
     st.markdown('</div>', unsafe_allow_html=True)
     
     # Data ingestion
