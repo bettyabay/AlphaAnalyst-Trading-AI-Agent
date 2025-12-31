@@ -865,64 +865,115 @@ def phase1_foundation_data():
                 except Exception:
                     return None
             return None
-        categories = ["Commodities", "Indices", "Currencies", "Stocks", "Add..."]
+        # 1. Ensure Catalog is seeded if empty
+        if sb:
+            try:
+                res = sb.table("instrument_catalog").select("symbol", count="exact", head=True).execute()
+                if res.count == 0:
+                     default_map = {
+                        "Commodities": ["GOLD"],
+                        "Indices": ["S&P 500"],
+                        "Currencies": ["EUR/USD"],
+                        "Stocks": list(WATCHLIST_STOCKS.keys())
+                     }
+                     seed_rows = []
+                     for cat, items in default_map.items():
+                        for itm in items:
+                            seed_rows.append({
+                                "symbol": str(itm).upper(),
+                                "name": WATCHLIST_STOCKS.get(itm, itm),
+                                "category": cat,
+                                "sector": "",
+                                "exchange": "",
+                                "source": "default_seed",
+                                "created_at": datetime.utcnow().isoformat(),
+                                "updated_at": datetime.utcnow().isoformat()
+                            })
+                     if seed_rows:
+                        sb.table("instrument_catalog").upsert(seed_rows).execute()
+            except Exception:
+                pass
+
+        # 2. Fetch instruments from catalog to populate UI
+        catalog_data = []
+        if sb:
+            try:
+                res = sb.table("instrument_catalog").select("symbol,category").execute()
+                catalog_data = res.data
+            except Exception:
+                pass
+        
+        # Build dynamic map
+        instruments_map = {}
+        # Ensure base categories exist
+        for base_cat in ["Commodities", "Indices", "Currencies", "Stocks"]:
+            instruments_map[base_cat] = []
+
+        for item in catalog_data:
+            c = item.get("category", "Other")
+            s = item.get("symbol")
+            if c not in instruments_map:
+                instruments_map[c] = []
+            if s and s not in instruments_map[c]:
+                instruments_map[c].append(s)
+                
+        # Sort and add "Add..."
+        for c in instruments_map:
+            instruments_map[c].sort()
+            if "Add..." not in instruments_map[c]:
+                instruments_map[c].append("Add...")
+
+        categories = sorted(list(instruments_map.keys()))
+        if "Add..." not in categories:
+            categories.append("Add...")
+
         selected_category = st.selectbox(
             "Financial Instrument Category",
             options=categories,
-            index=0,
+            index=categories.index("Stocks") if "Stocks" in categories else 0,
             key="select_financial_category"
         )
+
         if selected_category == "Add...":
-            with st.expander("Upload Instruments via Excel/CSV"):
-                st.write("Expected columns: symbol, name, sector (optional), exchange (optional)")
-                inst_file = st.file_uploader("Choose file", type=["csv", "xls", "xlsx"], key="upload_instruments_file")
-                if inst_file:
-                    df = _read_df(inst_file)
-                    if df is None or df.empty:
-                        st.error("Unable to read file or no rows found")
-                    else:
-                        required_cols = ["symbol", "name"]
-                        if not all(col in df.columns for col in required_cols):
-                            st.error(f"File must include: {', '.join(required_cols)}")
+            with st.expander("Add New Instrument", expanded=True):
+                with st.form("add_new_instrument_main"):
+                    st.write("Add a new instrument to the catalog.")
+                    i_symbol = st.text_input("Symbol", help="e.g. AAPL").upper().strip()
+                    i_name = st.text_input("Name", help="e.g. Apple Inc.")
+                    
+                    cat_opts = ["Commodities", "Indices", "Currencies", "Stocks", "Other"]
+                    i_cat_select = st.selectbox("Category", cat_opts)
+                    i_cat = i_cat_select
+                    if i_cat_select == "Other":
+                        i_cat = st.text_input("Custom Category Name")
+                    
+                    i_sector = st.text_input("Sector (Optional)")
+                    i_exchange = st.text_input("Exchange (Optional)")
+                    
+                    if st.form_submit_button("Save to Catalog"):
+                        if i_symbol and i_name and i_cat:
+                            if not sb:
+                                st.error("Database not configured")
+                            else:
+                                row = {
+                                    "symbol": i_symbol,
+                                    "name": i_name,
+                                    "category": i_cat,
+                                    "sector": i_sector,
+                                    "exchange": i_exchange,
+                                    "source": "manual_input",
+                                    "created_at": datetime.utcnow().isoformat(),
+                                    "updated_at": datetime.utcnow().isoformat()
+                                }
+                                try:
+                                    sb.table("instrument_catalog").upsert([row]).execute()
+                                    st.success(f"Saved {i_symbol}")
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"Error: {e}")
                         else:
-                            df_preview = df[[c for c in df.columns if c in ["symbol", "name", "sector", "exchange"]]].copy()
-                            st.dataframe(df_preview, use_container_width=True)
-                            if st.button("Save to database", key="save_instruments_db"):
-                                if not sb:
-                                    st.error("Database not configured")
-                                else:
-                                    rows = []
-                                    for _, row in df.iterrows():
-                                        symbol = str(row["symbol"]).upper().strip()
-                                        if not symbol:
-                                            continue
-                                        rows.append({
-                                            "symbol": symbol,
-                                            "profile_text": f"{row.get('name', '')}",
-                                            "profile_data": {
-                                                "name": row.get("name", ""),
-                                                "sector": row.get("sector", ""),
-                                                "exchange": row.get("exchange", "")
-                                            },
-                                            "source": "excel_upload",
-                                            "generated_at": datetime.utcnow().isoformat(),
-                                            "analysis_timestamp": datetime.utcnow().isoformat()
-                                        })
-                                    try:
-                                        try:
-                                            sb.table("instrument_profiles").upsert(rows).execute()
-                                        except Exception:
-                                            sb.table("instrument_profiles").insert(rows).execute()
-                                        st.success(f"Saved {len(rows)} instruments")
-                                        st.session_state.custom_instruments = [r["symbol"] for r in rows]
-                                    except Exception as e:
-                                        st.error(f"Failed to save: {str(e)}")
-        instruments_map = {
-            "Commodities": ["GOLD", "Add..."],
-            "Indices": ["S&P 500", "Add..."],
-            "Currencies": ["EUR/USD", "Add..."],
-            "Stocks": [*WATCHLIST_STOCKS.keys(), "Add..."] + (st.session_state.get("custom_instruments", []) or [])
-        }
+                            st.error("Symbol, Name, and Category are required.")
+
         current_instruments = instruments_map.get(selected_category, ["Add..."])
         selected_instrument_item = st.selectbox(
             "Financial Instrument",
@@ -930,24 +981,39 @@ def phase1_foundation_data():
             index=0,
             key="select_financial_instrument_item"
         )
+        
         if selected_instrument_item == "Add...":
-            with st.expander("Upload Additional Instruments via Excel/CSV"):
-                st.write("Expected columns: symbol, name, sector (optional), exchange (optional)")
-                inst_file2 = st.file_uploader("Choose file", type=["csv", "xls", "xlsx"], key="upload_instruments_file_2")
-                if inst_file2:
-                    df2 = _read_df(inst_file2)
-                    if df2 is None or df2.empty:
-                        st.error("Unable to read file or no rows found")
-                    else:
-                        required_cols = ["symbol", "name"]
-                        if not all(col in df2.columns for col in required_cols):
-                            st.error(f"File must include: {', '.join(required_cols)}")
+            with st.expander(f"Add Instrument to {selected_category}", expanded=True):
+                with st.form("add_instrument_sub"):
+                    st.write(f"Add to {selected_category}")
+                    s_symbol = st.text_input("Symbol", key="sub_sym").upper().strip()
+                    s_name = st.text_input("Name", key="sub_name")
+                    s_sector = st.text_input("Sector (Optional)", key="sub_sec")
+                    s_exchange = st.text_input("Exchange (Optional)", key="sub_exch")
+                    
+                    if st.form_submit_button("Save Instrument"):
+                        if s_symbol and s_name:
+                            if not sb:
+                                st.error("Database not configured")
+                            else:
+                                row = {
+                                    "symbol": s_symbol,
+                                    "name": s_name,
+                                    "category": selected_category,
+                                    "sector": s_sector,
+                                    "exchange": s_exchange,
+                                    "source": "manual_input",
+                                    "created_at": datetime.utcnow().isoformat(),
+                                    "updated_at": datetime.utcnow().isoformat()
+                                }
+                                try:
+                                    sb.table("instrument_catalog").upsert([row]).execute()
+                                    st.success(f"Saved {s_symbol}")
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"Error: {e}")
                         else:
-                            st.dataframe(df2[[c for c in df2.columns if c in ["symbol", "name", "sector", "exchange"]]], use_container_width=True)
-                            if st.button("Save instruments", key="save_instruments_btn_2"):
-                                new_syms = [str(s).upper().strip() for s in df2["symbol"].tolist()]
-                                st.session_state.custom_instruments = sorted(set((st.session_state.get("custom_instruments") or []) + new_syms))
-                                st.success(f"Added {len(new_syms)} instruments to selection")
+                            st.error("Missing symbol or name")
         if selected_category == "Commodities" and selected_instrument_item == "GOLD":
             with st.expander("Gold Data (BarChart)"):
                 st.info("Ingest 5-year 1-minute Gold data from BarChart export.")
