@@ -40,7 +40,8 @@ class VolumeScreeningEngine:
     def _fetch_history(self, symbol: str, period: str = "3mo", interval: str = "1d", asset_class: str = "stocks") -> Optional[pd.DataFrame]:
         """Fetch historical data"""
         lookback = period_to_days(period, default=180)
-        data = fetch_ohlcv(symbol, interval=interval, lookback_days=lookback, asset_class=asset_class)
+        # Note: fetch_ohlcv handles asset class routing internally based on symbol format
+        data = fetch_ohlcv(symbol, interval=interval, lookback_days=lookback)
         if data is None or data.empty:
             return None
         required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']

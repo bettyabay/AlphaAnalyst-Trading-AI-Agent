@@ -13,6 +13,82 @@ from .polygon_integration import PolygonDataClient
 
 load_dotenv()
 
+
+def get_1min_table_name_for_symbol(symbol: str) -> str:
+    """
+    Determine the appropriate 1-minute market data table based on symbol format.
+    
+    Args:
+        symbol: Symbol string (e.g., 'AAPL', 'XAUUSD', 'I:SPX', 'C:EURUSD')
+    
+    Returns:
+        Table name string:
+        - 'market_data_stocks_1min' for regular stocks
+        - 'market_data_commodities_1min' for commodities (symbols with '*' or commodities like XAUUSD)
+        - 'market_data_indices_1min' for indices (symbols starting with '^' or 'I:')
+        - 'market_data_currencies_1min' for currencies (symbols with '/' or 'C:' prefix)
+    """
+    symbol_upper = symbol.upper() if symbol else ""
+    
+    # Check for commodities (contains * or common commodity symbols)
+    # Check this BEFORE currencies to ensure C:XAUUSD goes to commodities
+    if "*" in symbol_upper or "XAU" in symbol_upper or "GOLD" in symbol_upper:
+        return "market_data_commodities_1min"
+    
+    # Check for indices first (I: prefix or ^ prefix)
+    elif symbol_upper.startswith("I:") or symbol_upper.startswith("^"):
+        return "market_data_indices_1min"
+    # Check for currencies (C: prefix or / separator)
+    elif symbol_upper.startswith("C:") or "/" in symbol_upper:
+        return "market_data_currencies_1min"
+    # Default to stocks
+    else:
+        return "market_data_stocks_1min"
+
+
+def convert_instrument_to_polygon_symbol(category: str, instrument: str) -> str:
+    """
+    Convert instrument name/category to Polygon API symbol format.
+    
+    Args:
+        category: Category name (e.g., 'Commodities', 'Indices', 'Currencies', 'Stocks')
+        instrument: Instrument name/symbol (e.g., 'GOLD', 'S&P 500', 'EUR/USD', 'AAPL')
+    
+    Returns:
+        Polygon symbol string (e.g., 'XAUUSD', 'I:SPX', 'C:EURUSD', 'AAPL')
+    """
+    instrument_upper = instrument.upper().strip()
+    category_upper = category.upper().strip()
+    
+    # Commodities
+    if category_upper == "COMMODITIES":
+        if "GOLD" in instrument_upper:
+            return "C:XAUUSD"  # Gold spot price (treated as currency pair by Polygon)
+        return instrument_upper
+    
+    # Indices
+    elif category_upper == "INDICES":
+        if "S&P" in instrument_upper or "SPX" in instrument_upper or "SP500" in instrument_upper:
+            return "I:SPX"  # S&P 500 index
+        elif instrument_upper.startswith("^"):
+            return f"I:{instrument_upper[1:]}"  # Remove ^ and add I: prefix
+        elif not instrument_upper.startswith("I:"):
+            return f"I:{instrument_upper}"
+        return instrument_upper
+    
+    # Currencies
+    elif category_upper == "CURRENCIES":
+        if "/" in instrument_upper:
+            return f"C:{instrument_upper.replace('/', '')}"  # EUR/USD -> C:EURUSD
+        elif not instrument_upper.startswith("C:"):
+            return f"C:{instrument_upper}"
+        return instrument_upper
+    
+    # Stocks - return as is
+    else:
+        return instrument_upper
+
+
 class DataIngestionPipeline:
     """Data ingestion pipeline for market data"""
     
@@ -118,9 +194,14 @@ class DataIngestionPipeline:
                         end_date = end_date.replace(hour=23, minute=59, second=59, microsecond=999999)
 
                 # Always re-fetch the recent window to close any gaps caused by partial days
+                # BUT ONLY IF we are near the end date (i.e., updating recent data)
+                # If we are fetching historical data (start_date is far in the past), do not override start_date
                 recent_window_hours = 6
                 recent_window_start = end_date - timedelta(hours=recent_window_hours)
-                if recent_window_start > start_date:
+                
+                # Only apply recent window logic if the calculated start_date is very close to end_date
+                # This prevents historical backfills (e.g. 5 years) from being truncated to just the last 6 hours
+                if recent_window_start > start_date and (end_date - start_date).days < 2:
                     print(f"ℹ️ Expanding intraday window to re-fetch last {recent_window_hours}h for {symbol} ({recent_window_start.strftime('%Y-%m-%d %H:%M:%S')} to {end_date.strftime('%Y-%m-%d %H:%M:%S')})")
                     start_date = recent_window_start.replace(hour=0, minute=0, second=0, microsecond=0)
             else:
@@ -140,7 +221,9 @@ class DataIngestionPipeline:
                 target_table = "market_data_5min"
                 multiplier = 5
             elif interval in ("1min", "1-minute", "1m"):
-                target_table = "market_data_1min"
+                # Route to appropriate table based on symbol format
+                # For 1min data, use symbol-based routing to determine correct table
+                target_table = get_1min_table_name_for_symbol(symbol)
                 multiplier = 1
             else:
                 target_table = None
@@ -500,10 +583,14 @@ class DataIngestionPipeline:
                 if total_inserted > 0:
                     last_ts_msg = f" (Last timestamp: {last_timestamp_written})" if last_timestamp_written else ""
                     print(f"✅ Completed {symbol}: Inserted {total_inserted} new records, skipped {total_skipped} duplicates{last_ts_msg}")
+                    return True
                 elif total_skipped > 0:
                     print(f"ℹ️ Completed {symbol}: All {total_skipped} records were duplicates or already exist")
+                    return True
                 else:
-                    print(f"⚠️ Completed {symbol}: No data inserted. Check if dates are in the future or if there's no data available for this period.")
+                    print(f"⚠️ No data ingested for {symbol}. No records found or all failed.")
+                    return False
+
                 return all_success
             else:
                 # Daily data with resume-from-latest behavior
