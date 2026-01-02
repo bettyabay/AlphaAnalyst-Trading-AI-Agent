@@ -21,7 +21,8 @@ from phi.tools.googlesearch import GoogleSearch
 # Phase 1 imports
 from tradingagents.database.config import get_supabase
 from tradingagents.dataflows.ingestion_pipeline import DataIngestionPipeline
-from tradingagents.dataflows.universal_ingestion import ingest_market_data
+from tradingagents.dataflows.gold_ingestion import ingest_gold_data
+from tradingagents.dataflows.universal_ingestion import ingest_market_data, ingest_from_barchart_api
 from tradingagents.dataflows.signal_provider_ingestion import ingest_signal_provider_data, validate_signal_provider_data
 from tradingagents.dataflows.kpi_calculator import calculate_kpi
 from tradingagents.dataflows.kpi_calculator import calculate_kpi
@@ -1021,24 +1022,77 @@ def phase1_foundation_data():
                         else:
                             st.error("Missing symbol or name")
         if selected_instrument_item != "Add...":
-            with st.expander(f"Data Management: {selected_instrument_item}"):
-                st.info(f"Ingest 1-minute data for {selected_instrument_item} ({selected_category}). Supports CSV/Excel from BarChart or standard formats.")
+            # 1. BarChart API Ingestion (Primary)
+            with st.expander(f"Data Management: {selected_instrument_item} (BarChart API)", expanded=True):
+                st.info(f"Ingest 1-minute data for {selected_instrument_item} directly from BarChart API.")
                 
-                # Dynamic key to ensure uniqueness
+                col_api1, col_api2 = st.columns(2)
+                with col_api1:
+                    api_start_date = st.date_input("Start Date", value=datetime.now() - timedelta(days=365*5), key=f"api_start_{selected_category}_{selected_instrument_item}")
+                with col_api2:
+                    api_end_date = st.date_input("End Date", value=datetime.now(), key=f"api_end_{selected_category}_{selected_instrument_item}")
+                
+                # Default API Symbol Logic
+                default_api_symbol = selected_instrument_item
+                if selected_instrument_item == "GOLD":
+                    default_api_symbol = "GC*1"
+                elif selected_instrument_item == "S&P 500":
+                    default_api_symbol = "$SPX"
+                
+                api_symbol = st.text_input("BarChart Symbol", value=default_api_symbol, help="e.g. GC*1, $SPX, AAPL", key=f"api_sym_{selected_category}_{selected_instrument_item}")
+                
+                if st.button("Fetch & Ingest from API", key=f"btn_api_{selected_category}_{selected_instrument_item}"):
+                    with st.spinner("Fetching data from BarChart..."):
+                        s_str = api_start_date.strftime("%Y%m%d")
+                        e_str = api_end_date.strftime("%Y%m%d")
+                        
+                        # Use selected_instrument_item as the DB symbol
+                        result = ingest_from_barchart_api(
+                            api_symbol=api_symbol,
+                            asset_class=selected_category,
+                            start_date=s_str,
+                            end_date=e_str,
+                            db_symbol=selected_instrument_item
+                        )
+                        
+                        if result.get("success"):
+                            st.success(result.get("message"))
+                        else:
+                            st.error(f"Failed: {result.get('message')}")
+
+            # 2. File Upload (Secondary)
+            with st.expander(f"Data Management: {selected_instrument_item} (File Upload)", expanded=False):
+                st.info(f"Ingest 1-minute data for {selected_instrument_item} ({selected_category}) via CSV/Excel.")
+                
+                # Timezone Selection for File Upload
+                tz_options = ["America/New_York", "UTC", "Asia/Dubai", "Europe/London"]
+                source_tz = st.selectbox(
+                    "Source Timezone (of the file)", 
+                    options=tz_options, 
+                    index=0, 
+                    key=f"tz_{selected_category}_{selected_instrument_item}",
+                    help="Data will be converted to GMT+4 (Dubai) automatically."
+                )
+                
                 upload_key = f"upload_{selected_category}_{selected_instrument_item}"
                 uploaded_file = st.file_uploader(f"Upload Data for {selected_instrument_item}", type=["csv", "xls", "xlsx"], key=upload_key)
                 
                 if uploaded_file:
-                    if st.button(f"Ingest Data", key=f"btn_ingest_{selected_category}_{selected_instrument_item}"):
-                        with st.spinner("Ingesting..."):
+                    if st.button(f"Ingest File", key=f"btn_ingest_file_{selected_category}_{selected_instrument_item}"):
+                        with st.spinner("Ingesting file..."):
                             # Handle specific symbol mappings if needed
                             effective_symbol = selected_instrument_item
                             if selected_instrument_item == "GOLD":
                                 effective_symbol = "^XAUUSD"
                             elif selected_instrument_item == "S&P 500":
-                                effective_symbol = "^SPX"  # Common mapping, adjustable
+                                effective_symbol = "^SPX"
                                 
-                            result = ingest_market_data(uploaded_file, asset_class=selected_category, default_symbol=effective_symbol)
+                            result = ingest_market_data(
+                                uploaded_file, 
+                                asset_class=selected_category, 
+                                default_symbol=effective_symbol,
+                                source_timezone=source_tz
+                            )
                             
                             if result.get("success"):
                                 st.success(result.get("message"))
@@ -1217,7 +1271,7 @@ def phase1_foundation_data():
                     elif signal_file:
                         st.warning("Please fill in provider name and symbol before uploading")
     with col_c:
-        kpi_options = ["ATR", "Volume", "VAMP", "EMA", "SMA", "Add..."] + (st.session_state.get("kpi_indicators", []) or [])
+        kpi_options = ["ATR", "Volume", "VWAP", "EMA", "SMA", "RSI", "MACD", "Bollinger Bands", "Stochastic", "Momentum", "Add..."] + (st.session_state.get("kpi_indicators", []) or [])
         selected_kpi = st.selectbox(
             "KPI Indicator",
             options=kpi_options,
@@ -1309,23 +1363,59 @@ def phase1_foundation_data():
                                     'volume': 'Volume'
                                 })
                                 
+                                # Map display name to internal name
+                                internal_kpi_name = selected_kpi
+                                if selected_kpi == "Bollinger Bands":
+                                    internal_kpi_name = "BB"
+                                
                                 # Calculate KPI
-                                kpi_result = calculate_kpi(selected_kpi, df)
+                                kpi_result = calculate_kpi(internal_kpi_name, df)
                                 
                                 if kpi_result is not None:
                                     st.success(f"✓ {selected_kpi} calculated successfully")
                                     
                                     # Display results based on KPI type
                                     if isinstance(kpi_result, dict):
-                                        # Volume returns a dictionary
                                         st.markdown("##### KPI Results")
-                                        col_res1, col_res2, col_res3 = st.columns(3)
-                                        with col_res1:
-                                            st.metric("Current Volume", f"{kpi_result.get('current_volume', 0):,.0f}")
-                                        with col_res2:
-                                            st.metric("Average Volume", f"{kpi_result.get('avg_volume', 0):,.0f}")
-                                        with col_res3:
-                                            st.metric("Volume Ratio", f"{kpi_result.get('volume_ratio', 0):.2f}")
+                                        
+                                        # Handle different dictionary structures
+                                        if "current_volume" in kpi_result:
+                                            # Volume
+                                            col_res1, col_res2, col_res3 = st.columns(3)
+                                            with col_res1:
+                                                st.metric("Current Volume", f"{kpi_result.get('current_volume', 0):,.0f}")
+                                            with col_res2:
+                                                st.metric("Average Volume", f"{kpi_result.get('avg_volume', 0):,.0f}")
+                                            with col_res3:
+                                                st.metric("Volume Ratio", f"{kpi_result.get('volume_ratio', 0):.2f}")
+                                        elif "macd" in kpi_result:
+                                            # MACD
+                                            col_res1, col_res2, col_res3 = st.columns(3)
+                                            with col_res1:
+                                                st.metric("MACD Line", f"{kpi_result.get('macd', 0):.4f}")
+                                            with col_res2:
+                                                st.metric("Signal Line", f"{kpi_result.get('signal', 0):.4f}")
+                                            with col_res3:
+                                                st.metric("Histogram", f"{kpi_result.get('histogram', 0):.4f}")
+                                        elif "upper" in kpi_result:
+                                            # Bollinger Bands
+                                            col_res1, col_res2, col_res3 = st.columns(3)
+                                            with col_res1:
+                                                st.metric("Upper Band", f"{kpi_result.get('upper', 0):.4f}")
+                                            with col_res2:
+                                                st.metric("Middle Band", f"{kpi_result.get('middle', 0):.4f}")
+                                            with col_res3:
+                                                st.metric("Lower Band", f"{kpi_result.get('lower', 0):.4f}")
+                                        elif "k_line" in kpi_result:
+                                            # Stochastic
+                                            col_res1, col_res2 = st.columns(2)
+                                            with col_res1:
+                                                st.metric("%K Line", f"{kpi_result.get('k_line', 0):.2f}")
+                                            with col_res2:
+                                                st.metric("%D Line", f"{kpi_result.get('d_line', 0):.2f}")
+                                        else:
+                                            # Generic dictionary fallback
+                                            st.write(kpi_result)
                                     else:
                                         # Single value result
                                         st.markdown("##### KPI Result")

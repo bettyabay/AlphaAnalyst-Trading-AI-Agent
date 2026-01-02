@@ -98,14 +98,34 @@ def calculate_vamp(df: pd.DataFrame, period: int = 20) -> Optional[float]:
         
         # Calculate VWAP for the last N periods
         tail_df = df.tail(period)
-        close_tail = pd.to_numeric(tail_df['Close'], errors='coerce')
         volume_tail = pd.to_numeric(tail_df['Volume'], errors='coerce')
         
-        if close_tail.empty or volume_tail.empty:
+        if volume_tail.empty:
+            return None
+            
+        # Try to use Typical Price = (High + Low + Close) / 3
+        # Check for both title case and lowercase column names
+        if all(col in tail_df.columns for col in ['High', 'Low', 'Close']):
+            high = pd.to_numeric(tail_df['High'], errors='coerce')
+            low = pd.to_numeric(tail_df['Low'], errors='coerce')
+            close = pd.to_numeric(tail_df['Close'], errors='coerce')
+            typical_price = (high + low + close) / 3
+        elif all(col in tail_df.columns for col in ['high', 'low', 'close']):
+            high = pd.to_numeric(tail_df['high'], errors='coerce')
+            low = pd.to_numeric(tail_df['low'], errors='coerce')
+            close = pd.to_numeric(tail_df['close'], errors='coerce')
+            typical_price = (high + low + close) / 3
+        else:
+            # Fallback to Close only
+            if 'Close' in tail_df.columns:
+                typical_price = pd.to_numeric(tail_df['Close'], errors='coerce')
+            else:
+                typical_price = pd.to_numeric(tail_df['close'], errors='coerce')
+        
+        if typical_price.empty:
             return None
         
         # VWAP = sum(Price * Volume) / sum(Volume)
-        typical_price = close_tail  # Using Close price
         price_volume = typical_price * volume_tail
         sum_price_volume = price_volume.sum()
         sum_volume = volume_tail.sum()

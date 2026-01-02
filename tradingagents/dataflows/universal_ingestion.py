@@ -1,9 +1,141 @@
 import pandas as pd
 from tradingagents.database.config import get_supabase
+from tradingagents.dataflows.barchart_service import fetch_barchart_data, ensure_continuous_timestamps
 import io
 import traceback
+from datetime import datetime
+import pytz
 
-def ingest_market_data(uploaded_file, asset_class, default_symbol=None):
+def ingest_from_barchart_api(api_symbol, asset_class, start_date=None, end_date=None, years=5, db_symbol=None):
+    """
+    Ingest data directly from BarChart API into the appropriate Supabase table.
+    Handles timezone conversion from US Eastern (BarChart default) to GMT+4 (Dubai).
+    
+    Args:
+        api_symbol: BarChart symbol (e.g. "AAPL", "GC*1")
+        asset_class: "Commodities", "Indices", "Currencies", "Stocks"
+        start_date: Optional start date (datetime or YYYYMMDD string)
+        end_date: Optional end date (datetime or YYYYMMDD string)
+        years: Number of years to fetch if start_date is not provided
+        db_symbol: Symbol to store in DB (defaults to api_symbol if None)
+        
+    Returns:
+        dict: {"success": bool, "message": str}
+    """
+    # Determine target table
+    table_map = {
+        "Commodities": "market_data_commodities_1min",
+        "Indices": "market_data_indices_1min",
+        "Currencies": "market_data_currencies_1min",
+        "Stocks": "market_data_stocks_1min"
+    }
+    
+    target_table = table_map.get(asset_class)
+    if not target_table:
+        return {"success": False, "message": f"Unknown asset class: {asset_class}"}
+
+    try:
+        # Determine dates
+        if not end_date:
+            end_dt = datetime.now()
+        elif isinstance(end_date, str):
+            end_dt = datetime.strptime(end_date, "%Y%m%d")
+        else:
+            end_dt = end_date
+            
+        if not start_date:
+            start_dt = end_dt.replace(year=end_dt.year - years)
+        elif isinstance(start_date, str):
+            start_dt = datetime.strptime(start_date, "%Y%m%d")
+        else:
+            start_dt = start_date
+            
+        s_str = start_dt.strftime("%Y%m%d")
+        e_str = end_dt.strftime("%Y%m%d")
+        
+        # Fetch data
+        df = fetch_barchart_data(api_symbol, s_str, e_str, interval=1)
+        
+        if df.empty:
+            return {"success": False, "message": f"No data returned from BarChart for {api_symbol} ({s_str}-{e_str})"}
+            
+        # Ensure continuity
+        df = ensure_continuous_timestamps(df, interval_minutes=1)
+        
+        # Prepare for DB
+        db_rows = []
+        target_symbol = db_symbol if db_symbol else api_symbol
+        
+        # Timezone configuration
+        # BarChart data is typically in Exchange Time (e.g., US Eastern for NYSE/COMEX)
+        # We convert to GMT+4 (Dubai) as requested.
+        src_tz = pytz.timezone('America/New_York') 
+        dst_tz = pytz.timezone('Asia/Dubai')       
+        
+        for timestamp, row in df.iterrows():
+            if pd.isna(row.get("close")):
+                continue 
+                
+            try:
+                # Handle timezone conversion
+                # timestamp from pandas is naive (no timezone info)
+                # 1. Localize to Source Timezone (assume NY/ET)
+                if timestamp.tzinfo is None:
+                    ts_localized = src_tz.localize(timestamp)
+                else:
+                    ts_localized = timestamp.astimezone(src_tz)
+                
+                # 2. Convert to Target Timezone (GMT+4)
+                ts_target = ts_localized.astimezone(dst_tz)
+                
+                record = {
+                    "symbol": str(target_symbol),
+                    "timestamp": ts_target.isoformat(),
+                    "open": float(row["open"]),
+                    "high": float(row["high"]),
+                    "low": float(row["low"]),
+                    "close": float(row["close"]),
+                    "volume": int(row["volume"]) if pd.notnull(row.get("volume")) else 0
+                }
+                
+                # Add open_interest if applicable (mostly for Commodities/Futures)
+                if "openInterest" in row and pd.notnull(row["openInterest"]):
+                    # Check if table has open_interest column (Stocks usually don't, others might)
+                    # For simplicity, we add it to the dict, and if the table doesn't have it, Supabase might ignore or error.
+                    # Based on schema, Stocks table does NOT have open_interest. Others DO.
+                    if asset_class != "Stocks":
+                        record["open_interest"] = int(row["openInterest"])
+                
+                db_rows.append(record)
+            except (ValueError, TypeError):
+                continue
+
+        if not db_rows:
+            return {"success": False, "message": "No valid data rows after processing."}
+
+        # Batch insert
+        sb = get_supabase()
+        if not sb:
+             return {"success": False, "message": "Supabase not configured (check .env)"}
+             
+        chunk_size = 1000
+        total_inserted = 0
+        
+        for i in range(0, len(db_rows), chunk_size):
+            chunk = db_rows[i:i+chunk_size]
+            try:
+                sb.table(target_table).upsert(chunk).execute()
+                total_inserted += len(chunk)
+            except Exception as e:
+                return {"success": False, "message": f"Database error at chunk {i}: {str(e)}"}
+                 
+        return {"success": True, "message": f"Successfully ingested {total_inserted} records for {target_symbol} ({s_str}-{e_str}) into {target_table}."}
+
+    except Exception as e:
+        traceback.print_exc()
+        return {"success": False, "message": f"API Ingestion error: {str(e)}"}
+
+def ingest_market_data(uploaded_file, asset_class, default_symbol=None, source_timezone="America/New_York"):
     """
     Ingest uploaded Market Data (CSV/XLS/XLSX) into the appropriate Supabase table.
     
@@ -11,12 +143,21 @@ def ingest_market_data(uploaded_file, asset_class, default_symbol=None):
         uploaded_file: Streamlit UploadedFile object
         asset_class: "Commodities", "Indices", "Currencies", "Stocks"
         default_symbol: Symbol to use if not present in the file
+        source_timezone: Timezone of the data in the file (default: US Eastern).
+                         Will be converted to GMT+4 (Dubai).
         
     Returns:
         dict: {"success": bool, "message": str}
     """
     if uploaded_file is None:
         return {"success": False, "message": "No file uploaded"}
+
+    # Timezone configuration
+    try:
+        src_tz = pytz.timezone(source_timezone)
+        dst_tz = pytz.timezone('Asia/Dubai')
+    except pytz.UnknownTimeZoneError:
+        return {"success": False, "message": f"Unknown timezone: {source_timezone}"}
 
     # Determine target table
     table_map = {
@@ -119,25 +260,37 @@ def ingest_market_data(uploaded_file, asset_class, default_symbol=None):
             except Exception as e:
                  return {"success": False, "message": f"Error parsing timestamp: {str(e)}"}
         
-        # Convert UTC to GMT+4 (Barchart exports are typically UTC or Exchange Time, assuming UTC based on user input)
-        # Check if timezone naive, if so localize to UTC then convert. If already aware, convert.
-        if df["timestamp"].dt.tz is None:
-             df["timestamp"] = df["timestamp"] + pd.Timedelta(hours=4)
-        else:
-             # If already tz-aware, convert to GMT+4 (Etc/GMT-4 which is +4, or just add offset if we strip tz)
-             # Simpler to just add 4 hours to the underlying UTC time if we treat it as naive-ish or just want to shift
-             df["timestamp"] = df["timestamp"].dt.tz_convert(None) + pd.Timedelta(hours=4)
-
-        # Select only valid columns
-        valid_cols = ["symbol", "timestamp", "open", "high", "low", "close", "volume", "open_interest"]
-        cols_to_keep = [c for c in valid_cols if c in df.columns]
-        df = df[cols_to_keep]
-        
-        # Replace NaN with None for JSON compatibility
-        df = df.where(pd.notnull(df), None)
-        
-        # Convert to records
-        records = df.to_dict(orient="records")
+        # Prepare for DB
+        records = []
+        for _, row in df.iterrows():
+            try:
+                # Timezone Conversion
+                ts = row["timestamp"]
+                # If naive, assume source_timezone
+                if ts.tzinfo is None:
+                    ts_localized = src_tz.localize(ts)
+                else:
+                    ts_localized = ts.astimezone(src_tz)
+                
+                # Convert to GMT+4
+                ts_target = ts_localized.astimezone(dst_tz)
+                
+                record = {
+                    "symbol": str(row["symbol"]),
+                    "timestamp": ts_target.isoformat(),
+                    "open": float(row["open"]),
+                    "high": float(row["high"]),
+                    "low": float(row["low"]),
+                    "close": float(row["close"]),
+                    "volume": int(row["volume"])
+                }
+                
+                if "open_interest" in row and pd.notnull(row["open_interest"]):
+                    record["open_interest"] = int(row["open_interest"])
+                
+                records.append(record)
+            except (ValueError, TypeError):
+                continue
         
         if not records:
             return {"success": False, "message": "No valid records found after processing"}
