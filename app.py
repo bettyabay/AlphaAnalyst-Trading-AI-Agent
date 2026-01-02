@@ -546,13 +546,56 @@ def get_stock_data(symbol):
         st.error(f"Error fetching data: {str(e)}")
         return None, None
 
-def create_price_chart(hist_data, symbol):
+def create_price_chart(hist_data, symbol, signals=None):
     fig = go.Figure()
     fig.add_trace(go.Candlestick(
         x=hist_data.index, open=hist_data['Open'],
         high=hist_data['High'], low=hist_data['Low'],
         close=hist_data['Close'], name='OHLC'
     ))
+    
+    if signals:
+        # Separate buy and sell signals
+        buy_signals = []
+        sell_signals = []
+        
+        for s in signals:
+            try:
+                # Ensure date format compatibility
+                s_date = pd.to_datetime(s.get('signal_date'))
+                # If timezone aware, convert to naive or match hist_data
+                if s_date.tzinfo is not None:
+                    s_date = s_date.tz_localize(None)
+                
+                price = s.get('entry_price')
+                if price is None:
+                    continue
+                    
+                if s.get('action', '').lower() == 'buy':
+                    buy_signals.append((s_date, price))
+                elif s.get('action', '').lower() == 'sell':
+                    sell_signals.append((s_date, price))
+            except Exception:
+                continue
+        
+        if buy_signals:
+            fig.add_trace(go.Scatter(
+                x=[x[0] for x in buy_signals],
+                y=[x[1] for x in buy_signals],
+                mode='markers',
+                name='Buy Signal',
+                marker=dict(symbol='triangle-up', size=12, color='green', line=dict(width=1, color='darkgreen'))
+            ))
+            
+        if sell_signals:
+            fig.add_trace(go.Scatter(
+                x=[x[0] for x in sell_signals],
+                y=[x[1] for x in sell_signals],
+                mode='markers',
+                name='Sell Signal',
+                marker=dict(symbol='triangle-down', size=12, color='red', line=dict(width=1, color='darkred'))
+            ))
+
     fig.update_layout(
         title=f'{symbol} Price Movement',
         template='plotly_white',
@@ -859,17 +902,26 @@ def phase1_foundation_data():
         def _read_df(file):
             file.seek(0)
             name = file.name.lower()
-            if name.endswith(".csv"):
-                df = pd.read_csv(file)
-            elif name.endswith(".xls") or name.endswith(".xlsx"):
-                try:
-                    df = pd.read_excel(file)
-                except Exception:
-                    file.seek(0)
-                    return None
-            else:
+            df = None
+            try:
+                if name.endswith(".csv"):
+                    df = pd.read_csv(file)
+                else:
+                    # Try Excel first
+                    try:
+                        df = pd.read_excel(file)
+                    except Exception as e:
+                        # Fallback to CSV
+                        file.seek(0)
+                        try:
+                            df = pd.read_csv(file)
+                        except:
+                            raise e
+            except Exception as e:
+                st.error(f"Error reading file {name}: {str(e)}")
                 file.seek(0)
                 return None
+            
             file.seek(0)
             return df
         # 1. Ensure Catalog is seeded if empty
@@ -1117,7 +1169,7 @@ def phase1_foundation_data():
                 with st.expander("PipXpert Signal Data"):
                     st.info("Upload PipXpert signal data from Excel file.")
                     provider_name = "PipXpert"
-                    symbol = st.text_input("Symbol/Currency Pair", value="", key="pipxpert_symbol", help="Enter the trading symbol or currency pair")
+                    # symbol input removed as it is now read from the file
                     
                     # Date range selection (optional)
                     col_date1, col_date2 = st.columns(2)
@@ -1135,7 +1187,7 @@ def phase1_foundation_data():
                         help="GMT+4 is standard"
                     )
                     
-                    signal_file = st.file_uploader("Upload Signal Data (Excel)", type=["xls", "xlsx"], key="pipxpert_upload")
+                    signal_file = st.file_uploader("Upload Signal Data (Excel)", type=["xls", "xlsx", "csv"], key="pipxpert_upload")
                     
                     if signal_file:
                         # Preview and validate
@@ -1145,48 +1197,43 @@ def phase1_foundation_data():
                                 st.dataframe(df_preview.head(10), use_container_width=True)
                                 
                                 # Validate data
-                                if symbol:
-                                    validation = validate_signal_provider_data(
-                                        df_preview, 
-                                        provider_name, 
-                                        symbol, 
-                                        timezone_offset
-                                    )
+                                validation = validate_signal_provider_data(
+                                    df_preview, 
+                                    provider_name, 
+                                    timezone_offset
+                                )
+                                
+                                if validation["valid"]:
+                                    st.success("✓ Data validation passed")
+                                    if validation.get("warnings"):
+                                        for warning in validation["warnings"]:
+                                            st.warning(f"⚠ {warning}")
                                     
-                                    if validation["valid"]:
-                                        st.success("✓ Data validation passed")
-                                        if validation.get("warnings"):
-                                            for warning in validation["warnings"]:
-                                                st.warning(f"⚠ {warning}")
-                                        
-                                        # Show data summary
-                                        summary = validation.get("data_summary", {})
-                                        if summary:
-                                            st.info(f"**Summary:** {summary.get('total_rows', 0)} rows | "
-                                                   f"Actions: {summary.get('action_counts', {})} | "
-                                                   f"Date range: {summary.get('date_range', {}).get('start', 'N/A')} to {summary.get('date_range', {}).get('end', 'N/A')}")
-                                        
-                                        # Confirmation and submit button
-                                        if st.button("✅ Ingest Signal Data", key="ingest_pipxpert_btn", type="primary"):
-                                            result = ingest_signal_provider_data(
-                                                signal_file,
-                                                provider_name,
-                                                symbol,
-                                                timezone_offset
-                                            )
-                                            if result.get("success"):
-                                                st.success(result.get("message"))
-                                            else:
-                                                st.error(f"Failed: {result.get('message')}")
-                                    else:
-                                        st.error(f"Validation failed: {validation.get('message')}")
-                                        if validation.get("warnings"):
-                                            for warning in validation["warnings"]:
-                                                st.warning(f"⚠ {warning}")
+                                    # Show data summary
+                                    summary = validation.get("data_summary", {})
+                                    if summary:
+                                        st.info(f"**Summary:** {summary.get('total_rows', 0)} rows | "
+                                               f"Actions: {summary.get('action_counts', {})} | "
+                                               f"Date range: {summary.get('date_range', {}).get('start', 'N/A')} to {summary.get('date_range', {}).get('end', 'N/A')}")
+                                    
+                                    # Confirmation and submit button
+                                    if st.button("✅ Ingest Signal Data", key="ingest_pipxpert_btn", type="primary"):
+                                        result = ingest_signal_provider_data(
+                                            signal_file,
+                                            provider_name,
+                                            timezone_offset
+                                        )
+                                        if result.get("success"):
+                                            st.success(result.get("message"))
+                                        else:
+                                            st.error(f"Failed: {result.get('message')}")
                                 else:
-                                    st.warning("Please enter a symbol/currency pair")
+                                    st.error(f"Validation failed: {validation.get('message')}")
+                                    if validation.get("warnings"):
+                                        for warning in validation["warnings"]:
+                                            st.warning(f"⚠ {warning}")
                             else:
-                                st.error("Could not read file. Please ensure it is a valid Excel file.")
+                                st.error("Could not read file. Please ensure it is a valid Excel or CSV file.")
                         except Exception as e:
                             st.error(f"Error reading file: {str(e)}")
             
@@ -1195,7 +1242,7 @@ def phase1_foundation_data():
                     st.write("Enter signal provider details and upload data file.")
                     
                     provider_name = st.text_input("Provider Name", key="new_provider_name", help="Enter the name of the signal provider")
-                    symbol = st.text_input("Symbol/Currency Pair", key="new_provider_symbol", help="Enter the trading symbol or currency pair")
+                    # symbol input removed as it is now read from the file
                     
                     # Date range selection (optional)
                     col_date1, col_date2 = st.columns(2)
@@ -1215,7 +1262,7 @@ def phase1_foundation_data():
                     
                     signal_file = st.file_uploader("Upload Signal Data (Excel/CSV)", type=["xls", "xlsx", "csv"], key="new_provider_upload")
                     
-                    if signal_file and provider_name and symbol:
+                    if signal_file and provider_name:
                         # Preview and validate
                         try:
                             df_preview = _read_df(signal_file)
@@ -1226,7 +1273,6 @@ def phase1_foundation_data():
                                 validation = validate_signal_provider_data(
                                     df_preview, 
                                     provider_name, 
-                                    symbol, 
                                     timezone_offset
                                 )
                                 
@@ -1248,7 +1294,6 @@ def phase1_foundation_data():
                                         result = ingest_signal_provider_data(
                                             signal_file,
                                             provider_name,
-                                            symbol,
                                             timezone_offset
                                         )
                                         if result.get("success"):
@@ -1257,6 +1302,9 @@ def phase1_foundation_data():
                                             if provider_name not in (st.session_state.get("signal_providers", []) or []):
                                                 st.session_state.signal_providers = (st.session_state.get("signal_providers", []) or []) + [provider_name]
                                                 st.success(f"Added '{provider_name}' to provider list")
+                                                # Use st.rerun() if available, else just continue
+                                                if hasattr(st, "rerun"):
+                                                    st.rerun()
                                         else:
                                             st.error(f"Failed: {result.get('message')}")
                                 else:
@@ -1269,7 +1317,7 @@ def phase1_foundation_data():
                         except Exception as e:
                             st.error(f"Error reading file: {str(e)}")
                     elif signal_file:
-                        st.warning("Please fill in provider name and symbol before uploading")
+                        st.warning("Please fill in provider name before uploading")
     with col_c:
         kpi_options = ["ATR", "Volume", "VWAP", "EMA", "SMA", "RSI", "MACD", "Bollinger Bands", "Stochastic", "Momentum", "Add..."] + (st.session_state.get("kpi_indicators", []) or [])
         selected_kpi = st.selectbox(
@@ -1424,6 +1472,33 @@ def phase1_foundation_data():
                                     # Show signal provider context if selected
                                     if provider_display and provider_display != "None":
                                         st.info(f"**Context:** {selected_kpi} calculated for {instrument_display} with signal provider {provider_display}")
+                                        
+                                        # Fetch and display signals for this provider/symbol
+                                        try:
+                                            from tradingagents.database.db_service import get_provider_signals
+                                            
+                                            # Use the same symbol logic as above
+                                            query_symbol = symbol.upper() if not symbol.startswith("^") else symbol
+                                            
+                                            # Fetch signals
+                                            prov_signals = get_provider_signals(
+                                                symbol=query_symbol, 
+                                                provider=provider_display if provider_display != "PipXpert" else "PipXpert", # Handle naming if needed
+                                                limit=50
+                                            )
+                                            
+                                            if prov_signals:
+                                                with st.expander(f"Recent Signals from {provider_display} ({len(prov_signals)})"):
+                                                    p_df = pd.DataFrame(prov_signals)
+                                                    if not p_df.empty:
+                                                        # Select relevant columns
+                                                        cols = ['signal_date', 'action', 'entry_price', 'target_1', 'stop_loss']
+                                                        disp_cols = [c for c in cols if c in p_df.columns]
+                                                        st.dataframe(p_df[disp_cols], use_container_width=True)
+                                            else:
+                                                st.caption(f"No recent signals found for {query_symbol} from {provider_display}")
+                                        except Exception as e:
+                                            st.warning(f"Could not fetch signals: {e}")
                                 else:
                                     st.warning(f"Could not calculate {selected_kpi}. Please ensure sufficient data is available.")
                             else:
@@ -5460,8 +5535,10 @@ def main():
                         with col3:
                             st.markdown(f'<div class="metric-card"><div class="metric-value">{info.get("recommendationKey", "N/A").title()}</div><div class="metric-label">Recommendation</div></div>', unsafe_allow_html=True)
                         
+                        # Signal provider retrieval removed as per user request
+                        
                         st.markdown('<div class="chart-container">', unsafe_allow_html=True)
-                        st.plotly_chart(create_price_chart(hist, symbol), use_container_width=True)
+                        st.plotly_chart(create_price_chart(hist, symbol, signals=None), use_container_width=True)
                         st.markdown('</div>', unsafe_allow_html=True)
                         
                         if 'longBusinessSummary' in info:

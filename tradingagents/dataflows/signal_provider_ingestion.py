@@ -8,7 +8,6 @@ from typing import Dict, Optional
 def validate_signal_provider_data(
     df: pd.DataFrame,
     provider_name: str,
-    symbol: str,
     timezone_offset: str = "+04:00"
 ) -> Dict[str, any]:
     """
@@ -17,7 +16,6 @@ def validate_signal_provider_data(
     Args:
         df: DataFrame with signal data
         provider_name: Name of the signal provider
-        symbol: Trading symbol/currency pair
         timezone_offset: Timezone offset (default GMT+4)
         
     Returns:
@@ -25,6 +23,36 @@ def validate_signal_provider_data(
     """
     warnings = []
     data_summary = {}
+    
+    # Standardize column names (handle case variations) first
+    df.columns = [str(c).strip() for c in df.columns]
+    
+    # Map common column name variations
+    column_mapping = {
+        "currency pair": "Currency Pair",
+        "currencypair": "Currency Pair",
+        "pair": "Currency Pair",
+        "symbol": "Currency Pair",
+        "date": "Date",
+        "datetime": "Date",
+        "timestamp": "Date",
+        "action": "Action",
+        "signal": "Action",
+        "entry price": "Entry Price",
+        "entryprice": "Entry Price",
+        "entry": "Entry Price",
+        "entry price min": "Entry Price",
+        "stop loss": "Stop Loss",
+        "target 1": "Target 1",
+        "target 2": "Target 2",
+        "target 3": "Target 3"
+    }
+    
+    for old_name, new_name in column_mapping.items():
+        # Case insensitive check
+        matches = [c for c in df.columns if c.lower() == old_name.lower()]
+        if matches and new_name not in df.columns:
+            df.rename(columns={matches[0]: new_name}, inplace=True)
     
     # Check required columns
     required_cols = ["Date", "Action", "Currency Pair"]
@@ -42,15 +70,6 @@ def validate_signal_provider_data(
         return {
             "valid": False,
             "message": "Provider name is required",
-            "warnings": [],
-            "data_summary": {}
-        }
-    
-    # Check symbol
-    if not symbol or len(symbol.strip()) == 0:
-        return {
-            "valid": False,
-            "message": "Symbol is required",
             "warnings": [],
             "data_summary": {}
         }
@@ -110,7 +129,6 @@ def validate_signal_provider_data(
 def ingest_signal_provider_data(
     uploaded_file,
     provider_name: str,
-    symbol: str,
     timezone_offset: str = "+04:00"
 ) -> Dict[str, str]:
     """
@@ -119,7 +137,6 @@ def ingest_signal_provider_data(
     Args:
         uploaded_file: Streamlit UploadedFile object
         provider_name: Name of the signal provider (e.g., "PipXpert")
-        symbol: Trading symbol/currency pair
         timezone_offset: Timezone offset (default GMT+4)
         
     Returns:
@@ -131,59 +148,41 @@ def ingest_signal_provider_data(
     if not provider_name or len(provider_name.strip()) == 0:
         return {"success": False, "message": "Provider name is required"}
     
-    if not symbol or len(symbol.strip()) == 0:
-        return {"success": False, "message": "Symbol is required"}
-    
     try:
         # Reset file pointer to beginning
         uploaded_file.seek(0)
         
-        # Read Excel file
+        # Read file with fallback logic
         name = uploaded_file.name.lower()
-        if name.endswith('.xlsx') or name.endswith('.xls'):
-            try:
-                df = pd.read_excel(uploaded_file)
-            except ImportError:
-                return {"success": False, "message": "Missing optional dependency 'openpyxl'. Use pip or conda to install openpyxl."}
-            except Exception as e:
-                return {"success": False, "message": f"Error reading Excel file: {str(e)}"}
-        elif name.endswith('.csv'):
-            df = pd.read_csv(uploaded_file)
-        else:
-            return {"success": False, "message": "Unsupported file format. Please use Excel (.xlsx, .xls) or CSV (.csv)"}
+        df = None
         
+        try:
+            if name.endswith('.csv'):
+                df = pd.read_csv(uploaded_file)
+            else:
+                # Try Excel
+                try:
+                    df = pd.read_excel(uploaded_file)
+                except Exception as e_xls:
+                     # Fallback to CSV
+                     uploaded_file.seek(0)
+                     try:
+                         df = pd.read_csv(uploaded_file)
+                     except:
+                         raise e_xls # Raise original Excel error if CSV also fails
+        except ImportError:
+             return {"success": False, "message": "Missing optional dependency 'openpyxl'. Use pip or conda to install openpyxl."}
+        except Exception as e:
+             return {"success": False, "message": f"Error reading file: {str(e)}"}
+
         # Reset file pointer again after reading
         uploaded_file.seek(0)
         
         if df.empty:
             return {"success": False, "message": "File is empty"}
         
-        # Standardize column names (handle case variations)
-        df.columns = [str(c).strip() for c in df.columns]
-        
-        # Map common column name variations
-        column_mapping = {
-            "currency pair": "Currency Pair",
-            "currencypair": "Currency Pair",
-            "pair": "Currency Pair",
-            "symbol": "Currency Pair",
-            "date": "Date",
-            "datetime": "Date",
-            "timestamp": "Date",
-            "action": "Action",
-            "signal": "Action",
-            "entry price": "Entry Price",
-            "entryprice": "Entry Price",
-            "entry": "Entry Price"
-        }
-        
-        for old_name, new_name in column_mapping.items():
-            if old_name.lower() in [c.lower() for c in df.columns] and new_name not in df.columns:
-                old_col = [c for c in df.columns if c.lower() == old_name.lower()][0]
-                df = df.rename(columns={old_col: new_name})
-        
-        # Validate data
-        validation = validate_signal_provider_data(df, provider_name, symbol, timezone_offset)
+        # Validation and column mapping happens inside validate now
+        validation = validate_signal_provider_data(df, provider_name, timezone_offset)
         if not validation["valid"]:
             return {"success": False, "message": validation["message"]}
         
@@ -211,7 +210,7 @@ def ingest_signal_provider_data(
                     continue  # Skip invalid actions
                 
                 # Get currency pair (use provided symbol or from data)
-                currency_pair = str(symbol).upper().strip() if symbol else str(row.get("Currency Pair", "")).upper().strip()
+                currency_pair = str(row.get("Currency Pair", "")).upper().strip()
                 if not currency_pair:
                     continue
                 

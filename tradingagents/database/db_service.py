@@ -255,6 +255,35 @@ def get_latest_signal(symbol: str) -> Optional[Dict]:
         return None
 
 
+def get_provider_signals(
+    symbol: Optional[str] = None,
+    provider: Optional[str] = None,
+    limit: int = 100
+) -> List[Dict]:
+    """Get signals from signal_provider_signals table"""
+    supabase = get_supabase()
+    if not supabase:
+        return []
+    
+    try:
+        query = supabase.table("signal_provider_signals").select("*")
+        
+        if symbol:
+            query = query.eq("symbol", symbol.upper())
+        if provider:
+            query = query.eq("provider_name", provider)
+            
+        query = query.order("signal_date", desc=True).limit(limit)
+        result = query.execute()
+        return result.data if result.data else []
+    except Exception as e:
+        # If table doesn't exist, return empty list
+        if "relation" in str(e).lower() or "does not exist" in str(e).lower():
+            return []
+        print(f"Error getting provider signals: {e}")
+        return []
+
+
 # ============================================================================
 # PORTFOLIO TABLE OPERATIONS
 # ============================================================================
