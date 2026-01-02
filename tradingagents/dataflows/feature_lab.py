@@ -346,8 +346,9 @@ class FeatureLab:
         symbol: str,
         interval: str,
         lookback_days: int,
+        asset_class: Optional[str] = None,
     ) -> pd.DataFrame:
-        df = fetch_ohlcv(symbol, interval=interval, lookback_days=lookback_days)
+        df = fetch_ohlcv(symbol, interval=interval, lookback_days=lookback_days, asset_class=asset_class)
         return df.copy()
 
     def _build_feature_blocks(self, symbol: str) -> Dict[str, Dict[str, object]]:

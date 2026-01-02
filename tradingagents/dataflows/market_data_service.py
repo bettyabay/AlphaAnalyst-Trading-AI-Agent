@@ -39,7 +39,7 @@ TABLE_CONFIG: Dict[str, Dict[str, object]] = {
     "day": {"table": "market_data", "time_field": "date", "is_date": True},
     "daily": {"table": "market_data", "time_field": "date", "is_date": True},
     "5min": {"table": "market_data_5min", "time_field": "timestamp", "is_date": False},
-    "1min": {"table": "market_data_1min", "time_field": "timestamp", "is_date": False},
+    "1min": {"table": "market_data_stocks_1min", "time_field": "timestamp", "is_date": False},
 }
 
 DEFAULT_PERIOD_LOOKUP = {
@@ -93,6 +93,7 @@ def fetch_ohlcv(
     start: Optional[datetime] = None,
     end: Optional[datetime] = None,
     limit: int = MAX_SUPABASE_LIMIT,
+    asset_class: Optional[str] = None,
 ) -> pd.DataFrame:
     """
     Fetch OHLCV data for a symbol from Supabase.
@@ -103,6 +104,7 @@ def fetch_ohlcv(
         lookback_days: Historical window when start isn't provided.
         start/end: Explicit datetime bounds (UTC).
         limit: Supabase limit (<=1000).
+        asset_class: Optional asset class to route to specific tables (Commodities, Indices, Currencies, Stocks).
     """
     symbol = (symbol or "").upper()
     if not symbol:
@@ -119,13 +121,23 @@ def fetch_ohlcv(
     # Debug logging (can be disabled in production)
     import os
     if os.getenv("DEBUG_DB_QUERIES", "false").lower() == "true":
-        print(f"🔍 [DB] fetch_ohlcv({symbol}, interval={interval}, lookback_days={lookback_days})")
+        print(f"🔍 [DB] fetch_ohlcv({symbol}, interval={interval}, lookback_days={lookback_days}, asset_class={asset_class})")
 
     table = config["table"]
     
     # Dynamic table routing for 1min data
     if interval == "1min":
-        if "*" in symbol:
+        # 1. Prioritize explicit asset_class routing
+        if asset_class == "Commodities":
+            table = "market_data_commodities_1min"
+        elif asset_class == "Indices":
+            table = "market_data_indices_1min"
+        elif asset_class == "Currencies":
+            table = "market_data_currencies_1min"
+        elif asset_class == "Stocks":
+            table = "market_data_stocks_1min"  # Default stock table
+        # 2. Fallback to symbol pattern matching
+        elif "*" in symbol:
             table = "market_data_commodities_1min"
         elif symbol.startswith("^"):
             table = "market_data_indices_1min"
@@ -193,7 +205,7 @@ def fetch_ohlcv(
         return pd.DataFrame()
 
 
-def fetch_latest_bar(symbol: str, interval: str = "1d") -> Optional[Dict[str, object]]:
+def fetch_latest_bar(symbol: str, interval: str = "1d", asset_class: Optional[str] = None) -> Optional[Dict[str, object]]:
     """Return the most recent bar for a symbol."""
     symbol = (symbol or "").upper()
     if not symbol:
@@ -212,7 +224,17 @@ def fetch_latest_bar(symbol: str, interval: str = "1d") -> Optional[Dict[str, ob
 
     # Dynamic table routing for 1min data
     if interval == "1min":
-        if "*" in symbol:
+        # 1. Prioritize explicit asset_class routing
+        if asset_class == "Commodities":
+            table = "market_data_commodities_1min"
+        elif asset_class == "Indices":
+            table = "market_data_indices_1min"
+        elif asset_class == "Currencies":
+            table = "market_data_currencies_1min"
+        elif asset_class == "Stocks":
+            table = "market_data_stocks_1min"
+        # 2. Fallback
+        elif "*" in symbol:
             table = "market_data_commodities_1min"
         elif symbol.startswith("^"):
             table = "market_data_indices_1min"
@@ -245,6 +267,7 @@ def fetch_latest_bar(symbol: str, interval: str = "1d") -> Optional[Dict[str, ob
 def get_latest_price(
     symbol: str,
     preferred_intervals: Optional[Sequence[str]] = None,
+    asset_class: Optional[str] = None,
 ) -> Optional[Dict[str, object]]:
     """
     Return the latest available price across preferred intervals.
@@ -257,7 +280,7 @@ def get_latest_price(
     """
     intervals = preferred_intervals or ("1min", "5min", "1d")
     for interval in intervals:
-        bar = fetch_latest_bar(symbol, interval=interval)
+        bar = fetch_latest_bar(symbol, interval=interval, asset_class=asset_class)
         if not bar:
             continue
         close_value = bar.get("close")

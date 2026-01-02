@@ -1,20 +1,20 @@
-Symbol,Stock Name,Earliest Date,Latest Date,Date Range (Days),Record Count,Expected Records,Missing Records,Data Quality,Has Data,Error
-COIN,"Coinbase Global, Inc.",Error,Error,Error,Error,,,Error,Error,[Errno 11001] getaddrinfo failed
-TSLA,"Tesla, Inc.",Error,Error,Error,Error,,,Error,Error,[Errno 11001] getaddrinfo failed
-NVDA,NVIDIA Corporation,Error,Error,Error,Error,,,Error,Error,[Errno 11001] getaddrinfo failed
-AVGO,Broadcom Inc.,Error,Error,Error,Error,,,Error,Error,[Errno 11001] getaddrinfo failed
-PLTR,Palantir Technologies Inc.,Error,Error,Error,Error,,,Error,Error,[Errno 11001] getaddrinfo failed
-LRCX,Lam Research Corporation,Error,Error,Error,Error,,,Error,Error,[Errno 11001] getaddrinfo failed
-CRWD,"CrowdStrike Holdings, Inc.",Error,Error,Error,Error,,,Error,Error,[Errno 11001] getaddrinfo failed
-HOOD,"Robinhood Markets, Inc.",Error,Error,Error,Error,,,Error,Error,[Errno 11001] getaddrinfo failed
-APP,AppLovin Corporation,Error,Error,Error,Error,,,Error,Error,[Errno 11001] getaddrinfo failed
-MU,"Micron Technology, Inc.",Error,Error,Error,Error,,,Error,Error,[Errno 11001] getaddrinfo failed
-SNPS,"Synopsys, Inc.",Error,Error,Error,Error,,,Error,Error,[Errno 11001] getaddrinfo failed
-CDNS,"Cadence Design Systems, Inc.",Error,Error,Error,Error,,,Error,Error,[Errno 11001] getaddrinfo failed
-VST,Vistra Corp.,Error,Error,Error,Error,,,Error,Error,[Errno 11001] getaddrinfo failed
-DASH,"DoorDash, Inc.",Error,Error,Error,Error,,,Error,Error,[Errno 11001] getaddrinfo failed
-DELL,Dell Technologies Inc.,Error,Error,Error,Error,,,Error,Error,[Errno 11001] getaddrinfo failed
-NOW,"ServiceNow, Inc.",Error,Error,Error,Error,,,Error,Error,[Errno 11001] getaddrinfo failed
-PANW,"Palo Alto Networks, Inc.",Error,Error,Error,Error,,,Error,Error,[Errno 11001] getaddrinfo failed
-AXON,"Axon Enterprise, Inc.",Error,Error,Error,Error,,,Error,Error,[Errno 11001] getaddrinfo failed
-URI,"United Rentals, Inc.",Error,Error,Error,Error,,,Error,Error,[Errno 11001] getaddrinfo failed
+Symbol,Stock Name,Earliest Date,Latest Date,Date Range (Days),Record Count,Expected Records,Missing Records,Data Quality,Has Data
+COIN,"Coinbase Global, Inc.",2025-08-01,2025-12-29,150,Unknown,,,Unknown,Yes
+TSLA,"Tesla, Inc.",2025-08-01,2025-12-29,150,Unknown,,,Unknown,Yes
+NVDA,NVIDIA Corporation,2025-08-01,2025-12-29,150,Unknown,,,Unknown,Yes
+AVGO,Broadcom Inc.,2025-08-01,2025-12-29,150,Unknown,,,Unknown,Yes
+PLTR,Palantir Technologies Inc.,2025-08-01,2025-12-29,150,Unknown,,,Unknown,Yes
+LRCX,Lam Research Corporation,2025-08-01,2025-12-29,150,Unknown,,,Unknown,Yes
+CRWD,"CrowdStrike Holdings, Inc.",2025-08-01,2025-12-29,150,Unknown,,,Unknown,Yes
+HOOD,"Robinhood Markets, Inc.",2025-08-01,2025-12-29,150,Unknown,,,Unknown,Yes
+APP,AppLovin Corporation,2025-08-01,2025-12-29,150,Unknown,,,Unknown,Yes
+MU,"Micron Technology, Inc.",2025-08-01,2025-12-29,150,Unknown,,,Unknown,Yes
+SNPS,"Synopsys, Inc.",2025-08-01,2025-12-26,147,Unknown,,,Unknown,Yes
+CDNS,"Cadence Design Systems, Inc.",2025-08-01,2025-12-29,150,Unknown,,,Unknown,Yes
+VST,Vistra Corp.,2025-08-01,2025-12-29,150,Unknown,,,Unknown,Yes
+DASH,"DoorDash, Inc.",2025-08-01,2025-12-29,150,Unknown,,,Unknown,Yes
+DELL,Dell Technologies Inc.,2025-08-01,2025-12-29,150,Unknown,,,Unknown,Yes
+NOW,"ServiceNow, Inc.",2025-08-01,2025-12-29,150,Unknown,,,Unknown,Yes
+PANW,"Palo Alto Networks, Inc.",2025-08-01,2025-12-29,150,Unknown,,,Unknown,Yes
+AXON,"Axon Enterprise, Inc.",2025-08-04,2025-12-29,147,Unknown,,,Unknown,Yes
+URI,"United Rentals, Inc.",2025-08-01,2025-12-27,147,Unknown,,,Unknown,Yes

@@ -37,11 +37,10 @@ class VolumeScreeningEngine:
         rsi = 100 - (100 / (1 + rs))
         return rsi.fillna(50)
     
-    def _fetch_history(self, symbol: str, period: str = "3mo", interval: str = "1d", asset_class: str = "stocks") -> Optional[pd.DataFrame]:
+    def _fetch_history(self, symbol: str, period: str = "3mo", interval: str = "1d", asset_class: Optional[str] = None) -> Optional[pd.DataFrame]:
         """Fetch historical data"""
         lookback = period_to_days(period, default=180)
-        # Note: fetch_ohlcv handles asset class routing internally based on symbol format
-        data = fetch_ohlcv(symbol, interval=interval, lookback_days=lookback)
+        data = fetch_ohlcv(symbol, interval=interval, lookback_days=lookback, asset_class=asset_class)
         if data is None or data.empty:
             return None
         required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
@@ -50,10 +49,10 @@ class VolumeScreeningEngine:
                 return None
         return data
     
-    def screen_symbol(self, symbol: str) -> Dict:
+    def screen_symbol(self, symbol: str, asset_class: Optional[str] = None) -> Dict:
         """Screen a single symbol for volume spike criteria"""
         # Fetch 1 year of data to ensure we have enough for SMA200 calculation
-        hist = self._fetch_history(symbol, period="1y")
+        hist = self._fetch_history(symbol, period="1y", asset_class=asset_class)
         
         if hist is None or hist.empty or len(hist) < 50:
             return {
@@ -180,10 +179,10 @@ class FireTestingEngine:
         atr = true_range.rolling(window=period).mean()
         return atr
     
-    def _fetch_history(self, symbol: str, period: str = "6mo", interval: str = "1d") -> Optional[pd.DataFrame]:
+    def _fetch_history(self, symbol: str, period: str = "6mo", interval: str = "1d", asset_class: Optional[str] = None) -> Optional[pd.DataFrame]:
         """Fetch historical data"""
         lookback = period_to_days(period, default=180)
-        data = fetch_ohlcv(symbol, interval=interval, lookback_days=lookback)
+        data = fetch_ohlcv(symbol, interval=interval, lookback_days=lookback, asset_class=asset_class)
         if data is None or data.empty:
             return None
         required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
@@ -473,7 +472,7 @@ class TradeDecisionEngine:
         self.volume_screener = VolumeScreeningEngine()
         self.trade_execution_service = TradeExecutionService()
     
-    def evaluate_trade_decision(self, symbol: str, command_ts: Optional[str] = None) -> Dict[str, Any]:
+    def evaluate_trade_decision(self, symbol: str, command_ts: Optional[str] = None, asset_class: Optional[str] = None) -> Dict[str, Any]:
         """
         Evaluate all conditions for "TRADE YES" decision
         
@@ -497,7 +496,7 @@ class TradeDecisionEngine:
         
         # Condition 1: Composite Score >= 6.5
         try:
-            quantum_result = self.feature_lab.run_quantum_screen(symbol, command_ts)
+            quantum_result = self.feature_lab.run_quantum_screen(symbol, command_ts, asset_class=asset_class)
             composite_score = quantum_result["metrics"].get("composite_score", 0.0)
             condition1_pass = composite_score >= self.composite_score_threshold
             decision["conditions"]["composite_score"] = {
@@ -516,7 +515,7 @@ class TradeDecisionEngine:
             }
         
         # Condition 2: All Phase 1 gates passed
-        phase1_result = self.volume_screener.screen_symbol(symbol)
+        phase1_result = self.volume_screener.screen_symbol(symbol, asset_class=asset_class)
         condition2_pass = phase1_result.get("pass", False)
         decision["conditions"]["phase1_gates"] = {
             "pass": condition2_pass,
@@ -525,7 +524,7 @@ class TradeDecisionEngine:
         }
         
         # Condition 3: R:R ratio achievable >= 1:2
-        rr_result = self._calculate_rr_ratio(symbol, quantum_result if condition1_pass else None)
+        rr_result = self._calculate_rr_ratio(symbol, quantum_result if condition1_pass else None, asset_class=asset_class or "stocks")
         condition3_pass = rr_result["achievable"] and rr_result["ratio"] >= self.min_rr_ratio
         decision["conditions"]["rr_ratio"] = rr_result
         
@@ -722,12 +721,12 @@ class TradeDecisionEngine:
                 "error": str(e)
             }
     
-    def _check_trend_alignment(self, symbol: str, quantum_result: Optional[Dict] = None) -> Dict[str, Any]:
+    def _check_trend_alignment(self, symbol: str, quantum_result: Optional[Dict] = None, asset_class: Optional[str] = None) -> Dict[str, Any]:
         """Check for trend conflicts between 5-min and higher timeframes"""
         try:
             # Get 5-minute and daily data
-            m5 = self.feature_lab._fetch_df(symbol, "5min", lookback_days=7)
-            daily = self.feature_lab._fetch_df(symbol, "1d", lookback_days=60)
+            m5 = self.feature_lab._fetch_df(symbol, "5min", lookback_days=7, asset_class=asset_class)
+            daily = self.feature_lab._fetch_df(symbol, "1d", lookback_days=60, asset_class=asset_class)
             
             if m5.empty or daily.empty:
                 return {

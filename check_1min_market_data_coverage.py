@@ -84,7 +84,7 @@ def get_1min_market_data_coverage(symbol: str, supabase) -> Dict:
     """
     try:
         # Get min and max timestamps for this symbol
-        result = supabase.table("market_data_1min")\
+        result = supabase.table("market_data_stocks_1min")\
             .select("timestamp")\
             .eq("symbol", symbol)\
             .order("timestamp", desc=False)\
@@ -95,7 +95,7 @@ def get_1min_market_data_coverage(symbol: str, supabase) -> Dict:
         if result.data and len(result.data) > 0:
             earliest_timestamp = result.data[0].get("timestamp")
         
-        result = supabase.table("market_data_1min")\
+        result = supabase.table("market_data_stocks_1min")\
             .select("timestamp")\
             .eq("symbol", symbol)\
             .order("timestamp", desc=True)\
@@ -139,7 +139,7 @@ def get_1min_market_data_coverage(symbol: str, supabase) -> Dict:
                 max_pages_to_count = 1000  # Count up to 1M records, then estimate
                 
                 while offset < (max_pages_to_count * page_size):
-                    count_result = supabase.table("market_data_1min")\
+                    count_result = supabase.table("market_data_stocks_1min")\
                         .select("id")\
                         .eq("symbol", symbol)\
                         .range(offset, offset + page_size - 1)\
@@ -279,7 +279,7 @@ def get_quick_1min_coverage_summary() -> pd.DataFrame:
                     earliest_str = earliest_dt.strftime("%Y-%m-%d")
                     latest_str = latest_dt.strftime("%Y-%m-%d")
                     
-                    record_count = get_symbol_record_count("market_data_1min", symbol, supabase)
+                    record_count = get_symbol_record_count("market_data_stocks_1min", symbol, supabase)
                     trading_days = estimate_trading_days(date_range_days)
                     quality_info = evaluate_data_quality(record_count, trading_days, ONE_MIN_INTERVALS_PER_DAY)
 

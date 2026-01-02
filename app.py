@@ -21,7 +21,7 @@ from phi.tools.googlesearch import GoogleSearch
 # Phase 1 imports
 from tradingagents.database.config import get_supabase
 from tradingagents.dataflows.ingestion_pipeline import DataIngestionPipeline
-from tradingagents.dataflows.gold_ingestion import ingest_gold_data
+from tradingagents.dataflows.universal_ingestion import ingest_market_data
 from tradingagents.dataflows.signal_provider_ingestion import ingest_signal_provider_data, validate_signal_provider_data
 from tradingagents.dataflows.kpi_calculator import calculate_kpi
 from tradingagents.dataflows.kpi_calculator import calculate_kpi
@@ -833,7 +833,7 @@ def list_database_tables():
             st.info("💡 Please check your Supabase dashboard → Table Editor to see what tables exist")
             
             # Try a different approach - test common table names
-            common_tables = ['market_data', 'research_documents', 'users', 'positions', 'instrument_master_data', 'portfolio', 'system_logs', 'trade_signals']
+            common_tables = ['market_data_stocks_1min', 'market_data_commodities_1min', 'market_data_indices_1min', 'market_data_currencies_1min', 'research_documents', 'users', 'positions', 'instrument_master_data', 'portfolio', 'system_logs', 'trade_signals']
             st.info("🔍 Testing common table names:")
             
             for table_name in common_tables:
@@ -1020,17 +1020,30 @@ def phase1_foundation_data():
                                     st.error(f"Error: {e}")
                         else:
                             st.error("Missing symbol or name")
-        if selected_category == "Commodities" and selected_instrument_item == "GOLD":
-            with st.expander("Gold Data (BarChart)"):
-                st.info("Ingest 5-year 1-minute Gold data from BarChart export.")
-                gold_file = st.file_uploader("Upload Gold 1-min Data (CSV/Excel)", type=["csv", "xls", "xlsx"], key="gold_upload_in_dropdown")
-                if gold_file:
-                    if st.button("Ingest Gold Data", key="ingest_gold_btn_dropdown"):
-                        result = ingest_gold_data(gold_file)
-                        if result.get("success"):
-                            st.success(result.get("message"))
-                        else:
-                            st.error(f"Failed: {result.get('message')}")
+        if selected_instrument_item != "Add...":
+            with st.expander(f"Data Management: {selected_instrument_item}"):
+                st.info(f"Ingest 1-minute data for {selected_instrument_item} ({selected_category}). Supports CSV/Excel from BarChart or standard formats.")
+                
+                # Dynamic key to ensure uniqueness
+                upload_key = f"upload_{selected_category}_{selected_instrument_item}"
+                uploaded_file = st.file_uploader(f"Upload Data for {selected_instrument_item}", type=["csv", "xls", "xlsx"], key=upload_key)
+                
+                if uploaded_file:
+                    if st.button(f"Ingest Data", key=f"btn_ingest_{selected_category}_{selected_instrument_item}"):
+                        with st.spinner("Ingesting..."):
+                            # Handle specific symbol mappings if needed
+                            effective_symbol = selected_instrument_item
+                            if selected_instrument_item == "GOLD":
+                                effective_symbol = "^XAUUSD"
+                            elif selected_instrument_item == "S&P 500":
+                                effective_symbol = "^SPX"  # Common mapping, adjustable
+                                
+                            result = ingest_market_data(uploaded_file, asset_class=selected_category, default_symbol=effective_symbol)
+                            
+                            if result.get("success"):
+                                st.success(result.get("message"))
+                            else:
+                                st.error(f"Failed: {result.get('message')}")
     with col_b:
         signal_provider_options = [
             "PipXpert",
@@ -1270,7 +1283,7 @@ def phase1_foundation_data():
                             elif selected_category == "Currencies":
                                 table_name = "market_data_currencies_1min"
                             else:
-                                table_name = "market_data_1min"
+                                table_name = "market_data_stocks_1min"
                             
                             # Fetch recent data (last 200 bars for calculation)
                             query_symbol = symbol.upper() if not symbol.startswith("^") else symbol
@@ -1598,14 +1611,14 @@ def phase1_foundation_data():
                 rows_1min = []
                 for symbol in WATCHLIST_STOCKS.keys():
                     try:
-                        resp1 = sb.table("market_data_1min").select("timestamp").eq("symbol", symbol).limit(1).execute()
+                        resp1 = sb.table("market_data_stocks_1min").select("timestamp").eq("symbol", symbol).limit(1).execute()
                         # If query succeeds, get count via RPC or select
                         try:
                             resp1c = sb.rpc("get_symbol_stats_1min", {"p_symbol": symbol}).execute()
                             data1 = resp1c.data if hasattr(resp1c, "data") else []
                             count1 = len(data1) if isinstance(data1, list) else 0
                         except Exception:
-                            resp1all = sb.table("market_data_1min").select("timestamp").eq("symbol", symbol).execute()
+                            resp1all = sb.table("market_data_stocks_1min").select("timestamp").eq("symbol", symbol).execute()
                             data1all = resp1all.data if hasattr(resp1all, "data") else []
                             count1 = len(data1all) if isinstance(data1all, list) else 0
                     except Exception:
@@ -1835,7 +1848,7 @@ def phase1_foundation_data():
             if supabase:
                 try:
                     # Determine table based on asset class
-                    table_1min_name = "market_data_1min"
+                    table_1min_name = "market_data_stocks_1min"
                     table_5min_name = "market_data_5min"
                     
                     if selected_category == "Commodities":
@@ -2170,7 +2183,7 @@ def phase1_foundation_data():
             with st.spinner("Evaluating all trade conditions..."):
                 try:
                     decision_engine = TradeDecisionEngine()
-                    decision = decision_engine.evaluate_trade_decision(lab_symbol, quantum_timestamp)
+                    decision = decision_engine.evaluate_trade_decision(lab_symbol, quantum_timestamp, asset_class=selected_category)
                     st.session_state.trade_decision = decision
                     decision_engine.close()
                     st.success("✅ Trade decision evaluation complete!")
