@@ -2,7 +2,9 @@
 Data ingestion pipeline for AlphaAnalyst Trading AI Agent
 """
 import os
+import time
 import pandas as pd
+import pytz
 from datetime import datetime, timedelta
 from typing import Dict, Optional, Tuple, List
 from dotenv import load_dotenv
@@ -97,6 +99,22 @@ class DataIngestionPipeline:
         self.supabase = get_supabase()
         self.high_rate_plan = os.getenv("POLYGON_PREMIUM_PLAN", os.getenv("POLYGON_PAID_PLAN", "false")).lower() in {"1", "true", "yes", "premium"}
         
+        # Polygon Rate Limit Throttle
+        self._last_polygon_call = 0
+        # Safe default for paid/starter plans (5 calls/min = 12s interval)
+        # For free plan, it's 5 calls/min. For Starter, unlimited but practically rate limited.
+        # We'll use 12s as a safe baseline to avoid hitting 429s.
+        self._polygon_min_interval = 12
+
+    def _polygon_throttle(self):
+        """Ensure minimum interval between Polygon API calls"""
+        elapsed = time.time() - self._last_polygon_call
+        if elapsed < self._polygon_min_interval:
+            sleep_time = self._polygon_min_interval - elapsed
+            print(f"⏳ Throttling Polygon call for {sleep_time:.2f}s...")
+            time.sleep(sleep_time)
+        self._last_polygon_call = time.time()
+        
     def initialize_stocks(self) -> bool:
         """Initialize stocks in database"""
         try:
@@ -123,6 +141,7 @@ class DataIngestionPipeline:
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None,
         resume_from_latest: bool = True,
+        target_timezone: Optional[str] = None,
     ) -> bool:
         """Ingest historical data for a symbol, with chunked fetching and retry/backoff for intraday data.
 
@@ -131,6 +150,7 @@ class DataIngestionPipeline:
         max_retries: max retries per chunk
         start_date: optional explicit start datetime (inclusive)
         end_date: optional explicit end datetime (inclusive)
+        target_timezone: optional timezone string (e.g. 'Asia/Dubai') to convert data to. Default is UTC (None).
         """
         try:
             if not self.supabase:
@@ -201,7 +221,7 @@ class DataIngestionPipeline:
                 
                 # Only apply recent window logic if the calculated start_date is very close to end_date
                 # This prevents historical backfills (e.g. 5 years) from being truncated to just the last 6 hours
-                if recent_window_start > start_date and (end_date - start_date).days < 2:
+                if resume_from_latest and (end_date - start_date).days < 2:
                     print(f"ℹ️ Expanding intraday window to re-fetch last {recent_window_hours}h for {symbol} ({recent_window_start.strftime('%Y-%m-%d %H:%M:%S')} to {end_date.strftime('%Y-%m-%d %H:%M:%S')})")
                     start_date = recent_window_start.replace(hour=0, minute=0, second=0, microsecond=0)
             else:
@@ -341,6 +361,14 @@ class DataIngestionPipeline:
                         chunk_start = chunk_end + timedelta(days=1)
                         continue
 
+                    # For FX/Commodities (Gold), skip weekends as Polygon returns no data
+                    # C:XAUUSD is treated as currency/commodity
+                    if (symbol.startswith("C:") or "XAU" in symbol) and interval in ("1min", "1-minute", "1m"):
+                        if chunk_start.weekday() >= 5:  # 5=Saturday, 6=Sunday
+                            print(f"⏭️ Skipping weekend chunk for {symbol}: {start_str}")
+                            chunk_start = chunk_end + timedelta(days=1)
+                            continue
+
                     # Check existing records ONLY for this specific chunk date range
                     chunk_existing_timestamps = set()
                     try:
@@ -385,7 +413,16 @@ class DataIngestionPipeline:
                     attempt = 0
                     while attempt < max_retries:
                         try:
-                            data = self.polygon_client.get_intraday_data(symbol, start_str, end_str, multiplier=multiplier, max_retries=max_retries)
+                            # Use global throttle for Polygon calls
+                            self._polygon_throttle()
+                            data = self.polygon_client.get_intraday_data(
+                                symbol, 
+                                start_str, 
+                                end_str, 
+                                multiplier=multiplier, 
+                                timespan="minute", 
+                                max_retries=1  # 🚨 IMPORTANT: Reduced retries, handle rate limits in loop
+                            )
                             if data.empty:
                                 # Check if dates are in the future (no need to print for future dates)
                                 try:
@@ -407,12 +444,26 @@ class DataIngestionPipeline:
                             # Prepare rows and filter duplicates using chunk-specific existing timestamps
                             rows = []
                             new_rows = []
+                            
+                            # Prepare timezone objects if needed
+                            target_tz = pytz.timezone(target_timezone) if target_timezone else None
+                            
                             for _, row in data.iterrows():
-                                # Convert pandas timestamp to ISO format
-                                if hasattr(row["timestamp"], 'isoformat'):
-                                    timestamp_iso = row["timestamp"].isoformat()
+                                ts = row["timestamp"]
+                                
+                                # Handle timezone conversion
+                                if target_tz:
+                                    # Ensure timestamp is timezone-aware (assume UTC if naive, as Polygon returns UTC)
+                                    if ts.tzinfo is None:
+                                        ts = ts.replace(tzinfo=pytz.UTC)
+                                    # Convert to target timezone
+                                    ts = ts.astimezone(target_tz)
+                                
+                                # Convert to ISO format
+                                if hasattr(ts, 'isoformat'):
+                                    timestamp_iso = ts.isoformat()
                                 else:
-                                    timestamp_iso = str(row["timestamp"])
+                                    timestamp_iso = str(ts)
                                 
                                 # Normalize for comparison (remove microseconds and timezone for matching)
                                 # Database might store with or without timezone, so normalize both
@@ -431,8 +482,11 @@ class DataIngestionPipeline:
                                     "low": float(row["low"]),
                                     "close": float(row["close"]),
                                     "volume": int(row["volume"]),
-                                    "source": "polygon"
                                 }
+                                # Only add source if it's NOT a 1-minute table (which don't have source column)
+                                if "1min" not in target_table:
+                                    row_data["source"] = "polygon"
+
                                 rows.append(row_data)
 
                                 # Check both chunk-specific cache and global cache
@@ -549,18 +603,11 @@ class DataIngestionPipeline:
                             # Check if it's a rate limit error that should stop processing
                             error_str = str(e).lower()
                             if "429" in error_str or "too many requests" in error_str:
-                                print(f"⚠️ Rate limit exceeded for {symbol}. Consider running with fewer stocks or waiting before continuing.")
-                                # For rate limits, wait longer before retrying
-                                attempt += 1
-                                wait_time = min(60, 10 * (2 ** attempt))  # Cap at 60s, start at 10s
-                                print(f"Waiting {wait_time}s before retry {attempt}/{max_retries}...")
+                                print(f"🛑 Polygon rate limit hit for {symbol}. Cooling down 90s.")
                                 import time
-                                time.sleep(wait_time)
-                                if attempt >= max_retries:
-                                    print(f"Max retries reached for {symbol} {start_str} to {end_str} due to rate limits.")
-                                    all_success = False
-                                    # Continue to next chunk instead of breaking completely
-                                    break
+                                time.sleep(90)
+                                all_success = False
+                                break  # DO NOT retry same chunk more than once for Polygon
                             else:
                                 attempt += 1
                                 wait_time = 2 ** attempt
@@ -635,7 +682,7 @@ class DataIngestionPipeline:
                     return False
                 rows = []
                 for _, row in data.iterrows():
-                    rows.append({
+                    row_data = {
                         "symbol": symbol,
                         "date": row["timestamp"].date().isoformat(),
                         "open": float(row["open"]),
@@ -643,8 +690,13 @@ class DataIngestionPipeline:
                         "low": float(row["low"]),
                         "close": float(row["close"]),
                         "volume": int(row["volume"]),
-                        "source": "polygon"
-                    })
+                    }
+                    
+                    # Only add source if it's NOT a 1-minute table (which don't have source column)
+                    if "1min" not in target_table:
+                        row_data["source"] = "polygon"
+                        
+                    rows.append(row_data)
                 if rows:
                     try:
                         self.supabase.table(target_table).upsert(rows).execute()
@@ -680,19 +732,21 @@ class DataIngestionPipeline:
             return False
 
     def _resolve_chunk_days(self, interval: str, chunk_days: Optional[int]) -> int:
+        """
+        Determine appropriate chunk size based on interval and plan.
+        Polygon has strict limits for intraday data:
+        - 1min: MAX 1-2 days per call (even on paid plans) to avoid 429s andtimeouts
+        - 5min: 3-7 days safe
+        """
         interval_key = interval.lower()
+
+        # Polygon-safe limits
         if interval_key in ("1min", "1-minute", "1m"):
-            base_default = 3
-            premium_default = 14
+            return 1   # 🚨 NEVER more than 1 day for 1-minute data
         elif interval_key in ("5min", "5-minute", "5m"):
-            base_default = 30
-            premium_default = 90
+            return 7   # safe for 5-minute data
         else:
             return chunk_days or 7
-
-        if self.high_rate_plan:
-            return max(chunk_days or premium_default, premium_default)
-        return chunk_days or base_default
 
     @staticmethod
     def _previous_trading_day(ref_date) -> datetime.date:

@@ -1,18 +1,18 @@
 import pandas as pd
 from tradingagents.database.config import get_supabase
-from tradingagents.dataflows.barchart_service import fetch_barchart_data, ensure_continuous_timestamps
+from tradingagents.dataflows.polygon_integration import PolygonDataClient
 import io
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 
-def ingest_from_barchart_api(api_symbol, asset_class, start_date=None, end_date=None, years=5, db_symbol=None):
+def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=None, years=5, db_symbol=None):
     """
-    Ingest data directly from BarChart API into the appropriate Supabase table.
-    Handles timezone conversion from US Eastern (BarChart default) to GMT+4 (Dubai).
+    Ingest data directly from Polygon API into the appropriate Supabase table.
+    Handles timezone conversion to GMT+4 (Dubai).
     
     Args:
-        api_symbol: BarChart symbol (e.g. "AAPL", "GC*1")
+        api_symbol: Polygon symbol (e.g. "AAPL", "C:XAUUSD") or Barchart symbol to be converted
         asset_class: "Commodities", "Indices", "Currencies", "Stocks"
         start_date: Optional start date (datetime or YYYYMMDD string)
         end_date: Optional end date (datetime or YYYYMMDD string)
@@ -50,27 +50,35 @@ def ingest_from_barchart_api(api_symbol, asset_class, start_date=None, end_date=
         else:
             start_dt = start_date
             
-        s_str = start_dt.strftime("%Y%m%d")
-        e_str = end_dt.strftime("%Y%m%d")
+        s_str = start_dt.strftime("%Y-%m-%d")
+        e_str = end_dt.strftime("%Y-%m-%d")
         
-        # Fetch data
-        df = fetch_barchart_data(api_symbol, s_str, e_str, interval=1)
+        # Convert symbol if needed (handling legacy Barchart symbols if passed)
+        polygon_symbol = api_symbol
+        if api_symbol == "GC*1":
+            polygon_symbol = "C:XAUUSD"
+        elif api_symbol == "^SPX" or api_symbol == "$SPX":
+            polygon_symbol = "I:SPX"
+            
+        # Fetch data from Polygon
+        client = PolygonDataClient()
+        # Use 1-minute interval
+        df = client.get_intraday_data(polygon_symbol, s_str, e_str, multiplier=1, timespan="minute")
         
         if df.empty:
-            return {"success": False, "message": f"No data returned from BarChart for {api_symbol} ({s_str}-{e_str})"}
+            return {"success": False, "message": f"No data returned from Polygon for {polygon_symbol} ({s_str}-{e_str})"}
             
-        # Ensure continuity
-        df = ensure_continuous_timestamps(df, interval_minutes=1)
-        
         # Prepare for DB
         db_rows = []
-        target_symbol = db_symbol if db_symbol else api_symbol
+        target_symbol = db_symbol if db_symbol else polygon_symbol
         
         # Timezone configuration
-        # BarChart data is typically in Exchange Time (e.g., US Eastern for NYSE/COMEX)
-        # We convert to GMT+4 (Dubai) as requested.
-        src_tz = pytz.timezone('America/New_York') 
+        # Polygon data is in UTC
+        src_tz = pytz.timezone('UTC') 
         dst_tz = pytz.timezone('Asia/Dubai')       
+        
+        if "timestamp" in df.columns:
+            df = df.set_index("timestamp")
         
         for timestamp, row in df.iterrows():
             if pd.isna(row.get("close")):
@@ -78,8 +86,8 @@ def ingest_from_barchart_api(api_symbol, asset_class, start_date=None, end_date=
                 
             try:
                 # Handle timezone conversion
-                # timestamp from pandas is naive (no timezone info)
-                # 1. Localize to Source Timezone (assume NY/ET)
+                # timestamp from Polygon client is naive UTC (from unix ms)
+                # 1. Localize to Source Timezone (UTC)
                 if timestamp.tzinfo is None:
                     ts_localized = src_tz.localize(timestamp)
                 else:
@@ -98,13 +106,8 @@ def ingest_from_barchart_api(api_symbol, asset_class, start_date=None, end_date=
                     "volume": int(row["volume"]) if pd.notnull(row.get("volume")) else 0
                 }
                 
-                # Add open_interest if applicable (mostly for Commodities/Futures)
-                if "openInterest" in row and pd.notnull(row["openInterest"]):
-                    # Check if table has open_interest column (Stocks usually don't, others might)
-                    # For simplicity, we add it to the dict, and if the table doesn't have it, Supabase might ignore or error.
-                    # Based on schema, Stocks table does NOT have open_interest. Others DO.
-                    if asset_class != "Stocks":
-                        record["open_interest"] = int(row["openInterest"])
+                # Polygon doesn't typically provide open interest in agg bars
+                # So we skip open_interest
                 
                 db_rows.append(record)
             except (ValueError, TypeError):

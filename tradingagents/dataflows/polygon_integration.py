@@ -116,6 +116,12 @@ class PolygonDataClient:
         
         Handles rate limiting with exponential backoff and pagination (next_url).
         """
+        # Sanitize timespan for Polygon API
+        # Polygon expects 'minute', 'hour', 'day', etc.
+        # Common misconfigurations like '1min', '1-min' should be mapped to 'minute'
+        if timespan in ('1min', '1-min', '5min', '5-min', '15min', '15-min'):
+             timespan = 'minute'
+
         # Base request URL
         base_request_url = f"{self.base_url}/v2/aggs/ticker/{symbol}/range/{multiplier}/{timespan}/{start_date}/{end_date}"
         # Initial params - limit 50000 is the max for Polygon (default 5000)

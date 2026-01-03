@@ -22,7 +22,7 @@ from phi.tools.googlesearch import GoogleSearch
 from tradingagents.database.config import get_supabase
 from tradingagents.dataflows.ingestion_pipeline import DataIngestionPipeline
 from tradingagents.dataflows.gold_ingestion import ingest_gold_data
-from tradingagents.dataflows.universal_ingestion import ingest_market_data, ingest_from_barchart_api
+from tradingagents.dataflows.universal_ingestion import ingest_market_data, ingest_from_polygon_api
 from tradingagents.dataflows.signal_provider_ingestion import ingest_signal_provider_data, validate_signal_provider_data
 from tradingagents.dataflows.kpi_calculator import calculate_kpi
 from tradingagents.dataflows.kpi_calculator import calculate_kpi
@@ -1074,9 +1074,9 @@ def phase1_foundation_data():
                         else:
                             st.error("Missing symbol or name")
         if selected_instrument_item != "Add...":
-            # 1. BarChart API Ingestion (Primary)
-            with st.expander(f"Data Management: {selected_instrument_item} (BarChart API)", expanded=True):
-                st.info(f"Ingest 1-minute data for {selected_instrument_item} directly from BarChart API.")
+            # 1. Polygon API Ingestion (Primary)
+            with st.expander(f"Data Management: {selected_instrument_item} (Polygon API)", expanded=True):
+                st.info(f"Ingest 1-minute data for {selected_instrument_item} directly from Polygon API.")
                 
                 col_api1, col_api2 = st.columns(2)
                 with col_api1:
@@ -1087,19 +1087,19 @@ def phase1_foundation_data():
                 # Default API Symbol Logic
                 default_api_symbol = selected_instrument_item
                 if selected_instrument_item == "GOLD":
-                    default_api_symbol = "GC*1"
+                    default_api_symbol = "C:XAUUSD"
                 elif selected_instrument_item == "S&P 500":
-                    default_api_symbol = "$SPX"
+                    default_api_symbol = "I:SPX"
                 
-                api_symbol = st.text_input("BarChart Symbol", value=default_api_symbol, help="e.g. GC*1, $SPX, AAPL", key=f"api_sym_{selected_category}_{selected_instrument_item}")
+                api_symbol = st.text_input("Polygon Symbol", value=default_api_symbol, help="e.g. C:XAUUSD, I:SPX, AAPL", key=f"api_sym_{selected_category}_{selected_instrument_item}")
                 
                 if st.button("Fetch & Ingest from API", key=f"btn_api_{selected_category}_{selected_instrument_item}"):
-                    with st.spinner("Fetching data from BarChart..."):
+                    with st.spinner("Fetching data from Polygon..."):
                         s_str = api_start_date.strftime("%Y%m%d")
                         e_str = api_end_date.strftime("%Y%m%d")
                         
                         # Use selected_instrument_item as the DB symbol
-                        result = ingest_from_barchart_api(
+                        result = ingest_from_polygon_api(
                             api_symbol=api_symbol,
                             asset_class=selected_category,
                             start_date=s_str,
