@@ -158,51 +158,67 @@ def fetch_ohlcv(
 
     fields = f"{time_field},open,high,low,close,volume"
 
-    try:
-        query = (
-            supabase.table(table)
-            .select(fields)
-            .eq("symbol", symbol)
-            .gte(time_field, start_value)
-            .lte(time_field, end_value)
-            .order(time_field, desc=True)
-            .limit(min(limit, MAX_SUPABASE_LIMIT))
-        )
-        resp = query.execute()
-        data = resp.data if hasattr(resp, "data") else resp
-        if not data:
-            return pd.DataFrame()
+    # Support multiple symbol formats for fallback
+    symbols_to_try = [symbol]
+    if symbol == "GOLD":
+        symbols_to_try = ["GOLD", "^XAUUSD", "C:XAUUSD"]
+    elif symbol == "^XAUUSD":
+        symbols_to_try = ["^XAUUSD", "GOLD", "C:XAUUSD"]
+    elif symbol == "S&P 500":
+        symbols_to_try = ["S&P 500", "^SPX", "I:SPX"]
+    elif symbol == "^SPX":
+        symbols_to_try = ["^SPX", "S&P 500", "I:SPX"]
 
-        df = pd.DataFrame(data)
-        df[time_field] = pd.to_datetime(df[time_field])
-        df = df.sort_values(time_field)
+    for try_sym in symbols_to_try:
+        try:
+            query = (
+                supabase.table(table)
+                .select(fields)
+                .eq("symbol", try_sym)
+                .gte(time_field, start_value)
+                .lte(time_field, end_value)
+                .order(time_field, desc=True)
+                .limit(min(limit, MAX_SUPABASE_LIMIT))
+            )
+            resp = query.execute()
+            data = resp.data if hasattr(resp, "data") else resp
+            
+            if data:
+                # Found data, process and return
+                df = pd.DataFrame(data)
+                df[time_field] = pd.to_datetime(df[time_field])
+                df = df.sort_values(time_field)
 
-        rename_map = {
-            "open": "Open",
-            "high": "High",
-            "low": "Low",
-            "close": "Close",
-            "volume": "Volume",
-        }
-        df.rename(columns=rename_map, inplace=True)
-        for col in rename_map.values():
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
+                rename_map = {
+                    "open": "Open",
+                    "high": "High",
+                    "low": "Low",
+                    "close": "Close",
+                    "volume": "Volume",
+                }
+                df.rename(columns=rename_map, inplace=True)
+                for col in rename_map.values():
+                    if col in df.columns:
+                        df[col] = pd.to_numeric(df[col], errors="coerce")
 
-        df.set_index(time_field, inplace=True)
-        df.index = pd.to_datetime(df.index)
-        df.index.name = "Date" if is_date else "Timestamp"
-        df = df.dropna(subset=["Open", "High", "Low", "Close"])
-        
-        # Debug logging
-        import os
-        if os.getenv("DEBUG_DB_QUERIES", "false").lower() == "true":
-            print(f"✅ [DB] Retrieved {len(df)} records from {table} for {symbol}")
-        
-        return df
-    except Exception as exc:
-        print(f"Error fetching OHLCV for {symbol} ({interval}): {exc}")
-        return pd.DataFrame()
+                df.set_index(time_field, inplace=True)
+                df.index = pd.to_datetime(df.index)
+                df.index.name = "Date" if is_date else "Timestamp"
+                df = df.dropna(subset=["Open", "High", "Low", "Close"])
+                
+                # Debug logging
+                import os
+                if os.getenv("DEBUG_DB_QUERIES", "false").lower() == "true":
+                    print(f"✅ [DB] Retrieved {len(df)} records from {table} for {try_sym} (requested {symbol})")
+                
+                return df
+                
+        except Exception as e:
+            print(f"Error fetching OHLCV for {try_sym}: {e}")
+            continue
+
+    # If loop completes without returning
+    return pd.DataFrame()
 
 
 def fetch_latest_bar(symbol: str, interval: str = "1d", asset_class: Optional[str] = None) -> Optional[Dict[str, object]]:
@@ -243,25 +259,37 @@ def fetch_latest_bar(symbol: str, interval: str = "1d", asset_class: Optional[st
 
     fields = f"{time_field},open,high,low,close,volume,source"
 
-    try:
-        resp = (
-            supabase.table(table)
-            .select(fields)
-            .eq("symbol", symbol)
-            .order(time_field, desc=True)
-            .limit(1)
-            .execute()
-        )
-        data = resp.data if hasattr(resp, "data") else resp
-        if not data:
-            return None
+    # Support multiple symbol formats for fallback
+    symbols_to_try = [symbol]
+    if symbol == "GOLD":
+        symbols_to_try = ["GOLD", "^XAUUSD", "C:XAUUSD"]
+    elif symbol == "^XAUUSD":
+        symbols_to_try = ["^XAUUSD", "GOLD", "C:XAUUSD"]
+    elif symbol == "S&P 500":
+        symbols_to_try = ["S&P 500", "^SPX", "I:SPX"]
+    elif symbol == "^SPX":
+        symbols_to_try = ["^SPX", "S&P 500", "I:SPX"]
 
-        row = data[0]
-        row[time_field] = pd.to_datetime(row[time_field])
-        return row
-    except Exception as exc:
-        print(f"Error fetching latest bar for {symbol}: {exc}")
-        return None
+    for try_sym in symbols_to_try:
+        try:
+            resp = (
+                supabase.table(table)
+                .select(fields)
+                .eq("symbol", try_sym)
+                .order(time_field, desc=True)
+                .limit(1)
+                .execute()
+            )
+            data = resp.data if hasattr(resp, "data") else resp
+            if data:
+                row = data[0]
+                row[time_field] = pd.to_datetime(row[time_field])
+                return row
+        except Exception as exc:
+            print(f"Error fetching latest bar for {try_sym}: {exc}")
+            continue
+
+    return None
 
 
 def get_latest_price(

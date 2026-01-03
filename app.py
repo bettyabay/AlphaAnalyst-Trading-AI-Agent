@@ -1098,13 +1098,19 @@ def phase1_foundation_data():
                         s_str = api_start_date.strftime("%Y%m%d")
                         e_str = api_end_date.strftime("%Y%m%d")
                         
-                        # Use selected_instrument_item as the DB symbol
+                        # Handle specific symbol mappings for DB storage
+                        effective_db_symbol = selected_instrument_item
+                        if selected_instrument_item == "GOLD":
+                            effective_db_symbol = "^XAUUSD"
+                        elif selected_instrument_item == "S&P 500":
+                            effective_db_symbol = "^SPX"
+
                         result = ingest_from_polygon_api(
                             api_symbol=api_symbol,
                             asset_class=selected_category,
                             start_date=s_str,
                             end_date=e_str,
-                            db_symbol=selected_instrument_item
+                            db_symbol=effective_db_symbol
                         )
                         
                         if result.get("success"):
@@ -1357,6 +1363,9 @@ def phase1_foundation_data():
                 if selected_category == "Commodities" and selected_instrument_item == "GOLD":
                     symbol = "^XAUUSD"
                     instrument_display = "GOLD (^XAUUSD)"
+                elif selected_category == "Indices" and selected_instrument_item == "S&P 500":
+                    symbol = "^SPX"
+                    instrument_display = "S&P 500 (^SPX)"
                 else:
                     symbol = selected_instrument_item
                     instrument_display = selected_instrument_item
@@ -1388,17 +1397,33 @@ def phase1_foundation_data():
                                 table_name = "market_data_stocks_1min"
                             
                             # Fetch recent data (last 200 bars for calculation)
-                            query_symbol = symbol.upper() if not symbol.startswith("^") else symbol
-                            result = supabase.table(table_name)\
-                                .select("timestamp,open,high,low,close,volume")\
-                                .eq("symbol", query_symbol)\
-                                .order("timestamp", desc=True)\
-                                .limit(200)\
-                                .execute()
+                            # Support multiple symbol formats for fallback
+                            symbols_to_try = [symbol]
+                            if symbol == "^XAUUSD":
+                                symbols_to_try = ["^XAUUSD", "GOLD", "C:XAUUSD"]
+                            elif symbol == "^SPX":
+                                symbols_to_try = ["^SPX", "S&P 500", "I:SPX"]
                             
-                            if result.data and len(result.data) > 0:
+                            result_data = []
+                            used_symbol = symbol
+                            
+                            for try_sym in symbols_to_try:
+                                query_symbol = try_sym.upper() if not try_sym.startswith("^") else try_sym
+                                result = supabase.table(table_name)\
+                                    .select("timestamp,open,high,low,close,volume")\
+                                    .eq("symbol", query_symbol)\
+                                    .order("timestamp", desc=True)\
+                                    .limit(200)\
+                                    .execute()
+                                
+                                if result.data and len(result.data) > 0:
+                                    result_data = result.data
+                                    used_symbol = try_sym
+                                    break
+                            
+                            if result_data and len(result_data) > 0:
                                 # Convert to DataFrame
-                                df = pd.DataFrame(result.data)
+                                df = pd.DataFrame(result_data)
                                 df['timestamp'] = pd.to_datetime(df['timestamp'])
                                 df = df.sort_values('timestamp')
                                 
