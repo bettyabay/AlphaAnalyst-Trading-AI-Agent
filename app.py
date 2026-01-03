@@ -1324,6 +1324,37 @@ def phase1_foundation_data():
                             st.error(f"Error reading file: {str(e)}")
                     elif signal_file:
                         st.warning("Please fill in provider name before uploading")
+        
+        # View Stored Signals for Selected Provider
+        if selected_provider and selected_provider != "Add...":
+            st.markdown("---")
+            with st.expander(f"📋 View Stored Signals: {selected_provider}", expanded=True):
+                # Import here locally to avoid circular imports or long top-level imports
+                from tradingagents.database.db_service import get_provider_signals
+                
+                # Fetch signals for this provider (all symbols)
+                stored_signals = get_provider_signals(provider=selected_provider, limit=100)
+                
+                if stored_signals:
+                    df_signals = pd.DataFrame(stored_signals)
+                    # Reorder columns if possible
+                    cols = ['signal_date', 'symbol', 'action', 'entry_price', 'stop_loss', 'target_1', 'target_2', 'target_3']
+                    # Add new columns if they exist in df
+                    for c in ['entry_price_max', 'target_4', 'target_5']:
+                        if c in df_signals.columns:
+                            cols.append(c)
+                            
+                    # Filter existing columns
+                    display_cols = [c for c in cols if c in df_signals.columns]
+                    # Add any other columns not in display_cols
+                    other_cols = [c for c in df_signals.columns if c not in display_cols and c not in ['id', 'created_at', 'provider_name', 'timezone_offset']]
+                    display_cols.extend(other_cols)
+                    
+                    st.dataframe(df_signals[display_cols], use_container_width=True)
+                    st.caption(f"Showing last {len(df_signals)} signals.")
+                else:
+                    st.info(f"No stored signals found for {selected_provider}.")
+
     with col_c:
         kpi_options = ["ATR", "Volume", "VWAP", "EMA", "SMA", "RSI", "MACD", "Bollinger Bands", "Stochastic", "Momentum", "Add..."] + (st.session_state.get("kpi_indicators", []) or [])
         selected_kpi = st.selectbox(
@@ -1447,6 +1478,14 @@ def phase1_foundation_data():
                                 if kpi_result is not None:
                                     st.success(f"✓ {selected_kpi} calculated successfully")
                                     
+                                    # Data Provenance Proof
+                                    with st.expander("🔍 Data Source Verification", expanded=False):
+                                        st.write(f"**Source:** Database ({table_name})")
+                                        st.write(f"**Symbol Found:** {used_symbol}")
+                                        st.write(f"**Records Used:** {len(df)} 1-minute bars")
+                                        st.write(f"**Latest Data Point:** {df['timestamp'].max()}")
+                                        st.dataframe(df.tail(3)[['timestamp', 'Open', 'Close', 'Volume']], use_container_width=True)
+
                                     # Display results based on KPI type
                                     if isinstance(kpi_result, dict):
                                         st.markdown("##### KPI Results")

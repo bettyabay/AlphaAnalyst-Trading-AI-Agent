@@ -221,9 +221,12 @@ def ingest_signal_provider_data(
                     "signal_date": row["Date"].isoformat(),
                     "action": action,
                     "entry_price": float(row["Entry Price"]) if pd.notnull(row.get("Entry Price")) else None,
+                    "entry_price_max": float(row["Entry Price Max"]) if pd.notnull(row.get("Entry Price Max")) else None,
                     "target_1": float(row["Target 1"]) if pd.notnull(row.get("Target 1")) else None,
                     "target_2": float(row["Target 2"]) if pd.notnull(row.get("Target 2")) else None,
                     "target_3": float(row["Target 3"]) if pd.notnull(row.get("Target 3")) else None,
+                    "target_4": float(row["Target 4"]) if pd.notnull(row.get("Target 4")) else None,
+                    "target_5": float(row["Target 5"]) if pd.notnull(row.get("Target 5")) else None,
                     "stop_loss": float(row["Stop Loss"]) if pd.notnull(row.get("Stop Loss")) else None,
                     "timezone_offset": timezone_offset,
                     "created_at": datetime.now().isoformat()
@@ -268,6 +271,7 @@ def ingest_signal_provider_data(
         # Upsert in chunks
         chunk_size = 1000
         total_inserted = 0
+        warning_msg = ""
         
         for i in range(0, len(db_rows), chunk_size):
             chunk = db_rows[i:i+chunk_size]
@@ -277,17 +281,36 @@ def ingest_signal_provider_data(
                 total_inserted += len(chunk)
             except Exception as e:
                 error_msg = str(e)
-                # Provide more detailed error information
-                if "relation" in error_msg.lower() and "does not exist" in error_msg.lower():
+                # Check for column mismatch errors (PGRST204)
+                if "column" in error_msg.lower() and "does not exist" in error_msg.lower():
+                    # Retry without the new columns that might be missing
+                    # Identify likely culprits
+                    new_cols = ["entry_price_max", "target_4", "target_5"]
+                    
+                    # Create a clean chunk without these columns
+                    clean_chunk = []
+                    for row in chunk:
+                        clean_row = {k: v for k, v in row.items() if k not in new_cols}
+                        clean_chunk.append(clean_row)
+                        
+                    try:
+                        # Retry insert
+                        result = supabase.table("signal_provider_signals").upsert(clean_chunk).execute()
+                        total_inserted += len(clean_chunk)
+                        if not warning_msg:
+                            warning_msg = " (Note: New columns 'entry_price_max', 'target_4', 'target_5' were skipped because they don't exist in the database. Please update your schema.)"
+                    except Exception as retry_e:
+                        return {"success": False, "message": f"Database error (retry failed): {str(retry_e)}"}
+                
+                # Provide more detailed error information for other errors
+                elif "relation" in error_msg.lower() and "does not exist" in error_msg.lower():
                     return {"success": False, "message": f"Table 'signal_provider_signals' does not exist. Please create it first. Error: {error_msg}"}
-                elif "column" in error_msg.lower() and "does not exist" in error_msg.lower():
-                    return {"success": False, "message": f"Column mismatch. Check table schema. Error: {error_msg}"}
                 else:
                     return {"success": False, "message": f"Database error at chunk starting at row {i}: {error_msg}"}
         
         return {
             "success": True,
-            "message": f"Successfully ingested {total_inserted} records for provider '{provider_name}' into signal_provider_signals."
+            "message": f"Successfully ingested {total_inserted} records for provider '{provider_name}' into signal_provider_signals.{warning_msg}"
         }
         
     except Exception as e:
