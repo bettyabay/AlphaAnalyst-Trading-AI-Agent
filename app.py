@@ -1076,15 +1076,7 @@ def phase1_foundation_data():
         if selected_instrument_item != "Add...":
             # 1. Polygon API Ingestion (Primary)
             with st.expander(f"Data Management: {selected_instrument_item} (Polygon API)", expanded=True):
-                st.info(f"Ingest 1-minute data for {selected_instrument_item} directly from Polygon API.")
-                
-                col_api1, col_api2 = st.columns(2)
-                with col_api1:
-                    # Default to 2 years for 1-min data (Polygon API limit), 5 years for daily
-                    default_days = 730 if selected_category in ["Commodities", "Currencies", "Indices", "Stocks"] else 1825
-                    api_start_date = st.date_input("Start Date", value=datetime.now() - timedelta(days=default_days), key=f"api_start_{selected_category}_{selected_instrument_item}")
-                with col_api2:
-                    api_end_date = st.date_input("End Date", value=datetime.now(), key=f"api_end_{selected_category}_{selected_instrument_item}")
+                st.info(f"Ingest 1-minute data for {selected_instrument_item} directly from Polygon API. Automatically resumes from latest timestamp to now.")
                 
                 # Default API Symbol Logic
                 default_api_symbol = selected_instrument_item
@@ -1097,9 +1089,6 @@ def phase1_foundation_data():
                 
                 if st.button("Fetch & Ingest from API", key=f"btn_api_{selected_category}_{selected_instrument_item}"):
                     with st.spinner("Fetching data from Polygon..."):
-                        s_str = api_start_date.strftime("%Y%m%d")
-                        e_str = api_end_date.strftime("%Y%m%d")
-                        
                         # Handle specific symbol mappings for DB storage
                         effective_db_symbol = selected_instrument_item
                         if selected_instrument_item == "GOLD":
@@ -1110,16 +1099,15 @@ def phase1_foundation_data():
                         result = ingest_from_polygon_api(
                             api_symbol=api_symbol,
                             asset_class=selected_category,
-                            start_date=s_str,
-                            end_date=e_str,
-                            db_symbol=effective_db_symbol
+                            db_symbol=effective_db_symbol,
+                            auto_resume=True
                         )
                         
                         if result.get("success"):
                             st.success(result.get("message"))
                         else:
                             st.error(f"Failed: {result.get('message')}")
-
+            
             # 2. File Upload (Secondary)
             with st.expander(f"Data Management: {selected_instrument_item} (File Upload)", expanded=False):
                 st.info(f"Ingest 1-minute data for {selected_instrument_item} ({selected_category}) via CSV/Excel.")
@@ -1186,13 +1174,14 @@ def phase1_foundation_data():
                     with col_date2:
                         end_date = st.date_input("End Date (optional)", value=None, key="pipxpert_end_date")
                     
-                    # Timezone (default GMT+4)
-                    timezone_offset = st.selectbox(
-                        "Timezone",
-                        options=["+04:00", "+00:00", "+05:00", "-05:00", "-08:00"],
-                        index=0,
+                    # Timezone Selection (source timezone of the file)
+                    source_timezone_options = ["America/New_York", "UTC", "Asia/Dubai", "Europe/London", "Asia/Kolkata", "America/Chicago", "America/Los_Angeles"]
+                    source_timezone = st.selectbox(
+                        "Source Timezone (of the Excel file)",
+                        options=source_timezone_options,
+                        index=1,  # Default to UTC
                         key="pipxpert_timezone",
-                        help="GMT+4 is standard"
+                        help="Timezone of the dates in the Excel file. Data will be converted to GMT+4 (Asia/Dubai) automatically."
                     )
                     
                     signal_file = st.file_uploader("Upload Signal Data (Excel)", type=["xls", "xlsx", "csv"], key="pipxpert_upload")
@@ -1204,11 +1193,11 @@ def phase1_foundation_data():
                             if df_preview is not None and not df_preview.empty:
                                 st.dataframe(df_preview.head(10), use_container_width=True)
                                 
-                                # Validate data
+                                # Validate data (timezone_offset parameter kept for backward compatibility, but actual conversion happens in ingestion)
                                 validation = validate_signal_provider_data(
                                     df_preview, 
                                     provider_name, 
-                                    timezone_offset
+                                    "+04:00"  # Default, actual conversion uses source_timezone
                                 )
                                 
                                 if validation["valid"]:
@@ -1229,7 +1218,7 @@ def phase1_foundation_data():
                                         result = ingest_signal_provider_data(
                                             signal_file,
                                             provider_name,
-                                            timezone_offset
+                                            source_timezone=source_timezone
                                         )
                                         if result.get("success"):
                                             st.success(result.get("message"))
@@ -1259,13 +1248,14 @@ def phase1_foundation_data():
                     with col_date2:
                         end_date = st.date_input("End Date (optional)", value=None, key="new_provider_end_date")
                     
-                    # Timezone (default GMT+4)
-                    timezone_offset = st.selectbox(
-                        "Timezone",
-                        options=["+04:00", "+00:00", "+05:00", "-05:00", "-08:00"],
-                        index=0,
+                    # Timezone Selection (source timezone of the file)
+                    source_timezone_options = ["America/New_York", "UTC", "Asia/Dubai", "Europe/London", "Asia/Kolkata", "America/Chicago", "America/Los_Angeles"]
+                    source_timezone = st.selectbox(
+                        "Source Timezone (of the Excel file)",
+                        options=source_timezone_options,
+                        index=1,  # Default to UTC
                         key="new_provider_timezone",
-                        help="GMT+4 is standard"
+                        help="Timezone of the dates in the Excel file. Data will be converted to GMT+4 (Asia/Dubai) automatically."
                     )
                     
                     signal_file = st.file_uploader("Upload Signal Data (Excel/CSV)", type=["xls", "xlsx", "csv"], key="new_provider_upload")
@@ -1277,11 +1267,11 @@ def phase1_foundation_data():
                             if df_preview is not None and not df_preview.empty:
                                 st.dataframe(df_preview.head(10), use_container_width=True)
                                 
-                                # Validate data
+                                # Validate data (timezone_offset parameter kept for backward compatibility, but actual conversion happens in ingestion)
                                 validation = validate_signal_provider_data(
                                     df_preview, 
                                     provider_name, 
-                                    timezone_offset
+                                    "+04:00"  # Default, actual conversion uses source_timezone
                                 )
                                 
                                 if validation["valid"]:
@@ -1302,7 +1292,7 @@ def phase1_foundation_data():
                                         result = ingest_signal_provider_data(
                                             signal_file,
                                             provider_name,
-                                            timezone_offset
+                                            source_timezone=source_timezone
                                         )
                                         if result.get("success"):
                                             st.success(result.get("message"))

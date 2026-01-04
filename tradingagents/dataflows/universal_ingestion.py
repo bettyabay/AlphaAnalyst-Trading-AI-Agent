@@ -6,18 +6,20 @@ import traceback
 from datetime import datetime, timedelta
 import pytz
 
-def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=None, years=5, db_symbol=None):
+def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=None, years=5, db_symbol=None, auto_resume=True):
     """
     Ingest data directly from Polygon API into the appropriate Supabase table.
     Handles timezone conversion to GMT+4 (Dubai).
+    Automatically resumes from latest timestamp if auto_resume=True.
     
     Args:
         api_symbol: Polygon symbol (e.g. "AAPL", "C:XAUUSD") or Barchart symbol to be converted
         asset_class: "Commodities", "Indices", "Currencies", "Stocks"
-        start_date: Optional start date (datetime or YYYYMMDD string)
-        end_date: Optional end date (datetime or YYYYMMDD string)
-        years: Number of years to fetch if start_date is not provided
+        start_date: Optional start date (datetime or YYYYMMDD string). Ignored if auto_resume=True and data exists.
+        end_date: Optional end date (datetime or YYYYMMDD string). Defaults to now_utc - 15min if not provided.
+        years: Number of years to fetch if start_date is not provided (only used if no existing data)
         db_symbol: Symbol to store in DB (defaults to api_symbol if None)
+        auto_resume: If True, automatically resume from latest timestamp in DB. If False, use start_date.
         
     Returns:
         dict: {"success": bool, "message": str}
@@ -35,20 +37,77 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
         return {"success": False, "message": f"Unknown asset class: {asset_class}"}
 
     try:
-        # Determine dates
+        sb = get_supabase()
+        if not sb:
+            return {"success": False, "message": "Supabase not configured (check .env)"}
+        
+        # Determine end date (default to now_utc - 15min for intraday safety buffer)
         if not end_date:
-            end_dt = datetime.now()
+            end_dt = datetime.utcnow() - timedelta(minutes=15)
         elif isinstance(end_date, str):
             end_dt = datetime.strptime(end_date, "%Y%m%d")
         else:
             end_dt = end_date
-            
-        if not start_date:
-            start_dt = end_dt.replace(year=end_dt.year - years)
-        elif isinstance(start_date, str):
-            start_dt = datetime.strptime(start_date, "%Y%m%d")
+        
+        # Auto-resume: Check for latest timestamp in database
+        start_dt = None
+        if auto_resume:
+            try:
+                target_symbol = db_symbol if db_symbol else api_symbol
+                # Try multiple symbol formats
+                symbols_to_try = [target_symbol, api_symbol]
+                if target_symbol == "^XAUUSD":
+                    symbols_to_try.extend(["C:XAUUSD", "GOLD"])
+                elif target_symbol == "^SPX":
+                    symbols_to_try.extend(["I:SPX", "S&P 500"])
+                
+                latest_ts = None
+                for try_sym in symbols_to_try:
+                    try:
+                        result = sb.table(target_table)\
+                            .select("timestamp")\
+                            .eq("symbol", try_sym)\
+                            .order("timestamp", desc=True)\
+                            .limit(1)\
+                            .execute()
+                        
+                        if result.data and len(result.data) > 0:
+                            latest_ts_str = result.data[0].get("timestamp")
+                            if latest_ts_str:
+                                if isinstance(latest_ts_str, str):
+                                    latest_ts = datetime.fromisoformat(latest_ts_str.replace('Z', '+00:00'))
+                                else:
+                                    latest_ts = latest_ts_str
+                                
+                                # Convert to UTC if timezone-aware
+                                if latest_ts.tzinfo is not None:
+                                    latest_ts = latest_ts.astimezone(pytz.UTC).replace(tzinfo=None)
+                                
+                                # Resume from next minute after latest
+                                start_dt = latest_ts + timedelta(minutes=1)
+                                break
+                    except Exception:
+                        continue
+                
+                # If no existing data found, use default (2 years back)
+                if start_dt is None:
+                    start_dt = end_dt - timedelta(days=730)  # 2 years for 1-min data
+            except Exception as e:
+                # Fallback to default if auto-resume fails
+                start_dt = end_dt - timedelta(days=730)
         else:
-            start_dt = start_date
+            # Manual start date
+            if not start_date:
+                start_dt = end_dt - timedelta(days=years * 365)
+            elif isinstance(start_date, str):
+                start_dt = datetime.strptime(start_date, "%Y%m%d")
+            else:
+                start_dt = start_date
+        
+        # Check if start_date is after end_date (data already up to date)
+        if start_dt >= end_dt:
+            latest_msg = f"Latest: {(start_dt - timedelta(minutes=1)).strftime('%Y-%m-%d %H:%M:%S')}" if auto_resume else ""
+            return {"success": True, "message": f"Data for {api_symbol} is already up to date. {latest_msg} End: {end_dt.strftime('%Y-%m-%d %H:%M:%S')}"}
             
         s_str = start_dt.strftime("%Y-%m-%d")
         e_str = end_dt.strftime("%Y-%m-%d")
@@ -132,7 +191,8 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
             except Exception as e:
                 return {"success": False, "message": f"Database error at chunk {i}: {str(e)}"}
                  
-        return {"success": True, "message": f"Successfully ingested {total_inserted} records for {target_symbol} ({s_str}-{e_str}) into {target_table}."}
+        resume_msg = f" (resumed from latest)" if auto_resume and start_dt else ""
+        return {"success": True, "message": f"Successfully ingested {total_inserted} records for {target_symbol} ({s_str}-{e_str}) into {target_table}.{resume_msg}"}
 
     except Exception as e:
         traceback.print_exc()

@@ -3,6 +3,7 @@ from tradingagents.database.config import get_supabase
 import io
 from datetime import datetime
 from typing import Dict, Optional
+import pytz
 
 
 def validate_signal_provider_data(
@@ -129,15 +130,18 @@ def validate_signal_provider_data(
 def ingest_signal_provider_data(
     uploaded_file,
     provider_name: str,
-    timezone_offset: str = "+04:00"
+    timezone_offset: str = "+04:00",
+    source_timezone: str = "UTC"
 ) -> Dict[str, str]:
     """
     Ingest signal provider data from Excel file into signal_provider_signals table.
+    Converts timestamps from source_timezone to GMT+4 (Asia/Dubai).
     
     Args:
         uploaded_file: Streamlit UploadedFile object
         provider_name: Name of the signal provider (e.g., "PipXpert")
-        timezone_offset: Timezone offset (default GMT+4)
+        timezone_offset: Timezone offset string for metadata (default GMT+4, kept for backward compatibility)
+        source_timezone: Timezone of the dates in the Excel file (default UTC). Will be converted to GMT+4 (Asia/Dubai).
         
     Returns:
         dict: {"success": bool, "message": str}
@@ -186,7 +190,14 @@ def ingest_signal_provider_data(
         if not validation["valid"]:
             return {"success": False, "message": validation["message"]}
         
-        # Convert Date to datetime and apply timezone
+        # Timezone configuration for conversion
+        try:
+            src_tz = pytz.timezone(source_timezone)
+            dst_tz = pytz.timezone('Asia/Dubai')  # GMT+4
+        except pytz.UnknownTimeZoneError:
+            return {"success": False, "message": f"Unknown timezone: {source_timezone}"}
+        
+        # Convert Date to datetime
         df["Date"] = pd.to_datetime(df["Date"], errors='coerce')
         # Remove rows with invalid dates
         df = df.dropna(subset=["Date"])
@@ -214,11 +225,32 @@ def ingest_signal_provider_data(
                 if not currency_pair:
                     continue
                 
+                # Convert Date from source timezone to GMT+4
+                # Example: Excel date "2023-10-05 10:53:30" (UTC) -> "2023-10-05 14:53:30+04:00" (GMT+4)
+                # PostgreSQL stores TIMESTAMPTZ in UTC internally, but the value represents GMT+4 time
+                # When queried with GMT+4 timezone, it will display as "2023-10-05 14:53:30" (GMT+4)
+                signal_date_raw = row["Date"]
+                signal_date = None
+                if pd.notnull(signal_date_raw):
+                    # Convert pandas Timestamp to datetime if needed
+                    if isinstance(signal_date_raw, pd.Timestamp):
+                        dt_val = signal_date_raw.to_pydatetime()
+                    else:
+                        dt_val = signal_date_raw
+                    
+                    # Localize to source timezone if naive
+                    if dt_val.tzinfo is None:
+                        dt_localized = src_tz.localize(dt_val)
+                    else:
+                        dt_localized = dt_val.astimezone(src_tz)
+                    # Convert to GMT+4 (Asia/Dubai) - this is the target timezone for all signals
+                    signal_date = dt_localized.astimezone(dst_tz)
+                
                 # Build record
                 record = {
                     "provider_name": provider_name.strip(),
                     "symbol": currency_pair,
-                    "signal_date": row["Date"].isoformat(),
+                    "signal_date": signal_date.isoformat() if signal_date else None,
                     "action": action,
                     "entry_price": float(row["Entry Price"]) if pd.notnull(row.get("Entry Price")) else None,
                     "entry_price_max": float(row["Entry Price Max"]) if pd.notnull(row.get("Entry Price Max")) else None,
@@ -244,16 +276,26 @@ def ingest_signal_provider_data(
                     if dt_col in df.columns:
                         dt_val = row.get(dt_col)
                         if pd.notnull(dt_val):
-                            # Already converted to datetime, just format it
+                            # Convert to datetime if not already
                             if isinstance(dt_val, pd.Timestamp):
-                                record[field_name] = dt_val.isoformat()
+                                dt_ts = dt_val
                             else:
                                 try:
-                                    dt_val = pd.to_datetime(dt_val)
-                                    if pd.notnull(dt_val):
-                                        record[field_name] = dt_val.isoformat()
+                                    dt_ts = pd.to_datetime(dt_val)
+                                    if pd.isna(dt_ts):
+                                        continue
                                 except Exception:
-                                    pass
+                                    continue
+                            
+                            # Convert from source timezone to GMT+4
+                            # Localize to source timezone if naive
+                            if dt_ts.tzinfo is None:
+                                dt_localized = src_tz.localize(dt_ts.to_pydatetime())
+                            else:
+                                dt_localized = dt_ts.to_pydatetime().astimezone(src_tz)
+                            # Convert to GMT+4 (Asia/Dubai)
+                            dt_target = dt_localized.astimezone(dst_tz)
+                            record[field_name] = dt_target.isoformat()
                 
                 db_rows.append(record)
             except (ValueError, TypeError) as e:
