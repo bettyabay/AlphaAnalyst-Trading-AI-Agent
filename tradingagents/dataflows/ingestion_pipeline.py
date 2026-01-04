@@ -151,7 +151,12 @@ class DataIngestionPipeline:
         start_date: optional explicit start datetime (inclusive)
         end_date: optional explicit end datetime (inclusive)
         target_timezone: optional timezone string (e.g. 'Asia/Dubai') to convert data to. Default is UTC (None).
+        
+        Note: Polygon API provides max 2 years of 1-minute data. For 1min interval, days_back defaults to 730 (2 years).
         """
+        # Adjust default days_back for 1-minute data (Polygon only provides 2 years)
+        if interval in ("1min", "1-minute", "1m") and days_back == 1825:
+            days_back = 730  # 2 years for 1-minute data
         try:
             if not self.supabase:
                 print("Supabase not configured. Cannot ingest data.")

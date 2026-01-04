@@ -16,13 +16,14 @@ def main():
     print(f"Target Timezone: {target_timezone}")
     
     # Ingest 1-minute data
+    # Set resume_from_latest=False for fresh ingestion after manual deletion
     success = pipeline.ingest_historical_data(
         symbol=symbol,
         interval="1min",
         start_date=start_date,
         end_date=end_date,
         target_timezone=target_timezone,
-        resume_from_latest=True 
+        resume_from_latest=False  # False = start from beginning (for fresh ingestion)
     )
     
     if success:

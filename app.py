@@ -1080,7 +1080,9 @@ def phase1_foundation_data():
                 
                 col_api1, col_api2 = st.columns(2)
                 with col_api1:
-                    api_start_date = st.date_input("Start Date", value=datetime.now() - timedelta(days=365*5), key=f"api_start_{selected_category}_{selected_instrument_item}")
+                    # Default to 2 years for 1-min data (Polygon API limit), 5 years for daily
+                    default_days = 730 if selected_category in ["Commodities", "Currencies", "Indices", "Stocks"] else 1825
+                    api_start_date = st.date_input("Start Date", value=datetime.now() - timedelta(days=default_days), key=f"api_start_{selected_category}_{selected_instrument_item}")
                 with col_api2:
                     api_end_date = st.date_input("End Date", value=datetime.now(), key=f"api_end_{selected_category}_{selected_instrument_item}")
                 
