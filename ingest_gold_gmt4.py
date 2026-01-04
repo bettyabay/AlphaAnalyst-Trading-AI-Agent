@@ -23,7 +23,7 @@ def main():
         start_date=start_date,
         end_date=end_date,
         target_timezone=target_timezone,
-        resume_from_latest=False  # False = start from beginning (for fresh ingestion)
+        resume_from_latest=True  # False = start from beginning (for fresh ingestion)
     )
     
     if success:
