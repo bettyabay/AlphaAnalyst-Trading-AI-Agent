@@ -20,7 +20,7 @@ from phi.tools.googlesearch import GoogleSearch
 
 # Phase 1 imports
 from tradingagents.database.config import get_supabase
-from tradingagents.dataflows.ingestion_pipeline import DataIngestionPipeline
+from tradingagents.dataflows.ingestion_pipeline import DataIngestionPipeline, convert_instrument_to_polygon_symbol
 from tradingagents.dataflows.gold_ingestion import ingest_gold_data
 from tradingagents.dataflows.universal_ingestion import ingest_market_data, ingest_from_polygon_api
 from tradingagents.dataflows.signal_provider_ingestion import ingest_signal_provider_data, validate_signal_provider_data
@@ -1078,14 +1078,15 @@ def phase1_foundation_data():
             with st.expander(f"Data Management: {selected_instrument_item} (Polygon API)", expanded=True):
                 st.info(f"Ingest 1-minute data for {selected_instrument_item} directly from Polygon API. Automatically resumes from latest timestamp to now.")
                 
-                # Default API Symbol Logic
-                default_api_symbol = selected_instrument_item
-                if selected_instrument_item == "GOLD":
-                    default_api_symbol = "C:XAUUSD"
-                elif selected_instrument_item == "S&P 500":
-                    default_api_symbol = "I:SPX"
+                # Default API Symbol Logic - use conversion function for all instruments
+                default_api_symbol = convert_instrument_to_polygon_symbol(selected_category, selected_instrument_item)
                 
-                api_symbol = st.text_input("Polygon Symbol", value=default_api_symbol, help="e.g. C:XAUUSD, I:SPX, AAPL", key=f"api_sym_{selected_category}_{selected_instrument_item}")
+                # Add helpful note for indices about SPY
+                help_text = "e.g. C:XAUUSD, I:SPX, C:EURUSD, AAPL"
+                if selected_category == "Indices" and "SPX" in default_api_symbol.upper():
+                    help_text += "\n\n⚠️ Note: For 1-minute data, Polygon doesn't support I:SPX. The system will auto-convert to SPY (ETF)."
+                
+                api_symbol = st.text_input("Polygon Symbol", value=default_api_symbol, help=help_text, key=f"api_sym_{selected_category}_{selected_instrument_item}")
                 
                 if st.button("Fetch & Ingest from API", key=f"btn_api_{selected_category}_{selected_instrument_item}"):
                     with st.spinner("Fetching data from Polygon..."):
@@ -1096,12 +1097,23 @@ def phase1_foundation_data():
                         elif selected_instrument_item == "S&P 500":
                             effective_db_symbol = "^SPX"
 
-                        result = ingest_from_polygon_api(
-                            api_symbol=api_symbol,
-                            asset_class=selected_category,
-                            db_symbol=effective_db_symbol,
-                            auto_resume=True
-                        )
+                        # Use indices-specific ingestion for indices (1 year, 1-day chunks, UTC→GMT+4)
+                        if selected_category == "Indices":
+                            from ingest_indices_polygon import ingest_indices_from_polygon
+                            result = ingest_indices_from_polygon(
+                                api_symbol=api_symbol,
+                                interval="1min",
+                                years=1,  # Polygon free plan: 1 year for indices
+                                db_symbol=effective_db_symbol
+                            )
+                        else:
+                            # Use universal ingestion for other asset classes
+                            result = ingest_from_polygon_api(
+                                api_symbol=api_symbol,
+                                asset_class=selected_category,
+                                db_symbol=effective_db_symbol,
+                                auto_resume=True
+                            )
                         
                         if result.get("success"):
                             st.success(result.get("message"))

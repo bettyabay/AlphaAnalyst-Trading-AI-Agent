@@ -70,13 +70,25 @@ def convert_instrument_to_polygon_symbol(category: str, instrument: str) -> str:
     
     # Indices
     elif category_upper == "INDICES":
+        # NOTE: For 1-minute data, Polygon doesn't support indices (I:SPX, etc.)
+        # The universal_ingestion function will auto-convert I:SPX to SPY
+        # But we still return I:SPX here for consistency, and let the ingestion layer handle conversion
         if "S&P" in instrument_upper or "SPX" in instrument_upper or "SP500" in instrument_upper:
-            return "I:SPX"  # S&P 500 index
+            return "I:SPX"  # S&P 500 index (will be converted to SPY for minute data)
         elif instrument_upper.startswith("^"):
-            return f"I:{instrument_upper[1:]}"  # Remove ^ and add I: prefix
-        elif not instrument_upper.startswith("I:"):
+            symbol_part = instrument_upper[1:].strip()
+            if symbol_part:  # Make sure there's something after the ^
+                return f"I:{symbol_part}"
+            else:
+                return instrument_upper  # Return as-is if invalid
+        elif instrument_upper.startswith("I:"):
+            # Already has I: prefix, return as-is
+            return instrument_upper
+        elif len(instrument_upper) > 1:  # Only add I: prefix if there's more than one character
             return f"I:{instrument_upper}"
-        return instrument_upper
+        else:
+            # Single character like "I" - return as-is (user should enter full symbol)
+            return instrument_upper
     
     # Currencies
     elif category_upper == "CURRENCIES":

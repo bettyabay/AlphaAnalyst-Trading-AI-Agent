@@ -191,8 +191,16 @@ class PolygonDataClient:
                     # Handle 401 Unauthorized
                     response_status = getattr(e.response, 'status_code', None) if hasattr(e, 'response') else None
                     if response_status == 401:
-                         # ... (existing 401 logic) ...
+                         # ... (existing 401 logic) ... 
                          raise
+                    
+                    # Handle 403 Forbidden (Polygon restriction - e.g., indices minute data)
+                    if response_status == 403:
+                        error_msg = f"403 Forbidden: Polygon does not allow access to this data. Symbol: {symbol}"
+                        if symbol.startswith("I:"):
+                            error_msg += f"\n⚠️ Polygon does NOT provide 1-minute data for indices (I:SPX, I:DJI, etc.) due to licensing restrictions.\n💡 Use SPY instead of I:SPX for S&P 500 minute data."
+                        print(error_msg)
+                        raise ValueError(error_msg) from e
                     
                     if response_status == 429:
                          # Handled above
