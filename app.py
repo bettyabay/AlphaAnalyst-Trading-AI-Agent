@@ -1129,27 +1129,39 @@ def phase1_foundation_data():
                             effective_db_symbol = "^SPX"
 
                         # Use indices-specific ingestion for indices (1 year, 1-day chunks, UTC→GMT+4)
-                        if selected_category == "Indices":
-                            from ingest_indices_polygon import ingest_indices_from_polygon
-                            result = ingest_indices_from_polygon(
-                                api_symbol=api_symbol_cleaned,  # Use cleaned symbol
-                                interval="1min",
-                                years=1,  # Polygon free plan: 1 year for indices
-                                db_symbol=effective_db_symbol
-                            )
-                        else:
-                            # Use universal ingestion for other asset classes
-                            result = ingest_from_polygon_api(
-                                api_symbol=api_symbol_cleaned,  # Use cleaned symbol
-                                asset_class=selected_category,
-                                db_symbol=effective_db_symbol,
-                                auto_resume=True
-                            )
-                        
-                        if result.get("success"):
-                            st.success(result.get("message"))
-                        else:
-                            st.error(f"Failed: {result.get('message')}")
+                        try:
+                            if selected_category == "Indices":
+                                from ingest_indices_polygon import ingest_indices_from_polygon
+                                result = ingest_indices_from_polygon(
+                                    api_symbol=api_symbol_cleaned,  # Use cleaned symbol
+                                    interval="1min",
+                                    years=1,  # Polygon free plan: 1 year for indices
+                                    db_symbol=effective_db_symbol
+                                )
+                            else:
+                                # Use universal ingestion for other asset classes
+                                result = ingest_from_polygon_api(
+                                    api_symbol=api_symbol_cleaned,  # Use cleaned symbol
+                                    asset_class=selected_category,
+                                    db_symbol=effective_db_symbol,
+                                    auto_resume=True
+                                )
+                            
+                            # Always display the result message
+                            if result and isinstance(result, dict):
+                                if result.get("success"):
+                                    st.success(result.get("message", "✅ Ingestion completed successfully"))
+                                else:
+                                    st.error(f"Failed: {result.get('message', 'Unknown error occurred')}")
+                            else:
+                                st.error(f"Unexpected result format: {result}")
+                                st.write(f"Debug - Result type: {type(result)}, Value: {result}")
+                        except Exception as e:
+                            import traceback
+                            error_details = traceback.format_exc()
+                            st.error(f"❌ Exception during ingestion: {str(e)}")
+                            st.exception(e)  # Show full traceback in Streamlit
+                            print(f"❌ Exception during ingestion: {error_details}")
             
             # 2. File Upload (Secondary)
             with st.expander(f"Data Management: {selected_instrument_item} (File Upload)", expanded=False):

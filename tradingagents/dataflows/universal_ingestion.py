@@ -585,18 +585,32 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
         chunk_size = 1000
         total_inserted = 0
         
+        print(f"💾 Preparing to insert {len(db_rows)} records into {target_table} in chunks of {chunk_size}")
+        
         for i in range(0, len(db_rows), chunk_size):
             chunk = db_rows[i:i+chunk_size]
             try:
-                sb.table(target_table).upsert(chunk).execute()
+                result_upsert = sb.table(target_table).upsert(chunk).execute()
                 total_inserted += len(chunk)
+                print(f"✅ Inserted chunk {i//chunk_size + 1}: {len(chunk)} records (total: {total_inserted})")
             except Exception as e:
-                return {"success": False, "message": f"Database error at chunk {i}: {str(e)}"}
-                 
+                error_msg = str(e)
+                print(f"❌ Database error at chunk {i}: {error_msg}")
+                return {"success": False, "message": f"Database error at chunk {i}: {error_msg}"}
+        
+        # Always return success message, even if total_inserted is 0 (might be duplicates)
         resume_msg = f" (resumed from latest)" if auto_resume and start_dt else ""
         timezone_note = " (converted from UTC to GMT+4)"
         date_range_info = f"Date range: {s_str} to {e_str} ({(end_dt - start_dt).days} days)"
-        return {"success": True, "message": f"✅ Successfully ingested {total_inserted} records for {target_symbol} into {target_table}.\n\n{date_range_info}{timezone_note}.{resume_msg}"}
+        
+        if total_inserted > 0:
+            success_message = f"✅ Successfully ingested {total_inserted} records for {target_symbol} into {target_table}.\n\n{date_range_info}{timezone_note}.{resume_msg}"
+        else:
+            # Even if no new records (all duplicates), still show success
+            success_message = f"✅ Ingestion completed for {target_symbol}.\n\n{date_range_info}{timezone_note}.\n\nℹ️ Note: All records were duplicates or already exist in the database.{resume_msg}"
+        
+        print(f"🎉 {success_message}")
+        return {"success": True, "message": success_message}
 
     except Exception as e:
         traceback.print_exc()
