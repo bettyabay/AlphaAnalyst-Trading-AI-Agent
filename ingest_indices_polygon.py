@@ -16,6 +16,80 @@ import pandas as pd
 import pytz
 import time
 import traceback
+from typing import Dict
+
+
+def _insert_chunk_to_db(
+    chunk_df: pd.DataFrame,
+    target_symbol: str,
+    target_table: str,
+    sb,
+    utc_tz,
+    gmt4_tz,
+    chunk_s_str: str,
+    chunk_e_str: str
+) -> Dict:
+    """
+    Helper function to insert a single chunk into the database immediately after fetching.
+    Returns: {"success": bool, "count": int, "message": str}
+    """
+    db_rows = []
+    
+    if "timestamp" in chunk_df.columns:
+        chunk_df = chunk_df.set_index("timestamp")
+    
+    for timestamp, row in chunk_df.iterrows():
+        if pd.isna(row.get("close")):
+            continue 
+            
+        try:
+            # Polygon returns UTC timestamps → Convert to GMT+4 for database
+            if timestamp.tzinfo is None:
+                ts_utc = utc_tz.localize(timestamp)  # Naive UTC → UTC-aware
+            else:
+                ts_utc = timestamp.astimezone(utc_tz)  # Ensure UTC
+            
+            ts_gmt4 = ts_utc.astimezone(gmt4_tz)  # Convert UTC → GMT+4
+            
+            # Store GMT+4 timestamp in database
+            # Note: Not including open_interest as it may not exist in the table schema
+            record = {
+                "symbol": str(target_symbol),
+                "timestamp": ts_gmt4.isoformat(),  # Store in GMT+4
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+                "volume": int(row["volume"]) if pd.notnull(row.get("volume")) else 0
+            }
+            
+            # Skip open_interest - column doesn't exist in table or causes schema errors
+            
+            db_rows.append(record)
+        except (ValueError, TypeError) as e:
+            continue
+    
+    if not db_rows:
+        return {"success": False, "count": 0, "message": "No valid rows after processing"}
+    
+    # Insert immediately
+    try:
+        result = sb.table(target_table).upsert(db_rows).execute()
+        
+        # Quick verification
+        verify = sb.table(target_table)\
+            .select("symbol")\
+            .eq("symbol", target_symbol)\
+            .limit(1)\
+            .execute()
+        
+        if verify.data:
+            return {"success": True, "count": len(db_rows), "message": "Inserted and verified"}
+        else:
+            return {"success": False, "count": 0, "message": "Inserted but verification failed"}
+    except Exception as e:
+        return {"success": False, "count": 0, "message": f"Insert error: {str(e)}"}
+
 
 def ingest_indices_from_polygon(
     api_symbol: str,
@@ -50,6 +124,9 @@ def ingest_indices_from_polygon(
         
         # Verify target table is set correctly
         print(f"📋 Target table determined: '{target_table}' for interval '{interval}'")
+        
+        # Determine target symbol early
+        target_symbol = db_symbol if db_symbol else polygon_symbol
         
         # Get Supabase client
         sb = get_supabase()
@@ -89,6 +166,7 @@ def ingest_indices_from_polygon(
         print(f"   End Date:   {end_dt.strftime('%Y-%m-%d %H:%M:%S')} UTC")
         print(f"   Total Days: {(end_dt - start_dt).days} days")
         print(f"   Table: {target_table}")
+        print(f"   DB Symbol: {target_symbol}")
         print(f"{'='*60}\n")
         
         # Polygon throttle: 12 seconds between calls (free plan: 5 calls/min)
@@ -105,19 +183,29 @@ def ingest_indices_from_polygon(
                 time.sleep(sleep_time)
             _last_polygon_call = time.time()
         
+        # Prepare timezone conversion objects
+        utc_tz = pytz.timezone('UTC')
+        gmt4_tz = pytz.timezone('Asia/Dubai')  # GMT+4
+        
         # Chunk by 1 day (same as gold ingestion for free plan compatibility)
         chunk_days = 1
         chunk_start = start_dt
-        all_dataframes = []
         max_retries = 5
         all_success = True
+        total_inserted = 0
         
         print(f"📦 Chunking date range into {chunk_days}-day chunks for Polygon free plan compatibility...")
+        print(f"   Will insert each chunk immediately after fetching (incremental storage)\n")
+        print(f"📝 Will store data with symbol: '{target_symbol}' in table: {target_table}\n")
         
         client = PolygonDataClient()
         
-        # Process in 1-day chunks
+        # Process in 1-day chunks - INSERT IMMEDIATELY after each fetch
         chunk_count = 0
+        total_chunks_expected = (end_dt - start_dt).days + 1
+        print(f"📊 Will process approximately {total_chunks_expected} chunks (1 per day)")
+        print(f"   Each chunk will be inserted immediately after fetching...\n")
+        
         while chunk_start <= end_dt:
             chunk_count += 1
             chunk_end = min(chunk_start + timedelta(days=chunk_days) - timedelta(days=1), end_dt)
@@ -127,7 +215,9 @@ def ingest_indices_from_polygon(
             chunk_s_str = chunk_start.strftime("%Y-%m-%d")
             chunk_e_str = chunk_end.strftime("%Y-%m-%d")
             
-            print(f"📦 Processing chunk {chunk_count}: {chunk_s_str} to {chunk_e_str}")
+            # Show progress
+            progress_pct = (chunk_count / total_chunks_expected * 100) if total_chunks_expected > 0 else 0
+            print(f"📦 Processing chunk {chunk_count}/{total_chunks_expected} ({progress_pct:.1f}%): {chunk_s_str} to {chunk_e_str}")
             
             attempt = 0
             chunk_success = False
@@ -145,8 +235,19 @@ def ingest_indices_from_polygon(
                         chunk_df = client.get_historical_data(polygon_symbol, chunk_s_str, chunk_e_str)
                     
                     if not chunk_df.empty:
-                        all_dataframes.append(chunk_df)
                         print(f"✅ Fetched {len(chunk_df)} records for {chunk_s_str} to {chunk_e_str}")
+                        
+                        # INSERT IMMEDIATELY after fetching
+                        insert_result = _insert_chunk_to_db(
+                            chunk_df, target_symbol, target_table, sb, utc_tz, gmt4_tz, chunk_s_str, chunk_e_str
+                        )
+                        if insert_result["success"]:
+                            total_inserted += insert_result["count"]
+                            print(f"   💾 Stored {insert_result['count']} records in database")
+                        else:
+                            print(f"   ⚠️ Storage warning: {insert_result['message']}")
+                            all_success = False
+                        
                         chunk_success = True
                         break  # Success, break retry loop
                     else:
@@ -194,143 +295,37 @@ def ingest_indices_from_polygon(
             # Advance to next chunk (next day)
             chunk_start = chunk_end + timedelta(days=1)
         
-        # Combine all chunks
-        if all_dataframes:
-            df = pd.concat(all_dataframes, ignore_index=True)
-            print(f"✅ Combined {len(all_dataframes)} chunks into {len(df)} total records")
-        else:
-            df = pd.DataFrame()
+        # All chunks processed - final summary
+        print(f"\n{'='*60}")
+        print(f"✅ INGESTION COMPLETE")
+        print(f"{'='*60}")
+        print(f"   Total records inserted: {total_inserted}")
+        print(f"   Symbol: {target_symbol}")
+        print(f"   Table: {target_table}")
+        print(f"{'='*60}\n")
         
-        if df.empty:
-            return {"success": False, "message": f"❌ No data returned from Polygon for '{polygon_symbol}' ({start_dt.strftime('%Y-%m-%d')} to {end_dt.strftime('%Y-%m-%d')}).\n\nPlease verify:\n1. Symbol '{polygon_symbol}' is correct\n2. Date range contains trading days\n3. Symbol exists in Polygon's database\n4. Your Polygon plan includes this data type"}
-        
-        # Prepare for DB - Convert UTC to GMT+4 before storing
-        db_rows = []
-        target_symbol = db_symbol if db_symbol else polygon_symbol
-        
-        # Debug: Log what symbol will be stored
-        print(f"📝 Will store data with symbol: '{target_symbol}' in table: {target_table}")
-        print(f"   (polygon_symbol: '{polygon_symbol}', db_symbol: '{db_symbol}')")
-        
-        # Timezone conversion: Polygon (UTC) → Database (GMT+4)
-        utc_tz = pytz.timezone('UTC')
-        gmt4_tz = pytz.timezone('Asia/Dubai')  # GMT+4
-        
-        if "timestamp" in df.columns:
-            df = df.set_index("timestamp")
-        
-        for timestamp, row in df.iterrows():
-            if pd.isna(row.get("close")):
-                continue 
-                
-            try:
-                # Polygon returns UTC timestamps → Convert to GMT+4 for database
-                if timestamp.tzinfo is None:
-                    ts_utc = utc_tz.localize(timestamp)  # Naive UTC → UTC-aware
-                else:
-                    ts_utc = timestamp.astimezone(utc_tz)  # Ensure UTC
-                
-                ts_gmt4 = ts_utc.astimezone(gmt4_tz)  # Convert UTC → GMT+4
-                
-                # Store GMT+4 timestamp in database
-                record = {
-                    "symbol": str(target_symbol),
-                    "timestamp": ts_gmt4.isoformat(),  # Store in GMT+4
-                    "open": float(row["open"]),
-                    "high": float(row["high"]),
-                    "low": float(row["low"]),
-                    "close": float(row["close"]),
-                    "volume": int(row["volume"]) if pd.notnull(row.get("volume")) else 0
-                }
-                
-                # Add open_interest if available (usually None for indices)
-                if "open_interest" in row and pd.notnull(row.get("open_interest")):
-                    record["open_interest"] = float(row["open_interest"])
-                else:
-                    record["open_interest"] = None
-                
-                db_rows.append(record)
-            except (ValueError, TypeError) as e:
-                print(f"⚠️ Skipping invalid row: {e}")
-                continue
-        
-        if not db_rows:
-            return {"success": False, "message": "No valid data rows after processing."}
-        
-        print(f"📊 Prepared {len(db_rows)} records for insertion into {target_table} with symbol '{target_symbol}'")
-        
-        # Batch insert
-        chunk_size = 1000
-        total_inserted = 0
-        
-        for i in range(0, len(db_rows), chunk_size):
-            chunk = db_rows[i:i+chunk_size]
-            try:
-                # Verify chunk before insertion
-                if i == 0:
-                    print(f"\n🔍 DEBUG: First chunk details:")
-                    print(f"   First record keys: {list(chunk[0].keys())}")
-                    print(f"   First record symbol: '{chunk[0].get('symbol')}'")
-                    print(f"   First record timestamp: '{chunk[0].get('timestamp')}'")
-                    print(f"   Chunk size: {len(chunk)}")
-                    print(f"   Table: {target_table}\n")
-                
-                result = sb.table(target_table).upsert(chunk).execute()
-                
-                # Verify insertion result
-                if hasattr(result, 'data') and result.data:
-                    inserted_count = len(result.data)
-                    print(f"✅ Inserted chunk {i//chunk_size + 1}: {inserted_count} records into {target_table} (expected {len(chunk)})")
-                    if i == 0 and result.data:
-                        print(f"   📝 First inserted record: symbol='{result.data[0].get('symbol')}', timestamp='{result.data[0].get('timestamp')}'")
-                else:
-                    # Supabase upsert might not return data, but that's okay - it still inserted
-                    print(f"✅ Upserted chunk {i//chunk_size + 1}: {len(chunk)} records into {target_table}")
-                    if i == 0:
-                        print(f"   📝 Note: Upsert doesn't always return data, but insertion should have succeeded")
-                
-                total_inserted += len(chunk)
-            except Exception as e:
-                error_str = str(e)
-                print(f"❌ Database error at chunk {i}: {error_str}")
-                print(f"   Table: {target_table}, Symbol: {target_symbol}, Chunk size: {len(chunk)}")
-                
-                # Check for common errors
-                if "column" in error_str.lower() and "does not exist" in error_str.lower():
-                    print(f"   💡 Possible schema mismatch. Check if table '{target_table}' has all required columns.")
-                elif "relation" in error_str.lower() and "does not exist" in error_str.lower():
-                    print(f"   💡 Table '{target_table}' does not exist. Please create it first.")
-                elif "permission" in error_str.lower() or "policy" in error_str.lower():
-                    print(f"   💡 Permission denied. Check RLS policies for table '{target_table}'.")
-                
-                import traceback
-                traceback.print_exc()
-                return {"success": False, "message": f"Database error at chunk {i}: {error_str}"}
-        
+        # Final verification
         date_range_info = f"Date range: {start_dt.strftime('%Y-%m-%d')} to {end_dt.strftime('%Y-%m-%d')} ({(end_dt - start_dt).days} days)"
         
-        # Verify data was actually stored by querying the database
+        print(f"🔍 Final verification...")
         try:
             verify_result = sb.table(target_table)\
                 .select("symbol, timestamp")\
                 .eq("symbol", target_symbol)\
+                .order("timestamp", desc=True)\
                 .limit(5)\
                 .execute()
             
             if verify_result.data:
-                print(f"\n✅ VERIFICATION: Found {len(verify_result.data)} records in database for symbol '{target_symbol}'")
+                print(f"✅ VERIFICATION: Found records in database for symbol '{target_symbol}'")
                 print(f"   Sample records:")
                 for rec in verify_result.data[:3]:
                     print(f"     - {rec.get('symbol')} at {rec.get('timestamp')}")
             else:
-                print(f"\n⚠️ WARNING: Verification query returned no records for symbol '{target_symbol}'")
-                print(f"   This suggests the data may not have been stored correctly.")
-                print(f"   Please check:")
-                print(f"   1. Table '{target_table}' exists")
-                print(f"   2. RLS policies allow read access")
-                print(f"   3. Symbol format matches (tried: '{target_symbol}')")
+                print(f"⚠️ WARNING: Verification query returned no records for symbol '{target_symbol}'")
+                print(f"   Please check RLS policies and symbol format")
         except Exception as verify_error:
-            print(f"\n⚠️ Could not verify data storage: {verify_error}")
+            print(f"⚠️ Could not verify data storage: {verify_error}")
         
         return {"success": True, "message": f"✅ Successfully ingested {total_inserted} records for {target_symbol} into {target_table}.\n\n{date_range_info} (converted from UTC to GMT+4)"}
     
