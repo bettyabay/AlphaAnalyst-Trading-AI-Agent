@@ -1086,10 +1086,41 @@ def phase1_foundation_data():
                 if selected_category == "Indices" and "SPX" in default_api_symbol.upper():
                     help_text += "\n\n⚠️ Note: For 1-minute data, Polygon doesn't support I:SPX. The system will auto-convert to SPY (ETF)."
                 
-                api_symbol = st.text_input("Polygon Symbol", value=default_api_symbol, help=help_text, key=f"api_sym_{selected_category}_{selected_instrument_item}")
+                # Sanitize key to avoid issues with special characters like "/" in instrument names
+                safe_key = f"api_sym_{selected_category}_{selected_instrument_item}".replace("/", "_").replace("\\", "_").replace(" ", "_")
+                api_symbol = st.text_input("Polygon Symbol", value=default_api_symbol, help=help_text, key=safe_key)
                 
-                if st.button("Fetch & Ingest from API", key=f"btn_api_{selected_category}_{selected_instrument_item}"):
+                # Use same sanitized key pattern for button
+                safe_btn_key = f"btn_api_{selected_category}_{selected_instrument_item}".replace("/", "_").replace("\\", "_").replace(" ", "_")
+                if st.button("Fetch & Ingest from API", key=safe_btn_key):
                     with st.spinner("Fetching data from Polygon..."):
+                        # CRITICAL: Clean the symbol immediately - remove all whitespace including newlines
+                        # DEBUG: Log original symbol for troubleshooting
+                        api_symbol_original = api_symbol
+                        api_symbol_cleaned = api_symbol.strip().replace('\n', '').replace('\r', '').replace('\t', '') if api_symbol else ""
+                        
+                        # CRITICAL FIX: If the cleaned symbol still contains "/" (like "EUR/USD"), 
+                        # it means the text input returned the original instrument name instead of the converted symbol.
+                        # Re-convert it using the conversion function.
+                        if "/" in api_symbol_cleaned and selected_category == "Currencies":
+                            original_for_display = api_symbol_cleaned
+                            api_symbol_cleaned = convert_instrument_to_polygon_symbol(selected_category, api_symbol_cleaned)
+                            st.info(f"ℹ️ Detected currency pair with '/', converted '{original_for_display}' → '{api_symbol_cleaned}'")
+                        
+                        # DEBUG: Show what we received
+                        st.write(f"🔍 DEBUG: Original symbol: '{api_symbol_original}' (length: {len(api_symbol_original) if api_symbol_original else 0})")
+                        st.write(f"🔍 DEBUG: Cleaned symbol: '{api_symbol_cleaned}' (length: {len(api_symbol_cleaned)})")
+                        
+                        # Validate symbol is not empty or just a single character
+                        if not api_symbol_cleaned or len(api_symbol_cleaned) <= 1:
+                            st.error(f"❌ Invalid symbol: '{api_symbol}'. Please enter a complete symbol (e.g., C:EURUSD for currencies).")
+                            st.stop()
+                        
+                        # Validate symbol is not just a prefix (C, I, C:, I:)
+                        if api_symbol_cleaned in ["C", "I", "C:", "I:"]:
+                            st.error(f"❌ Symbol '{api_symbol_cleaned}' is incomplete. For currencies, use format like 'C:EURUSD'. For indices, use format like 'I:SPX'.")
+                            st.stop()
+                        
                         # Handle specific symbol mappings for DB storage
                         effective_db_symbol = selected_instrument_item
                         if selected_instrument_item == "GOLD":
@@ -1101,7 +1132,7 @@ def phase1_foundation_data():
                         if selected_category == "Indices":
                             from ingest_indices_polygon import ingest_indices_from_polygon
                             result = ingest_indices_from_polygon(
-                                api_symbol=api_symbol,
+                                api_symbol=api_symbol_cleaned,  # Use cleaned symbol
                                 interval="1min",
                                 years=1,  # Polygon free plan: 1 year for indices
                                 db_symbol=effective_db_symbol
@@ -1109,7 +1140,7 @@ def phase1_foundation_data():
                         else:
                             # Use universal ingestion for other asset classes
                             result = ingest_from_polygon_api(
-                                api_symbol=api_symbol,
+                                api_symbol=api_symbol_cleaned,  # Use cleaned symbol
                                 asset_class=selected_category,
                                 db_symbol=effective_db_symbol,
                                 auto_resume=True

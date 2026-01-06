@@ -54,7 +54,19 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
         current_year = now_utc.year
         
         # Validate input symbol first - strip all whitespace including newlines
-        api_symbol = api_symbol.strip().replace('\n', '').replace('\r', '') if api_symbol else ""
+        api_symbol = api_symbol.strip().replace('\n', '').replace('\r', '').replace('\t', '') if api_symbol else ""
+        
+        # CRITICAL: Check for truncated/incomplete symbols BEFORE processing
+        if api_symbol in ["C", "I", "C:", "I:"]:
+            examples = {
+                "Commodities": "C:XAUUSD (for Gold)",
+                "Indices": "I:SPX (for S&P 500), I:DJI (for Dow Jones)",
+                "Currencies": "C:EURUSD, C:GBPUSD, C:USDJPY",
+                "Stocks": "AAPL, MSFT, GOOGL"
+            }
+            example = examples.get(asset_class, "I:SPX, C:EURUSD, AAPL")
+            return {"success": False, "message": f"❌ Symbol '{api_symbol}' is incomplete/truncated. It appears only the prefix was entered.\n\nFor {asset_class}, please enter a complete symbol like: {example}\n\n💡 If you're seeing this error repeatedly, the symbol input field may have been corrupted. Try refreshing the page and re-entering the symbol."}
+        
         if not api_symbol or len(api_symbol) <= 1:
             # Provide helpful examples based on asset class
             examples = {
@@ -85,11 +97,12 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
             end_dt = end_date
         
         # Ensure end_date is not in the future (return error instead of clamping)
-        # Also check if year is in the future (catches obvious errors like 2026)
-        if end_dt.year > current_year:
-            return {"success": False, "message": f"❌ End date year {end_dt.year} is in the future (current year: {current_year}). End date: {end_dt.strftime('%Y-%m-%d %H:%M:%S')}, Current UTC: {now_utc.strftime('%Y-%m-%d %H:%M:%S')}. This may be caused by bad data in the database or incorrect date parsing."}
-        elif end_dt > now_utc:
-            return {"success": False, "message": f"❌ End date {end_dt.strftime('%Y-%m-%d %H:%M:%S')} is in the future. Current UTC: {now_utc.strftime('%Y-%m-%d %H:%M:%S')}. This may be caused by bad data in the database or incorrect date parsing."}
+        # Allow same day (end_dt can be today, just not in the future)
+        # Check if year is more than 1 year ahead (catches obvious errors, but allows current year)
+        if end_dt.year > current_year + 1:
+            return {"success": False, "message": f"❌ End date year {end_dt.year} is too far in the future (current year: {current_year}). End date: {end_dt.strftime('%Y-%m-%d %H:%M:%S')}, Current UTC: {now_utc.strftime('%Y-%m-%d %H:%M:%S')}. This may be caused by bad data in the database or incorrect date parsing."}
+        elif end_dt > now_utc + timedelta(hours=1):  # Allow up to 1 hour in the future (timezone buffer)
+            return {"success": False, "message": f"❌ End date {end_dt.strftime('%Y-%m-%d %H:%M:%S')} is more than 1 hour in the future. Current UTC: {now_utc.strftime('%Y-%m-%d %H:%M:%S')}. This may be caused by bad data in the database or incorrect date parsing."}
         
         # Debug: Log end_dt to help diagnose
         print(f"🔍 End date after parsing: {end_dt.strftime('%Y-%m-%d %H:%M:%S')} (year: {end_dt.year}, current year: {current_year})")
@@ -195,25 +208,27 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
                 start_dt = safe_end - timedelta(days=730)  # 2 years default
                 end_dt = safe_end
         
-        # Validate dates BEFORE formatting - check year first (catches 2026 dates)
-        if end_dt.year > current_year:
-            return {"success": False, "message": f"❌ End date year {end_dt.year} is in the future (current: {current_year}). Date: {end_dt.strftime('%Y-%m-%d %H:%M:%S')}. This may be caused by bad data in the database. Current UTC: {now_utc.strftime('%Y-%m-%d %H:%M:%S')}"}
+        # Validate dates BEFORE formatting - allow same day but not far future
+        # Allow current year and next year (catches obvious errors like 2030+ but allows today)
+        if end_dt.year > current_year + 1:
+            return {"success": False, "message": f"❌ End date year {end_dt.year} is too far in the future (current: {current_year}). Date: {end_dt.strftime('%Y-%m-%d %H:%M:%S')}. This may be caused by bad data in the database. Current UTC: {now_utc.strftime('%Y-%m-%d %H:%M:%S')}"}
         
-        if start_dt.year > current_year:
-            return {"success": False, "message": f"❌ Start date year {start_dt.year} is in the future (current: {current_year}). Date: {start_dt.strftime('%Y-%m-%d %H:%M:%S')}. This may be caused by bad data in the database. Current UTC: {now_utc.strftime('%Y-%m-%d %H:%M:%S')}"}
+        if start_dt.year > current_year + 1:
+            return {"success": False, "message": f"❌ Start date year {start_dt.year} is too far in the future (current: {current_year}). Date: {start_dt.strftime('%Y-%m-%d %H:%M:%S')}. This may be caused by bad data in the database. Current UTC: {now_utc.strftime('%Y-%m-%d %H:%M:%S')}"}
         
-        if end_dt > now_utc:
-            return {"success": False, "message": f"❌ End date ({end_dt.strftime('%Y-%m-%d %H:%M:%S')}) is in the future. Current UTC: {now_utc.strftime('%Y-%m-%d %H:%M:%S')}"}
+        # Allow up to 1 hour in the future (timezone/clock drift buffer)
+        if end_dt > now_utc + timedelta(hours=1):
+            return {"success": False, "message": f"❌ End date ({end_dt.strftime('%Y-%m-%d %H:%M:%S')}) is more than 1 hour in the future. Current UTC: {now_utc.strftime('%Y-%m-%d %H:%M:%S')}"}
         
         if start_dt > end_dt:
             return {"success": False, "message": f"❌ Invalid date range: start ({start_dt.strftime('%Y-%m-%d %H:%M:%S')}) is after end ({end_dt.strftime('%Y-%m-%d %H:%M:%S')})"}
         
-        # Final validation of start_dt and end_dt before proceeding
-        if start_dt.year > current_year:
-            return {"success": False, "message": f"❌ Start date year {start_dt.year} is in the future (current: {current_year}). Date: {start_dt.strftime('%Y-%m-%d')}. This may be caused by bad data in the database."}
+        # Final validation of start_dt and end_dt before proceeding (same checks)
+        if start_dt.year > current_year + 1:
+            return {"success": False, "message": f"❌ Start date year {start_dt.year} is too far in the future (current: {current_year}). Date: {start_dt.strftime('%Y-%m-%d')}. This may be caused by bad data in the database."}
         
-        if end_dt.year > current_year:
-            return {"success": False, "message": f"❌ End date year {end_dt.year} is in the future (current: {current_year}). Date: {end_dt.strftime('%Y-%m-%d')}. This may be caused by bad data in the database."}
+        if end_dt.year > current_year + 1:
+            return {"success": False, "message": f"❌ End date year {end_dt.year} is too far in the future (current: {current_year}). Date: {end_dt.strftime('%Y-%m-%d')}. This may be caused by bad data in the database."}
         
         # Check if start_date is after end_date (data already up to date)
         if start_dt >= end_dt:
@@ -223,6 +238,19 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
         # Convert symbol to Polygon format using the conversion function
         # This handles currencies (EUR/USD -> C:EURUSD), indices, stocks, etc.
         polygon_symbol = convert_instrument_to_polygon_symbol(asset_class, api_symbol)
+        
+        # CRITICAL: Validate conversion didn't create an invalid symbol (e.g., "C:C" from input "C")
+        if polygon_symbol and ":" in polygon_symbol:
+            parts = polygon_symbol.split(":", 1)
+            if len(parts) == 2 and parts[0] == parts[1]:  # e.g., "C:C" from input "C"
+                examples = {
+                    "Commodities": "C:XAUUSD (for Gold)",
+                    "Indices": "I:SPX (for S&P 500), I:DJI (for Dow Jones)",
+                    "Currencies": "C:EURUSD, C:GBPUSD, C:USDJPY",
+                    "Stocks": "AAPL, MSFT, GOOGL"
+                }
+                example = examples.get(asset_class, "I:SPX, C:EURUSD, AAPL")
+                return {"success": False, "message": f"❌ Symbol conversion created invalid symbol '{polygon_symbol}' from input '{api_symbol}'.\n\nThis usually means you entered only the prefix (e.g., 'C' instead of 'C:EURUSD').\n\nFor {asset_class}, please enter a complete symbol like: {example}"}
         
         # Also handle legacy Barchart symbols if passed directly
         if api_symbol == "GC*1":
@@ -252,8 +280,18 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
             return {"success": False, "message": f"❌ Symbol conversion failed. Input: '{api_symbol}', Asset Class: '{asset_class}'"}
         
         # If input already has correct format (I:SPX, C:EURUSD), use it directly (already cleaned above)
+        # BUT: Only use it if it's a complete symbol (not just "C:" or "I:")
         if api_symbol and ":" in api_symbol and api_symbol.startswith(("I:", "C:")):
-            polygon_symbol = api_symbol.strip().replace('\n', '').replace('\r', '').replace('\t', '')
+            api_symbol_cleaned = api_symbol.strip().replace('\n', '').replace('\r', '').replace('\t', '')
+            # Only use if it's a complete symbol (has content after the colon)
+            parts = api_symbol_cleaned.split(":", 1)  # Split only on first colon
+            if len(parts) == 2 and len(parts[1].strip()) > 0:  # e.g., "C:EURUSD" has content after ":"
+                polygon_symbol = api_symbol_cleaned
+                print(f"✅ Using provided symbol format: '{polygon_symbol}'")
+            else:
+                # Symbol is incomplete (e.g., just "C:"), use converted symbol instead
+                print(f"⚠️ Provided symbol '{api_symbol_cleaned}' is incomplete, using converted symbol: '{polygon_symbol}'")
+            # Otherwise, keep the converted symbol from convert_instrument_to_polygon_symbol
         
         # Validate polygon symbol (should not be empty or just a prefix)
         # Strip all whitespace including newlines (double-check)
@@ -262,6 +300,17 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
         # Debug: Log symbol conversion
         print(f"🔍 Symbol conversion: '{api_symbol}' → '{polygon_symbol}' (clean: '{polygon_symbol_clean}')")
         invalid_symbols = ["I:", "C:", "I", "C", ""]
+        
+        # CRITICAL: Check if symbol was truncated to just prefix (e.g., "C" or "C:")
+        if polygon_symbol_clean in ["C", "I"] or polygon_symbol_clean in ["C:", "I:"]:
+            examples = {
+                "Commodities": "C:XAUUSD (for Gold)",
+                "Indices": "I:SPX (for S&P 500), I:DJI (for Dow Jones)",
+                "Currencies": "C:EURUSD, C:GBPUSD, C:USDJPY",
+                "Stocks": "AAPL, MSFT, GOOGL"
+            }
+            example = examples.get(asset_class, "I:SPX, C:EURUSD, AAPL")
+            return {"success": False, "message": f"❌ Symbol '{polygon_symbol_clean}' is incomplete (only prefix). Original input: '{api_symbol}'.\n\nFor {asset_class}, please enter a complete symbol like: {example}\n\n💡 If you're seeing this repeatedly, try refreshing the page and re-entering the symbol."}
         
         # Check if symbol is too short or invalid
         if len(polygon_symbol_clean) <= 1:
@@ -363,6 +412,13 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
             if chunk_end < chunk_start:
                 chunk_end = chunk_start
             
+            # CRITICAL: Validate chunk dates are not too far in the future before making API call
+            # Allow same day (up to 1 hour buffer for timezone/clock drift)
+            if chunk_start.year > current_year + 1 or chunk_end.year > current_year + 1:
+                return {"success": False, "message": f"❌ BLOCKED: Chunk date contains future year. Start: {chunk_start.strftime('%Y-%m-%d')} (year: {chunk_start.year}), End: {chunk_end.strftime('%Y-%m-%d')} (year: {chunk_end.year}). Current year: {current_year}. API call prevented."}
+            if chunk_start > now_utc + timedelta(hours=1) or chunk_end > now_utc + timedelta(hours=1):
+                return {"success": False, "message": f"❌ BLOCKED: Chunk date is more than 1 hour in the future. Start: {chunk_start.strftime('%Y-%m-%d %H:%M:%S')}, End: {chunk_end.strftime('%Y-%m-%d %H:%M:%S')}. Current: {now_utc.strftime('%Y-%m-%d %H:%M:%S')}. API call prevented."}
+            
             chunk_s_str = chunk_start.strftime("%Y-%m-%d")
             chunk_e_str = chunk_end.strftime("%Y-%m-%d")
             
@@ -397,7 +453,16 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
                         if polygon_symbol_final.startswith("I:") or api_symbol.upper() in ["I:SPX", "SPX", "^SPX"]:
                             return {"success": False, "message": f"❌ Polygon 403 Forbidden: Polygon does NOT provide 1-minute data for indices (I:SPX) due to licensing restrictions.\n\n✅ **SOLUTION**: Use SPY instead of I:SPX. SPY is an ETF that tracks the S&P 500.\n\nDate range: {chunk_s_str} to {chunk_e_str}"}
                         else:
-                            return {"success": False, "message": f"❌ Polygon 403 Forbidden: {error_str}\n\nThis symbol may not be available for 1-minute data on your Polygon plan.\n\nDate range: {chunk_s_str} to {chunk_e_str}"}
+                            # Check if symbol is truncated (just "C" or "I")
+                            symbol_display = polygon_symbol_final if polygon_symbol_final else api_symbol
+                            if symbol_display in ["C", "I", "C:", "I:"]:
+                                return {"success": False, "message": f"❌ Polygon 403 Forbidden: Symbol '{symbol_display}' is incomplete/truncated.\n\n💡 **SOLUTION**: The symbol was truncated. For currencies, use full format like 'C:EURUSD' (not just 'C').\n\nOriginal input: '{api_symbol}'\nConverted symbol: '{polygon_symbol_final}'\nAsset class: {asset_class}\n\nDate range: {chunk_s_str} to {chunk_e_str}"}
+                            else:
+                                # Check if it's a currency pair
+                                if polygon_symbol_final.startswith("C:") or asset_class == "Currencies":
+                                    return {"success": False, "message": f"❌ Polygon 403 Forbidden: {error_str}\n\n⚠️ **POLYGON PLAN LIMITATION**: This currency pair may not be available for 1-minute data on your Polygon free plan.\n\n**Symbol**: {symbol_display}\n**Original input**: '{api_symbol}'\n**Date range**: {chunk_s_str} to {chunk_e_str}\n\n💡 **Possible Solutions**:\n1. Check if your Polygon plan includes forex minute data\n2. Try a different currency pair (e.g., GBPUSD works)\n3. Use daily data instead of 1-minute data\n4. Upgrade your Polygon plan for access to more currency pairs\n\n📚 **Note**: Polygon's free plan has limited currency pair coverage. Some pairs like EUR/USD may require a paid plan for 1-minute data."}
+                                else:
+                                    return {"success": False, "message": f"❌ Polygon 403 Forbidden: {error_str}\n\nThis symbol may not be available for 1-minute data on your Polygon plan.\n\nSymbol: {symbol_display}\nOriginal input: '{api_symbol}'\nDate range: {chunk_s_str} to {chunk_e_str}"}
                     else:
                         # Other ValueError - retry with exponential backoff
                         attempt += 1
@@ -420,6 +485,17 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
                     elif "403" in error_str or "Forbidden" in error_str:
                         if polygon_symbol_final.startswith("I:") or api_symbol.upper() in ["I:SPX", "SPX", "^SPX"]:
                             return {"success": False, "message": f"❌ Polygon 403 Forbidden: Polygon does NOT provide 1-minute data for indices (I:SPX) due to licensing restrictions.\n\n✅ **SOLUTION**: Use SPY instead of I:SPX. SPY is an ETF that tracks the S&P 500.\n\nDate range: {chunk_s_str} to {chunk_e_str}"}
+                        else:
+                            # Check if symbol is truncated (just "C" or "I")
+                            symbol_display = polygon_symbol_final if polygon_symbol_final else api_symbol
+                            if symbol_display in ["C", "I", "C:", "I:"]:
+                                return {"success": False, "message": f"❌ Polygon 403 Forbidden: Symbol '{symbol_display}' is incomplete/truncated.\n\n💡 **SOLUTION**: The symbol was truncated. For currencies, use full format like 'C:EURUSD' (not just 'C').\n\nOriginal input: '{api_symbol}'\nConverted symbol: '{polygon_symbol_final}'\nAsset class: {asset_class}\n\nDate range: {chunk_s_str} to {chunk_e_str}"}
+                            else:
+                                # Check if it's a currency pair
+                                if polygon_symbol_final.startswith("C:") or asset_class == "Currencies":
+                                    return {"success": False, "message": f"❌ Polygon 403 Forbidden: {error_str}\n\n⚠️ **POLYGON PLAN LIMITATION**: This currency pair may not be available for 1-minute data on your Polygon free plan.\n\n**Symbol**: {symbol_display}\n**Original input**: '{api_symbol}'\n**Date range**: {chunk_s_str} to {chunk_e_str}\n\n💡 **Possible Solutions**:\n1. Check if your Polygon plan includes forex minute data\n2. Try a different currency pair (e.g., GBPUSD works)\n3. Use daily data instead of 1-minute data\n4. Upgrade your Polygon plan for access to more currency pairs\n\n📚 **Note**: Polygon's free plan has limited currency pair coverage. Some pairs like EUR/USD may require a paid plan for 1-minute data."}
+                                else:
+                                    return {"success": False, "message": f"❌ Polygon 403 Forbidden: {error_str}\n\nThis symbol may not be available for 1-minute data on your Polygon plan.\n\nSymbol: {symbol_display}\nOriginal input: '{api_symbol}'\nDate range: {chunk_s_str} to {chunk_e_str}"}
                     else:
                         # Other error - retry with exponential backoff
                         attempt += 1
