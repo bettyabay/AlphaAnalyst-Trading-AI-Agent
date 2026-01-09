@@ -87,9 +87,10 @@ logger = logging.getLogger(__name__)
 class DataCoverageService:
     """Ensures the database holds the minimum required historical windows."""
 
-    def __init__(self, reference_dt: Optional[datetime] = None):
+    def __init__(self, reference_dt: Optional[datetime] = None, asset_class: Optional[str] = None):
         self.supabase = get_supabase()
         self.reference_dt = reference_dt
+        self.asset_class = asset_class  # "Commodities", "Currencies", "Stocks", "Indices"
 
     # --------------------------------------------------------------------- #
     # Requirement helpers
@@ -106,44 +107,42 @@ class DataCoverageService:
 
     def _requirements(self) -> Dict[str, CoverageRequirement]:
         """
-        Build requirements for each interval based on the provided specification:
-            - 1 minute: Aug 1 2025 → now minus 15 minutes (EAT reference)
-            - 5 minute: Oct 1 2023 → now minus 15 minutes
-            - Daily: Oct 1 2023 → previous EAT day close
+        Build requirements for 1-minute data only, with asset-class-specific start dates:
+            - Indices: 2025-01-13 → now minus 15 minutes
+            - Stocks: 2024-01-01 → now minus 15 minutes
+            - Commodities: 2024-01-10 → now minus 15 minutes
+            - Currencies: 2024-01-10 → now minus 15 minutes
         """
         now_eat = self._now_eat()
         last_15_cutoff = (now_eat - timedelta(minutes=15)).astimezone(UTC)
-        prev_day_close = (
-            (now_eat - timedelta(days=1))
-            .replace(hour=0, minute=0, second=0, microsecond=0)
-            .astimezone(UTC)
-        )
+        
+        # Determine start date based on asset class
+        asset_class = (self.asset_class or "").strip()
+        if asset_class == "Indices":
+            start_date = datetime(2025, 1, 13, tzinfo=UTC)
+            label = "1-min bars (Jan 13, 2025 → now-15m)"
+        elif asset_class == "Stocks":
+            start_date = datetime(2024, 1, 1, tzinfo=UTC)
+            label = "1-min bars (Jan 1, 2024 → now-15m)"
+        elif asset_class in ["Commodities", "Currencies"]:
+            start_date = datetime(2024, 1, 10, tzinfo=UTC)
+            label = "1-min bars (Jan 10, 2024 → now-15m)"
+        else:
+            # Default fallback
+            start_date = datetime(2024, 1, 1, tzinfo=UTC)
+            label = "1-min bars (Jan 1, 2024 → now-15m)"
 
         requirements = {
             "1min": CoverageRequirement(
                 interval="1min",
-                label="1-min bars (Aug 1 2025 → now-15m)",
-                start=datetime(2025, 8, 1, tzinfo=UTC),
+                label=label,
+                start=start_date,
                 end=last_15_cutoff,
                 chunk_days=3,
             ),
-            "5min": CoverageRequirement(
-                interval="5min",
-                label="5-min bars (Oct 1 2023 → now-15m)",
-                start=datetime(2023, 10, 1, tzinfo=UTC),
-                end=last_15_cutoff,
-                chunk_days=30,
-            ),
-            "1d": CoverageRequirement(
-                interval="1d",
-                label="Daily bars (Oct 1 2023 → previous day)",
-                start=datetime(2023, 10, 1, tzinfo=UTC),
-                end=prev_day_close,
-                chunk_days=365,
-            ),
         }
 
-        # Guard against negative ranges (e.g., if prev_day_close < start)
+        # Guard against negative ranges
         for req in requirements.values():
             if req.end < req.start:
                 req.end = req.start

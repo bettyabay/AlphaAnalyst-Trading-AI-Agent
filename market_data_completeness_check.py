@@ -70,13 +70,25 @@ class TradingHoursCalendar:
         hour = timestamp.hour
         minute = timestamp.minute
         
-        # Weekends: No trading for any asset class
-        if weekday >= 5:  # Saturday (5) or Sunday (6)
-            return False
-        
-        # 24/7 markets: Commodities and Currencies trade continuously (except weekends)
+        # 24/7 markets: Commodities and Currencies trade from Sunday 22:00 UTC to Friday 22:00 UTC
         if asset_class in ["Commodities", "Currencies"]:
-            return True  # 24/7 from Sunday 22:00 UTC to Friday 22:00 UTC
+            # Saturday: No trading
+            if weekday == 5:  # Saturday
+                return False
+            
+            # Sunday: Trading starts at 22:00 UTC
+            if weekday == 6:  # Sunday
+                return hour >= 22
+            
+            # Monday-Thursday: Full trading (24 hours)
+            if weekday < 4:  # Monday (0) to Thursday (3)
+                return True
+            
+            # Friday: Trading ends at 22:00 UTC
+            if weekday == 4:  # Friday
+                return hour < 22
+            
+            return False
         
         # US Market Hours (for Stocks and Indices)
         # Regular trading: 9:30 AM - 4:00 PM ET
@@ -286,6 +298,145 @@ def detect_gaps(actual_timestamps: Set[datetime], expected_timestamps: Set[datet
     return gaps
 
 
+def identify_missing_weeks(gaps: List[Tuple[datetime, datetime]], asset_class: str) -> List[Dict]:
+    """
+    Identify missing trading weeks from gaps and provide ingestion suggestions.
+    
+    Args:
+        gaps: List of (gap_start, gap_end) tuples
+        asset_class: Asset class to determine trading week boundaries
+    
+    Returns:
+        List of dictionaries with week information and ingestion suggestions
+    """
+    missing_weeks = []
+    
+    if asset_class not in ["Commodities", "Currencies"]:
+        return missing_weeks
+    
+    for gap_start, gap_end in gaps:
+        gap_duration_minutes = int((gap_end - gap_start).total_seconds() / 60) + 1
+        
+        # Check if this looks like a full trading week (approximately 7200 minutes)
+        # Allow some tolerance: 7000-7500 minutes
+        if 7000 <= gap_duration_minutes <= 7500:
+            # This is likely a full trading week
+            # For commodities/currencies: Sunday 22:00 UTC to Friday 21:59 UTC
+            # Ingestion should start from Sunday 22:00 and go to Friday 22:00 (inclusive)
+            ingestion_start = gap_start  # Sunday 22:00
+            ingestion_end = gap_end + timedelta(minutes=1)  # Friday 22:00 (add 1 minute to include 21:59)
+            
+            missing_weeks.append({
+                "week_start": gap_start.isoformat(),
+                "week_end": gap_end.isoformat(),
+                "ingestion_start": ingestion_start.isoformat(),
+                "ingestion_end": ingestion_end.isoformat(),
+                "duration_minutes": gap_duration_minutes,
+                "is_full_week": True,
+                "week_label": f"{gap_start.strftime('%Y-%m-%d')} to {gap_end.strftime('%Y-%m-%d')}"
+            })
+        elif gap_duration_minutes > 100:  # Significant gaps (more than 100 minutes)
+            # Partial gap - still suggest ingestion
+            missing_weeks.append({
+                "week_start": gap_start.isoformat(),
+                "week_end": gap_end.isoformat(),
+                "ingestion_start": gap_start.isoformat(),
+                "ingestion_end": gap_end.isoformat(),
+                "duration_minutes": gap_duration_minutes,
+                "is_full_week": False,
+                "week_label": f"{gap_start.strftime('%Y-%m-%d %H:%M')} to {gap_end.strftime('%Y-%m-%d %H:%M')}"
+            })
+    
+    return missing_weeks
+
+
+def normalize_gold_symbol(symbol: str) -> str:
+    """
+    Normalize Gold symbol to standard format C:XAUUSD for database consistency.
+    
+    Args:
+        symbol: Symbol string (can be ^XAUUSD, C:XAUUSD, XAUUSD, GOLD, etc.)
+    
+    Returns:
+        Normalized symbol: C:XAUUSD for Gold-related symbols, otherwise returns as-is
+    """
+    symbol_upper = symbol.upper().strip()
+    
+    # Normalize all Gold symbol variants to C:XAUUSD
+    if "XAU" in symbol_upper or symbol_upper == "GOLD" or symbol_upper in ["^XAUUSD", "XAUUSD", "C:XAUUSD"]:
+        return "C:XAUUSD"
+    
+    return symbol
+
+
+def get_latest_ingested_timestamp(symbol: str, asset_class: str) -> Optional[datetime]:
+    """
+    Get the latest ingested timestamp for a symbol from the database.
+    
+    Args:
+        symbol: Symbol to check
+        asset_class: Asset class
+    
+    Returns:
+        Latest timestamp as datetime (UTC) or None if no data found
+    """
+    sb = get_supabase()
+    if not sb:
+        return None
+    
+    table_name = ASSET_CLASS_TABLES.get(asset_class)
+    if not table_name:
+        return None
+    
+    try:
+        # Normalize symbol first (especially for Gold)
+        normalized_symbol = normalize_gold_symbol(symbol) if asset_class == "Commodities" else symbol
+        
+        # Try multiple symbol formats
+        symbols_to_try = [normalized_symbol]
+        if normalized_symbol == "C:XAUUSD":
+            symbols_to_try.extend(["^XAUUSD", "GOLD", "XAUUSD"])
+        elif normalized_symbol == "^SPX":
+            symbols_to_try.extend(["I:SPX", "S&P 500", "SPX", "SPY"])
+        
+        for try_sym in symbols_to_try:
+            try:
+                result = sb.table(table_name)\
+                    .select("timestamp")\
+                    .eq("symbol", try_sym)\
+                    .order("timestamp", desc=True)\
+                    .limit(1)\
+                    .execute()
+                
+                if result.data and len(result.data) > 0:
+                    latest_ts_str = result.data[0].get("timestamp")
+                    if latest_ts_str:
+                        # Parse ISO format timestamp
+                        if isinstance(latest_ts_str, str):
+                            if latest_ts_str.endswith('Z'):
+                                latest_ts_str = latest_ts_str[:-1] + '+00:00'
+                            dt = datetime.fromisoformat(latest_ts_str.replace('Z', '+00:00'))
+                        else:
+                            dt = latest_ts_str
+                        
+                        # Ensure UTC timezone
+                        if dt.tzinfo is None:
+                            dt = pytz.UTC.localize(dt)
+                        else:
+                            dt = dt.astimezone(pytz.UTC)
+                        
+                        # Round to minute
+                        dt = dt.replace(second=0, microsecond=0)
+                        return dt
+            except Exception:
+                continue
+        
+        return None
+    except Exception as e:
+        print(f"Error fetching latest timestamp for {symbol} from {table_name}: {e}")
+        return None
+
+
 def check_completeness(
     symbol: str,
     asset_class: str,
@@ -293,11 +444,29 @@ def check_completeness(
 ) -> Dict:
     """
     Check completeness of 1-minute data for a symbol.
+    Checks from 2024-01-05 00:00:00 up to the last ingested timestamp,
+    and also checks up to UTC.now() to suggest ingestion.
+    
+    Args:
+        symbol: Symbol to check (will be normalized for Gold to ^XAUUSD)
+        asset_class: Asset class (Commodities, Currencies, Stocks, Indices)
+        reference_date: Reference date (defaults to now)
+    
+    Returns:
+        Dictionary with completeness metrics and analysis
+    """
+    # Normalize symbol for consistency (especially Gold)
+    if asset_class == "Commodities":
+        symbol = normalize_gold_symbol(symbol)
+    """
+    Check completeness of 1-minute data for a symbol.
+    Checks from 2024-01-05 00:00:00 up to the last ingested timestamp,
+    and also checks up to UTC.now() to suggest ingestion.
     
     Args:
         symbol: Symbol to check
         asset_class: Asset class (Commodities, Currencies, Stocks, Indices)
-        reference_date: Reference date for calculating required range (defaults to now)
+        reference_date: Reference date (defaults to now)
     
     Returns:
         Dictionary with completeness metrics and analysis
@@ -309,12 +478,23 @@ def check_completeness(
     else:
         reference_date = reference_date.astimezone(pytz.UTC)
     
-    # Determine required date range
-    required_days = REQUIRED_COVERAGE_DAYS.get(asset_class, 730)
-    end_dt = reference_date.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(minutes=15)  # Safety buffer
-    start_dt = end_dt - timedelta(days=required_days)
+    # Fixed start date: 2024-01-05 00:00:00 UTC
+    start_dt = datetime(2024, 1, 5, 0, 0, 0, tzinfo=pytz.UTC)
     
-    # Generate expected timestamps
+    # Get latest ingested timestamp
+    last_ingested = get_latest_ingested_timestamp(symbol, asset_class)
+    
+    # Current UTC time with safety buffer (15 minutes)
+    now_utc = datetime.now(pytz.UTC)
+    end_dt_check = now_utc - timedelta(minutes=15)
+    
+    # Use last_ingested as end_dt for completeness check, or end_dt_check if no data
+    if last_ingested:
+        end_dt = last_ingested
+    else:
+        end_dt = end_dt_check
+    
+    # Generate expected timestamps from start_dt to end_dt
     expected_timestamps = TradingHoursCalendar.generate_expected_timestamps(
         start_dt, end_dt, asset_class
     )
@@ -336,6 +516,22 @@ def check_completeness(
     first_missing = min(missing_timestamps) if missing_timestamps else None
     last_missing = max(missing_timestamps) if missing_timestamps else None
     
+    # Identify missing weeks and provide ingestion suggestions
+    missing_weeks = []
+    if asset_class in ["Commodities", "Currencies"] and gaps:
+        missing_weeks = identify_missing_weeks(gaps, asset_class)
+    
+    # Analyze gap patterns for commodities/currencies (weekly trading cycles)
+    gap_analysis = None
+    if asset_class in ["Commodities", "Currencies"] and gaps:
+        full_week_count = sum(1 for week in missing_weeks if week.get("is_full_week", False))
+        gap_analysis = {
+            "total_gaps": len(gaps),
+            "full_week_gaps": full_week_count,
+            "partial_gaps": len(gaps) - full_week_count,
+            "missing_weeks": missing_weeks[:20]  # Limit to first 20 for display
+        }
+    
     # Determine status
     if completeness_pct >= 99.5:
         status = "✅ Complete"
@@ -344,14 +540,20 @@ def check_completeness(
     else:
         status = "❌ Incomplete"
     
-    # Check if coverage meets requirements
-    coverage_days = (end_dt - start_dt).days
-    meets_requirement = coverage_days >= required_days
-    
     # Get date range of actual data
     actual_sorted = sorted(actual_timestamps) if actual_timestamps else []
     first_actual = actual_sorted[0] if actual_sorted else None
     last_actual = actual_sorted[-1] if actual_sorted else None
+    
+    # Calculate gap from last ingested to now (for ingestion suggestion)
+    gap_to_now_minutes = None
+    gap_to_now_hours = None
+    gap_to_now_days = None
+    if last_ingested:
+        gap_delta = end_dt_check - last_ingested
+        gap_to_now_minutes = int(gap_delta.total_seconds() / 60)
+        gap_to_now_hours = gap_to_now_minutes / 60
+        gap_to_now_days = gap_delta.days
     
     return {
         "symbol": symbol,
@@ -361,17 +563,22 @@ def check_completeness(
         "expected_minutes": expected_count,
         "actual_minutes": actual_count,
         "missing_minutes": missing_count,
-        "date_range_required": {
+        "date_range_checked": {
             "start": start_dt.isoformat(),
             "end": end_dt.isoformat(),
-            "days": coverage_days,
-            "required_days": required_days
+            "days": (end_dt - start_dt).days
         },
         "date_range_actual": {
             "start": first_actual.isoformat() if first_actual else None,
             "end": last_actual.isoformat() if last_actual else None
         },
-        "meets_requirement": meets_requirement,
+        "last_ingested": last_ingested.isoformat() if last_ingested else None,
+        "current_utc": now_utc.isoformat(),
+        "gap_to_now": {
+            "minutes": gap_to_now_minutes,
+            "hours": round(gap_to_now_hours, 2) if gap_to_now_hours else None,
+            "days": gap_to_now_days
+        },
         "gaps": [
             {"start": gap[0].isoformat(), "end": gap[1].isoformat(), 
              "duration_minutes": int((gap[1] - gap[0]).total_seconds() / 60) + 1}
@@ -379,7 +586,9 @@ def check_completeness(
         ],
         "first_missing": first_missing.isoformat() if first_missing else None,
         "last_missing": last_missing.isoformat() if last_missing else None,
-        "gap_count": len(gaps)
+        "gap_count": len(gaps),
+        "gap_analysis": gap_analysis,
+        "missing_weeks": missing_weeks[:50]  # Include up to 50 missing weeks for ingestion suggestions
     }
 
 
@@ -432,15 +641,6 @@ def explain_missing_data(result: Dict) -> List[str]:
     asset_class = result.get("asset_class", "")
     completeness = result.get("completeness_percentage", 0)
     gaps = result.get("gaps", [])
-    meets_requirement = result.get("meets_requirement", False)
-    
-    # Check coverage requirement
-    if not meets_requirement:
-        required_days = result.get("date_range_required", {}).get("required_days", 0)
-        actual_days = result.get("date_range_required", {}).get("days", 0)
-        explanations.append(
-            f"⚠️ **Insufficient Coverage**: Data covers {actual_days} days, but {required_days} days are required for {asset_class}."
-        )
     
     # Explain missing data reasons
     if completeness < 100:

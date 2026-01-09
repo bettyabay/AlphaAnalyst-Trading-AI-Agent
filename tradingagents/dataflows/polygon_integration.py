@@ -19,7 +19,9 @@ class PolygonDataClient:
         self.base_url = "https://api.polygon.io"
         self.headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         self.last_request_time = 0
-        self.min_request_interval = 0.25  # Minimum 250ms between requests (4 requests/sec)
+        # Polygon free plan: 5 calls/min = 12 seconds between calls
+        # Use 12 seconds as safe default to avoid 429 errors
+        self.min_request_interval = 12.0  # 12 seconds = 5 calls/min (safe for free plan)
         
         # Warn if API key is missing
         if not self.api_key:

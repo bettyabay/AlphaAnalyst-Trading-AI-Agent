@@ -1083,22 +1083,21 @@ def phase1_foundation_data():
         # Market Data Completeness Check Section
         if selected_instrument_item != "Add...":
             st.markdown("---")
-            with st.expander("🧪 Market Data Completeness Check", expanded=False):
-                from market_data_completeness_check import check_completeness, explain_missing_data
-                from tradingagents.dataflows.ingestion_pipeline import get_1min_table_name_for_symbol
+            with st.expander("🔍 Coverage Audit & Auto Backfill", expanded=False):
+                from tradingagents.dataflows.ingestion_pipeline import get_1min_table_name_for_symbol, DataIngestionPipeline
+                from tradingagents.dataflows.data_guardrails import DataCoverageService
                 
                 # Determine the symbol to check (may need conversion)
                 check_symbol = selected_instrument_item
                 if selected_instrument_item == "GOLD":
-                    check_symbol = "^XAUUSD"
+                    check_symbol = "C:XAUUSD"
                 elif selected_instrument_item == "S&P 500":
                     check_symbol = "^SPX"
                 
-                # Determine asset class table to check
-                check_asset_class = selected_category
-                
                 # Try to find the symbol in the database (may be stored with different format)
                 sb = get_supabase()
+                symbol_to_check = None
+                
                 if sb:
                     # Get table name
                     table_name = get_1min_table_name_for_symbol(check_symbol)
@@ -1106,12 +1105,11 @@ def phase1_foundation_data():
                     # Try multiple symbol formats to find the actual symbol in database
                     symbol_variants = [check_symbol]
                     if selected_instrument_item == "GOLD":
-                        symbol_variants = ["^XAUUSD", "GOLD", "C:XAUUSD", "XAUUSD"]
+                        symbol_variants = ["C:XAUUSD", "^XAUUSD", "GOLD", "XAUUSD"]
                     elif selected_instrument_item == "S&P 500":
                         symbol_variants = ["^SPX", "SPX", "I:SPX", "S&P 500", "SPY"]  # SPY is used for minute data
                     
                     # Try to find actual symbol in database
-                    symbol_to_check = None
                     try:
                         # Get all distinct symbols from the table
                         result = sb.table(table_name).select("symbol").execute()
@@ -1133,108 +1131,135 @@ def phase1_foundation_data():
                             symbol_to_check = symbol_variants[0]
                         
                         if symbol_to_check:
-                            if st.button("🔍 Check Data Completeness", key=f"check_completeness_{selected_category}_{selected_instrument_item}"):
-                                with st.spinner("Analyzing data completeness..."):
-                                    try:
-                                        completeness_result = check_completeness(symbol_to_check, check_asset_class)
-                                        
-                                        # Display results
-                                        col1, col2, col3 = st.columns(3)
-                                        
-                                        with col1:
-                                            st.metric("Completeness", f"{completeness_result['completeness_percentage']}%")
-                                        
-                                        with col2:
-                                            st.metric("Expected Minutes", f"{completeness_result['expected_minutes']:,}")
-                                        
-                                        with col3:
-                                            st.metric("Actual Minutes", f"{completeness_result['actual_minutes']:,}")
-                                        
-                                        # Status badge
-                                        status = completeness_result['status']
-                                        if "✅" in status:
-                                            st.success(status)
-                                        elif "⚠️" in status:
-                                            st.warning(status)
-                                        else:
-                                            st.error(status)
-                                        
-                                        # Date range info
-                                        st.info(
-                                            f"**Date Range Evaluated**: "
-                                            f"{completeness_result['date_range_required']['start'][:10]} to "
-                                            f"{completeness_result['date_range_required']['end'][:10]} "
-                                            f"({completeness_result['date_range_required']['days']} days, "
-                                            f"required: {completeness_result['date_range_required']['required_days']} days)"
-                                        )
-                                        
-                                        # Missing data info
-                                        if completeness_result['missing_minutes'] > 0:
-                                            st.warning(
-                                                f"**Missing**: {completeness_result['missing_minutes']:,} minutes "
-                                                f"({completeness_result['gap_count']} gap(s))"
-                                            )
-                                            
-                                            if completeness_result.get('first_missing'):
-                                                st.caption(f"First missing: {completeness_result['first_missing'][:19]} UTC")
-                                            if completeness_result.get('last_missing'):
-                                                st.caption(f"Last missing: {completeness_result['last_missing'][:19]} UTC")
-                                        
-                                        # AI Explanations
-                                        explanations = explain_missing_data(completeness_result)
-                                        if explanations:
-                                            st.markdown("#### 💡 Analysis & Explanations")
-                                            for exp in explanations:
-                                                st.markdown(exp)
-                                        
-                                        # Gap details (if any)
-                                        if completeness_result.get('gaps'):
-                                            st.markdown(f"#### 📊 Gap Details ({len(completeness_result['gaps'])} gap(s))")
-                                            # Show first 10 gaps in a compact format
-                                            gap_text = []
-                                            for i, gap in enumerate(completeness_result['gaps'][:10], 1):
-                                                gap_text.append(
-                                                    f"Gap {i}: {gap['start'][:19]} to {gap['end'][:19]} UTC "
-                                                    f"({gap['duration_minutes']} minutes)"
-                                                )
-                                            if len(completeness_result['gaps']) > 10:
-                                                gap_text.append(f"\n... and {len(completeness_result['gaps']) - 10} more gaps")
-                                            
-                                            # Display in a code block for better readability
-                                            st.code("\n".join(gap_text), language=None)
-                                            
-                                            # Optionally show all gaps in a DataFrame
-                                            if len(completeness_result['gaps']) <= 20:  # Show table if not too many gaps
-                                                gap_data = []
-                                                for i, gap in enumerate(completeness_result['gaps'], 1):
-                                                    gap_data.append({
-                                                        "Gap #": i,
-                                                        "Start (UTC)": gap['start'][:19],
-                                                        "End (UTC)": gap['end'][:19],
-                                                        "Duration (min)": gap['duration_minutes']
-                                                    })
-                                                st.dataframe(pd.DataFrame(gap_data), use_container_width=True, hide_index=True)
-                                        
-                                        # Coverage requirement check
-                                        if not completeness_result.get('meets_requirement', False):
-                                            st.error(
-                                                f"⚠️ **Coverage Requirement Not Met**: "
-                                                f"Data covers {completeness_result['date_range_required']['days']} days, "
-                                                f"but {completeness_result['date_range_required']['required_days']} days are required for {check_asset_class}."
-                                            )
-                                        
-                                    except Exception as e:
-                                        st.error(f"Error checking completeness: {str(e)}")
-                                        import traceback
-                                        st.code(traceback.format_exc())
+                            # Determine start date based on asset class for display
+                            if selected_category == "Indices":
+                                start_date_display = "Jan 13, 2025"
+                            elif selected_category == "Stocks":
+                                start_date_display = "Jan 1, 2024"
+                            elif selected_category in ["Commodities", "Currencies"]:
+                                start_date_display = "Jan 10, 2024"
                             else:
-                                st.info("Click the button above to check data completeness for this instrument.")
+                                start_date_display = "Jan 1, 2024"
+                            
+                            # Coverage audit description
+                            st.info(f"""
+                            **Coverage Audit** checks if your 1-minute data meets the required historical range:
+                            - **1-minute**: {start_date_display} → current time minus 15 minutes
+                            
+                            **Auto Backfill** will automatically ingest missing data to fill gaps.
+                            """)
+                            
+                            # Coverage audit and backfill buttons
+                            audit_col1, audit_col2 = st.columns(2)
+                            
+                            with audit_col1:
+                                if st.button("🔍 Run Coverage Audit", key=f"coverage_audit_{selected_category}_{selected_instrument_item}"):
+                                    with st.spinner(f"Checking coverage for {symbol_to_check}..."):
+                                        try:
+                                            coverage_service = DataCoverageService(asset_class=selected_category)
+                                            report_records = coverage_service.build_symbol_report(symbol_to_check)
+                                            
+                                            # Store in session state with unique key
+                                            session_key = f"coverage_records_{selected_category}_{selected_instrument_item}"
+                                            st.session_state[session_key] = report_records
+                                            st.session_state[f"coverage_rows_{selected_category}_{selected_instrument_item}"] = [rec.to_dict() for rec in report_records]
+                                            st.success("✅ Coverage audit completed")
+                                        except Exception as e:
+                                            st.error(f"❌ Coverage audit failed: {str(e)}")
+                            
+                            with audit_col2:
+                                session_key = f"coverage_records_{selected_category}_{selected_instrument_item}"
+                                records = st.session_state.get(session_key) or []
+                                missing_records = [rec for rec in records if rec.needs_backfill()]
+                                
+                                if st.button("🛠️ Auto Backfill Missing Data", key=f"coverage_backfill_{selected_category}_{selected_instrument_item}"):
+                                    if not records:
+                                        st.warning("⚠️ Run the coverage audit first to identify gaps.")
+                                    elif not missing_records:
+                                        st.success("✅ No gaps detected. Data coverage is complete.")
+                                    else:
+                                        # Check API key before attempting backfill
+                                        import os
+                                        polygon_key = os.getenv("POLYGON_API_KEY")
+                                        if not polygon_key:
+                                            st.error("❌ POLYGON_API_KEY not found in environment variables. Cannot backfill data.")
+                                            st.info("💡 Please add POLYGON_API_KEY to your .env file. Get a key from: https://polygon.io/dashboard/api-keys")
+                                        else:
+                                            with st.spinner("Running targeted ingestion jobs..."):
+                                                try:
+                                                    pipeline = DataIngestionPipeline()
+                                                    coverage_service = DataCoverageService()
+                                                    logs = coverage_service.backfill_missing(pipeline, missing_records)
+                                                    pipeline.close()
+                                                    
+                                                    log_key = f"coverage_backfill_logs_{selected_category}_{selected_instrument_item}"
+                                                    st.session_state[log_key] = logs
+                                                    
+                                                    # Check for 401 errors in logs
+                                                    has_401_error = False
+                                                    for log in logs:
+                                                        if isinstance(log, dict) and "error" in str(log.get("message", "")).lower():
+                                                            if "401" in str(log.get("message", "")) or "unauthorized" in str(log.get("message", "")).lower():
+                                                                has_401_error = True
+                                                                break
+                                                    
+                                                    if has_401_error:
+                                                        st.error("❌ Backfill failed: Polygon API authentication error (401 Unauthorized)")
+                                                        st.warning("💡 Your POLYGON_API_KEY appears to be invalid or expired. Please check your API key.")
+                                                    else:
+                                                        success_count = sum(1 for log in logs if log.get("success", False))
+                                                        total_count = len(logs)
+                                                        if success_count > 0:
+                                                            st.success(f"✅ Backfill completed: {success_count}/{total_count} tasks succeeded")
+                                                        else:
+                                                            st.warning(f"⚠️ Backfill completed but no tasks succeeded. Check logs below for details.")
+                                                except ValueError as e:
+                                                    error_msg = str(e)
+                                                    if "401" in error_msg or "unauthorized" in error_msg.lower():
+                                                        st.error("❌ Polygon API Authentication Failed")
+                                                        st.warning("💡 Your POLYGON_API_KEY is invalid or expired.")
+                                                    else:
+                                                        st.error(f"❌ Backfill error: {error_msg}")
+                                                except Exception as e:
+                                                    error_msg = str(e)
+                                                    if "401" in error_msg or "unauthorized" in error_msg.lower():
+                                                        st.error("❌ Polygon API Authentication Failed (401 Unauthorized)")
+                                                        st.warning("💡 Please check your POLYGON_API_KEY in the .env file")
+                                                    else:
+                                                        st.error(f"❌ Backfill failed: {error_msg}")
+                            
+                            # Display coverage results
+                            rows_key = f"coverage_rows_{selected_category}_{selected_instrument_item}"
+                            coverage_rows = st.session_state.get(rows_key)
+                            if coverage_rows:
+                                coverage_df = pd.DataFrame(coverage_rows)
+                                st.markdown("#### 📊 Coverage Report")
+                                st.dataframe(coverage_df, use_container_width=True, hide_index=True)
+                                
+                                # Status summary
+                                if "status" in coverage_df.columns:
+                                    statuses = coverage_df["status"].value_counts().to_dict()
+                                    status_display = ", ".join([f"{k}: {v}" for k, v in statuses.items()])
+                                    st.caption(f"**Status Summary**: {status_display}")
+                                
+                                # Show gaps information
+                                missing_count = sum(1 for row in coverage_rows if row.get("status") != "ready")
+                                if missing_count > 0:
+                                    st.warning(f"⚠️ {missing_count} interval(s) need backfilling. Use the 'Auto Backfill' button above.")
+                            
+                            # Display backfill logs
+                            log_key = f"coverage_backfill_logs_{selected_category}_{selected_instrument_item}"
+                            backfill_logs = st.session_state.get(log_key)
+                            if backfill_logs:
+                                log_df = pd.DataFrame(backfill_logs)
+                                st.markdown("#### 📋 Backfill Activity")
+                                st.dataframe(log_df, use_container_width=True, hide_index=True)
                         else:
-                            st.info(f"Symbol '{check_symbol}' not found in database. Ingest data first to check completeness.")
+                            st.info(f"Symbol '{check_symbol}' not found in database. Ingest data first to run coverage audit.")
                     except Exception as e:
-                        st.info(f"Error checking database: {str(e)}. Ingest data first to check completeness.")
+                        st.info(f"Error checking database: {str(e)}. Ingest data first to run coverage audit.")
                 else:
-                    st.warning("Database not configured. Cannot check completeness.")
+                    st.warning("Database not configured. Cannot run coverage audit.")
         
         if selected_instrument_item != "Add...":
             # 1. Polygon API Ingestion (Primary)
@@ -1281,7 +1306,7 @@ def phase1_foundation_data():
                         # Handle specific symbol mappings for DB storage
                         effective_db_symbol = selected_instrument_item
                         if selected_instrument_item == "GOLD":
-                            effective_db_symbol = "^XAUUSD"
+                            effective_db_symbol = "C:XAUUSD"
                         elif selected_instrument_item == "S&P 500":
                             effective_db_symbol = "^SPX"
 
@@ -1343,7 +1368,7 @@ def phase1_foundation_data():
                             # Handle specific symbol mappings if needed
                             effective_symbol = selected_instrument_item
                             if selected_instrument_item == "GOLD":
-                                effective_symbol = "^XAUUSD"
+                                effective_symbol = "C:XAUUSD"
                             elif selected_instrument_item == "S&P 500":
                                 effective_symbol = "^SPX"
                                 
@@ -1596,8 +1621,8 @@ def phase1_foundation_data():
             if selected_category and selected_instrument_item and selected_instrument_item != "Add...":
                 # Determine symbol based on category and instrument
                 if selected_category == "Commodities" and selected_instrument_item == "GOLD":
-                    symbol = "^XAUUSD"
-                    instrument_display = "GOLD (^XAUUSD)"
+                    symbol = "C:XAUUSD"
+                    instrument_display = "GOLD (C:XAUUSD)"
                 elif selected_category == "Indices" and selected_instrument_item == "S&P 500":
                     symbol = "^SPX"
                     instrument_display = "S&P 500 (^SPX)"
@@ -1634,8 +1659,8 @@ def phase1_foundation_data():
                             # Fetch recent data (last 200 bars for calculation)
                             # Support multiple symbol formats for fallback
                             symbols_to_try = [symbol]
-                            if symbol == "^XAUUSD":
-                                symbols_to_try = ["^XAUUSD", "GOLD", "C:XAUUSD"]
+                            if symbol == "C:XAUUSD":
+                                symbols_to_try = ["C:XAUUSD", "^XAUUSD", "GOLD", "XAUUSD"]
                             elif symbol == "^SPX":
                                 symbols_to_try = ["^SPX", "S&P 500", "I:SPX"]
                             
