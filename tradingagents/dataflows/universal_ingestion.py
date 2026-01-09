@@ -84,7 +84,7 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
         elif isinstance(end_date, str):
             # Try multiple date formats
             try:
-                end_dt = datetime.strptime(end_date, "%Y%m%d")
+             end_dt = datetime.strptime(end_date, "%Y%m%d")
             except ValueError:
                 try:
                     end_dt = datetime.strptime(end_date, "%Y-%m-%d")
@@ -187,7 +187,7 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
             elif isinstance(start_date, str):
                 # Try multiple date formats
                 try:
-                    start_dt = datetime.strptime(start_date, "%Y%m%d")
+                 start_dt = datetime.strptime(start_date, "%Y%m%d")
                 except ValueError:
                     try:
                         start_dt = datetime.strptime(start_date, "%Y-%m-%d")
@@ -234,7 +234,7 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
         if start_dt >= end_dt:
             latest_msg = f"Latest: {(start_dt - timedelta(minutes=1)).strftime('%Y-%m-%d %H:%M:%S')}" if auto_resume else ""
             return {"success": True, "message": f"Data for {api_symbol} is already up to date. {latest_msg} End: {end_dt.strftime('%Y-%m-%d %H:%M:%S')}"}
-        
+            
         # Convert symbol to Polygon format using the conversion function
         # This handles currencies (EUR/USD -> C:EURUSD), indices, stocks, etc.
         polygon_symbol = convert_instrument_to_polygon_symbol(asset_class, api_symbol)
@@ -257,7 +257,7 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
             polygon_symbol = "C:XAUUSD"
         elif api_symbol == "^SPX" or api_symbol == "$SPX":
             polygon_symbol = "I:SPX"
-        
+            
         # CRITICAL: Polygon does NOT support 1-minute data for indices (I:SPX, I:DJI, etc.)
         # Auto-convert I:SPX to SPY (ETF that tracks S&P 500) for minute data
         # SPY is tradable and Polygon provides full minute history
@@ -401,6 +401,7 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
         all_dataframes = []
         max_retries = 5
         all_success = True
+        skipped_chunks = []  # Track chunks that were skipped due to 403 (date-specific issues)
         
         print(f"📦 Chunking date range into {chunk_days}-day chunks for Polygon free plan compatibility...")
         
@@ -458,11 +459,37 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
                             if symbol_display in ["C", "I", "C:", "I:"]:
                                 return {"success": False, "message": f"❌ Polygon 403 Forbidden: Symbol '{symbol_display}' is incomplete/truncated.\n\n💡 **SOLUTION**: The symbol was truncated. For currencies, use full format like 'C:EURUSD' (not just 'C').\n\nOriginal input: '{api_symbol}'\nConverted symbol: '{polygon_symbol_final}'\nAsset class: {asset_class}\n\nDate range: {chunk_s_str} to {chunk_e_str}"}
                             else:
-                                # Check if it's a currency pair
-                                if polygon_symbol_final.startswith("C:") or asset_class == "Currencies":
-                                    return {"success": False, "message": f"❌ Polygon 403 Forbidden: {error_str}\n\n⚠️ **POLYGON PLAN LIMITATION**: This currency pair may not be available for 1-minute data on your Polygon free plan.\n\n**Symbol**: {symbol_display}\n**Original input**: '{api_symbol}'\n**Date range**: {chunk_s_str} to {chunk_e_str}\n\n💡 **Possible Solutions**:\n1. Check if your Polygon plan includes forex minute data\n2. Try a different currency pair (e.g., GBPUSD works)\n3. Use daily data instead of 1-minute data\n4. Upgrade your Polygon plan for access to more currency pairs\n\n📚 **Note**: Polygon's free plan has limited currency pair coverage. Some pairs like EUR/USD may require a paid plan for 1-minute data."}
+                                # Check if this is "today" - might be before market opens
+                                today_str = datetime.utcnow().strftime("%Y-%m-%d")
+                                is_today = chunk_s_str == today_str
+                                is_commodity = asset_class == "Commodities"
+                                
+                                # For commodities (like gold), markets are open 24/7, so don't skip today's data automatically
+                                # Only skip if we've already fetched some data (meaning this is a subsequent chunk that failed)
+                                # For stocks/currencies: If we've already fetched some data, OR if it's today's date, skip the chunk
+                                # (today's data might not be available yet before market opens)
+                                if all_dataframes or (is_today and not is_commodity):
+                                    if is_today and not is_commodity:
+                                        reason = "today's data not yet available (market may not have opened yet)"
+                                    else:
+                                        reason = "no data for this date (weekend/holiday or data not yet available)"
+                                    print(f"⚠️ 403 Forbidden for {chunk_s_str} to {chunk_e_str} ({reason}). Skipping chunk and continuing...")
+                                    skipped_chunks.append(f"{chunk_s_str} to {chunk_e_str}")
+                                    chunk_success = True  # Mark as handled, continue to next chunk
+                                    break
                                 else:
-                                    return {"success": False, "message": f"❌ Polygon 403 Forbidden: {error_str}\n\nThis symbol may not be available for 1-minute data on your Polygon plan.\n\nSymbol: {symbol_display}\nOriginal input: '{api_symbol}'\nDate range: {chunk_s_str} to {chunk_e_str}"}
+                                    # No data fetched yet - check if it's today's date (market not open yet)
+                                    # But skip this check for commodities (24/7 markets)
+                                    if chunk_s_str == today_str and not is_commodity:
+                                        # It's today and not a commodity - market likely hasn't opened yet
+                                        return {"success": False, "message": f"❌ No data available for '{symbol_display}' on {today_str}.\n\n⏰ **MARKET NOT OPEN YET**: The market hasn't opened yet for today ({today_str}), so intraday data is not available.\n\n**Symbol**: {symbol_display}\n**Date**: {today_str}\n**Current UTC**: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}\n\n💡 **Solutions**:\n1. **Wait for market to open**: US markets typically open at 9:30 AM ET (14:30 UTC)\n2. **Try again later**: After the market opens, data will become available\n3. **Use historical dates**: If you need data immediately, try ingesting from a previous date range\n4. **Check market hours**: Verify if today is a trading day (not a weekend or holiday)\n\n📅 **Note**: Polygon requires the market to be open before 1-minute intraday data becomes available for the current day."}
+                                    
+                                    # Not today - might be a symbol-wide issue
+                                    # Check if it's a currency pair
+                                    if polygon_symbol_final.startswith("C:") or asset_class == "Currencies":
+                                        return {"success": False, "message": f"❌ Polygon 403 Forbidden: {error_str}\n\n⚠️ **POLYGON PLAN LIMITATION**: This currency pair may not be available for 1-minute data on your Polygon free plan.\n\n**Symbol**: {symbol_display}\n**Original input**: '{api_symbol}'\n**Date range**: {chunk_s_str} to {chunk_e_str}\n\n💡 **Possible Solutions**:\n1. Check if your Polygon plan includes forex minute data\n2. Try a different currency pair (e.g., GBPUSD works)\n3. Use daily data instead of 1-minute data\n4. Upgrade your Polygon plan for access to more currency pairs\n\n📚 **Note**: Polygon's free plan has limited currency pair coverage. Some pairs like EUR/USD may require a paid plan for 1-minute data."}
+                                    else:
+                                        return {"success": False, "message": f"❌ Polygon 403 Forbidden: {error_str}\n\nThis symbol may not be available for 1-minute data on your Polygon plan.\n\nSymbol: {symbol_display}\nOriginal input: '{api_symbol}'\nDate range: {chunk_s_str} to {chunk_e_str}"}
                     else:
                         # Other ValueError - retry with exponential backoff
                         attempt += 1
@@ -491,11 +518,37 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
                             if symbol_display in ["C", "I", "C:", "I:"]:
                                 return {"success": False, "message": f"❌ Polygon 403 Forbidden: Symbol '{symbol_display}' is incomplete/truncated.\n\n💡 **SOLUTION**: The symbol was truncated. For currencies, use full format like 'C:EURUSD' (not just 'C').\n\nOriginal input: '{api_symbol}'\nConverted symbol: '{polygon_symbol_final}'\nAsset class: {asset_class}\n\nDate range: {chunk_s_str} to {chunk_e_str}"}
                             else:
-                                # Check if it's a currency pair
-                                if polygon_symbol_final.startswith("C:") or asset_class == "Currencies":
-                                    return {"success": False, "message": f"❌ Polygon 403 Forbidden: {error_str}\n\n⚠️ **POLYGON PLAN LIMITATION**: This currency pair may not be available for 1-minute data on your Polygon free plan.\n\n**Symbol**: {symbol_display}\n**Original input**: '{api_symbol}'\n**Date range**: {chunk_s_str} to {chunk_e_str}\n\n💡 **Possible Solutions**:\n1. Check if your Polygon plan includes forex minute data\n2. Try a different currency pair (e.g., GBPUSD works)\n3. Use daily data instead of 1-minute data\n4. Upgrade your Polygon plan for access to more currency pairs\n\n📚 **Note**: Polygon's free plan has limited currency pair coverage. Some pairs like EUR/USD may require a paid plan for 1-minute data."}
+                                # Check if this is "today" - might be before market opens
+                                today_str = datetime.utcnow().strftime("%Y-%m-%d")
+                                is_today = chunk_s_str == today_str
+                                is_commodity = asset_class == "Commodities"
+                                
+                                # For commodities (like gold), markets are open 24/7, so don't skip today's data automatically
+                                # Only skip if we've already fetched some data (meaning this is a subsequent chunk that failed)
+                                # For stocks/currencies: If we've already fetched some data, OR if it's today's date, skip the chunk
+                                # (today's data might not be available yet before market opens)
+                                if all_dataframes or (is_today and not is_commodity):
+                                    if is_today and not is_commodity:
+                                        reason = "today's data not yet available (market may not have opened yet)"
+                                    else:
+                                        reason = "no data for this date (weekend/holiday or data not yet available)"
+                                    print(f"⚠️ 403 Forbidden for {chunk_s_str} to {chunk_e_str} ({reason}). Skipping chunk and continuing...")
+                                    skipped_chunks.append(f"{chunk_s_str} to {chunk_e_str}")
+                                    chunk_success = True  # Mark as handled, continue to next chunk
+                                    break
                                 else:
-                                    return {"success": False, "message": f"❌ Polygon 403 Forbidden: {error_str}\n\nThis symbol may not be available for 1-minute data on your Polygon plan.\n\nSymbol: {symbol_display}\nOriginal input: '{api_symbol}'\nDate range: {chunk_s_str} to {chunk_e_str}"}
+                                    # No data fetched yet - check if it's today's date (market not open yet)
+                                    # But skip this check for commodities (24/7 markets)
+                                    if chunk_s_str == today_str and not is_commodity:
+                                        # It's today and not a commodity - market likely hasn't opened yet
+                                        return {"success": False, "message": f"❌ No data available for '{symbol_display}' on {today_str}.\n\n⏰ **MARKET NOT OPEN YET**: The market hasn't opened yet for today ({today_str}), so intraday data is not available.\n\n**Symbol**: {symbol_display}\n**Date**: {today_str}\n**Current UTC**: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}\n\n💡 **Solutions**:\n1. **Wait for market to open**: US markets typically open at 9:30 AM ET (14:30 UTC)\n2. **Try again later**: After the market opens, data will become available\n3. **Use historical dates**: If you need data immediately, try ingesting from a previous date range\n4. **Check market hours**: Verify if today is a trading day (not a weekend or holiday)\n\n📅 **Note**: Polygon requires the market to be open before 1-minute intraday data becomes available for the current day."}
+                                    
+                                    # Not today - might be a symbol-wide issue
+                                    # Check if it's a currency pair
+                                    if polygon_symbol_final.startswith("C:") or asset_class == "Currencies":
+                                        return {"success": False, "message": f"❌ Polygon 403 Forbidden: {error_str}\n\n⚠️ **POLYGON PLAN LIMITATION**: This currency pair may not be available for 1-minute data on your Polygon free plan.\n\n**Symbol**: {symbol_display}\n**Original input**: '{api_symbol}'\n**Date range**: {chunk_s_str} to {chunk_e_str}\n\n💡 **Possible Solutions**:\n1. Check if your Polygon plan includes forex minute data\n2. Try a different currency pair (e.g., GBPUSD works)\n3. Use daily data instead of 1-minute data\n4. Upgrade your Polygon plan for access to more currency pairs\n\n📚 **Note**: Polygon's free plan has limited currency pair coverage. Some pairs like EUR/USD may require a paid plan for 1-minute data."}
+                                    else:
+                                        return {"success": False, "message": f"❌ Polygon 403 Forbidden: {error_str}\n\nThis symbol may not be available for 1-minute data on your Polygon plan.\n\nSymbol: {symbol_display}\nOriginal input: '{api_symbol}'\nDate range: {chunk_s_str} to {chunk_e_str}"}
                     else:
                         # Other error - retry with exponential backoff
                         attempt += 1
@@ -531,7 +584,7 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
             if symbol_display.startswith("I:") or api_symbol_clean.upper() in ["I:SPX", "SPX", "^SPX"]:
                 return {"success": False, "message": f"❌ No data returned from Polygon for '{symbol_display}' ({s_str} to {e_str}).\n\n⚠️ **POLYGON RESTRICTION**: Polygon does NOT provide 1-minute data for indices (I:SPX, I:DJI, etc.) due to licensing restrictions.\n\n✅ **SOLUTION**: Use SPY instead of I:SPX. SPY is an ETF that tracks the S&P 500 and Polygon provides full minute history for it.\n\n💡 **Recommendation**: Change your symbol from 'I:SPX' to 'SPY' in the Polygon Symbol field.\n\nDebug: api_symbol='{api_symbol_clean}', polygon_symbol='{symbol_display}', asset_class='{asset_class}'"}
             
-            return {"success": False, "message": f"❌ No data returned from Polygon for '{symbol_display}' ({s_str} to {e_str}).\n\nPlease verify:\n1. Symbol '{symbol_display}' is correct (e.g., SPY for S&P 500, C:EURUSD for currencies, AAPL for stocks)\n2. Date range contains trading days\n3. Symbol exists in Polygon's database\n4. Your Polygon plan includes this data type\n\nDebug: api_symbol='{api_symbol_clean}', polygon_symbol='{symbol_display}', asset_class='{asset_class}'"}
+            return {"success": False, "message": f"❌ No data available for '{symbol_display}' on {s_str}."}
             
         # Prepare for DB
         db_rows = []
@@ -597,17 +650,27 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
                 error_msg = str(e)
                 print(f"❌ Database error at chunk {i}: {error_msg}")
                 return {"success": False, "message": f"Database error at chunk {i}: {error_msg}"}
-        
+                 
         # Always return success message, even if total_inserted is 0 (might be duplicates)
         resume_msg = f" (resumed from latest)" if auto_resume and start_dt else ""
         timezone_note = " (converted from UTC to GMT+4)"
         date_range_info = f"Date range: {s_str} to {e_str} ({(end_dt - start_dt).days} days)"
         
+        # Add info about skipped chunks if any
+        skipped_info = ""
+        if skipped_chunks:
+            today_str = datetime.utcnow().strftime("%Y-%m-%d")
+            skipped_today = [chunk for chunk in skipped_chunks if chunk.startswith(today_str)]
+            if skipped_today:
+                skipped_info = f"\n\n⚠️ Note: {len(skipped_chunks)} date chunk(s) were skipped: {', '.join(skipped_chunks)}\n💡 Today's data ({today_str}) may not be available yet if the market hasn't opened. Try again later after market hours."
+            else:
+                skipped_info = f"\n\n⚠️ Note: {len(skipped_chunks)} date chunk(s) were skipped (no data available): {', '.join(skipped_chunks)}"
+        
         if total_inserted > 0:
-            success_message = f"✅ Successfully ingested {total_inserted} records for {target_symbol} into {target_table}.\n\n{date_range_info}{timezone_note}.{resume_msg}"
+            success_message = f"✅ Successfully ingested {total_inserted} records for {target_symbol} into {target_table}.\n\n{date_range_info}{timezone_note}.{resume_msg}{skipped_info}"
         else:
             # Even if no new records (all duplicates), still show success
-            success_message = f"✅ Ingestion completed for {target_symbol}.\n\n{date_range_info}{timezone_note}.\n\nℹ️ Note: All records were duplicates or already exist in the database.{resume_msg}"
+            success_message = f"✅ Ingestion completed for {target_symbol}.\n\n{date_range_info}{timezone_note}.\n\nℹ️ Note: All records were duplicates or already exist in the database.{resume_msg}{skipped_info}"
         
         print(f"🎉 {success_message}")
         return {"success": True, "message": success_message}

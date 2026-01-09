@@ -1375,7 +1375,9 @@ def phase1_foundation_data():
         # View Stored Signals for Selected Provider
         if selected_provider and selected_provider != "Add...":
             st.markdown("---")
-            with st.expander(f"📋 View Stored Signals: {selected_provider}", expanded=True):
+            # PipXpert should be collapsed by default, others expanded
+            is_expanded = selected_provider != "PipXpert"
+            with st.expander(f"📋 View Stored Signals: {selected_provider}", expanded=is_expanded):
                 # Import here locally to avoid circular imports or long top-level imports
                 from tradingagents.database.db_service import get_provider_signals
                 
