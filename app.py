@@ -989,12 +989,12 @@ def phase1_foundation_data():
         selected_category = st.selectbox(
             "Financial Instrument Category",
             options=categories,
-            index=categories.index("Stocks") if "Stocks" in categories else 0,
+            index=categories.index("Commodities") if "Commodities" in categories else 0,
             key="select_financial_category"
         )
 
         if selected_category == "Add...":
-            with st.expander("Add New Instrument", expanded=True):
+            with st.expander("Add New Instrument", expanded=False):
                 with st.form("add_new_instrument_main"):
                     st.write("Add a new instrument to the catalog.")
                     i_symbol = st.text_input("Symbol", help="e.g. AAPL").upper().strip()
@@ -1034,15 +1034,21 @@ def phase1_foundation_data():
                             st.error("Symbol, Name, and Category are required.")
 
         current_instruments = instruments_map.get(selected_category, ["Add..."])
+        
+        # Default to GOLD if Commodities is selected, otherwise first item
+        default_instrument_index = 0
+        if selected_category == "Commodities" and "GOLD" in current_instruments:
+            default_instrument_index = current_instruments.index("GOLD")
+        
         selected_instrument_item = st.selectbox(
             "Financial Instrument",
             options=current_instruments,
-            index=0,
+            index=default_instrument_index,
             key="select_financial_instrument_item"
         )
         
         if selected_instrument_item == "Add...":
-            with st.expander(f"Add Instrument to {selected_category}", expanded=True):
+            with st.expander(f"Add Instrument to {selected_category}", expanded=False):
                 with st.form("add_instrument_sub"):
                     st.write(f"Add to {selected_category}")
                     s_symbol = st.text_input("Symbol", key="sub_sym").upper().strip()
@@ -1073,9 +1079,166 @@ def phase1_foundation_data():
                                     st.error(f"Error: {e}")
                         else:
                             st.error("Missing symbol or name")
+        
+        # Market Data Completeness Check Section
+        if selected_instrument_item != "Add...":
+            st.markdown("---")
+            with st.expander("🧪 Market Data Completeness Check", expanded=False):
+                from market_data_completeness_check import check_completeness, explain_missing_data
+                from tradingagents.dataflows.ingestion_pipeline import get_1min_table_name_for_symbol
+                
+                # Determine the symbol to check (may need conversion)
+                check_symbol = selected_instrument_item
+                if selected_instrument_item == "GOLD":
+                    check_symbol = "^XAUUSD"
+                elif selected_instrument_item == "S&P 500":
+                    check_symbol = "^SPX"
+                
+                # Determine asset class table to check
+                check_asset_class = selected_category
+                
+                # Try to find the symbol in the database (may be stored with different format)
+                sb = get_supabase()
+                if sb:
+                    # Get table name
+                    table_name = get_1min_table_name_for_symbol(check_symbol)
+                    
+                    # Try multiple symbol formats to find the actual symbol in database
+                    symbol_variants = [check_symbol]
+                    if selected_instrument_item == "GOLD":
+                        symbol_variants = ["^XAUUSD", "GOLD", "C:XAUUSD", "XAUUSD"]
+                    elif selected_instrument_item == "S&P 500":
+                        symbol_variants = ["^SPX", "SPX", "I:SPX", "S&P 500", "SPY"]  # SPY is used for minute data
+                    
+                    # Try to find actual symbol in database
+                    symbol_to_check = None
+                    try:
+                        # Get all distinct symbols from the table
+                        result = sb.table(table_name).select("symbol").execute()
+                        if result.data:
+                            db_symbols = list(set([row["symbol"] for row in result.data]))
+                            # Try to match our symbol variants
+                            for variant in symbol_variants:
+                                for db_sym in db_symbols:
+                                    if variant.upper() == db_sym.upper() or \
+                                       variant.upper() in db_sym.upper() or \
+                                       db_sym.upper() in variant.upper():
+                                        symbol_to_check = db_sym
+                                        break
+                                if symbol_to_check:
+                                    break
+                        
+                        # If no match found, use the first variant
+                        if not symbol_to_check:
+                            symbol_to_check = symbol_variants[0]
+                        
+                        if symbol_to_check:
+                            if st.button("🔍 Check Data Completeness", key=f"check_completeness_{selected_category}_{selected_instrument_item}"):
+                                with st.spinner("Analyzing data completeness..."):
+                                    try:
+                                        completeness_result = check_completeness(symbol_to_check, check_asset_class)
+                                        
+                                        # Display results
+                                        col1, col2, col3 = st.columns(3)
+                                        
+                                        with col1:
+                                            st.metric("Completeness", f"{completeness_result['completeness_percentage']}%")
+                                        
+                                        with col2:
+                                            st.metric("Expected Minutes", f"{completeness_result['expected_minutes']:,}")
+                                        
+                                        with col3:
+                                            st.metric("Actual Minutes", f"{completeness_result['actual_minutes']:,}")
+                                        
+                                        # Status badge
+                                        status = completeness_result['status']
+                                        if "✅" in status:
+                                            st.success(status)
+                                        elif "⚠️" in status:
+                                            st.warning(status)
+                                        else:
+                                            st.error(status)
+                                        
+                                        # Date range info
+                                        st.info(
+                                            f"**Date Range Evaluated**: "
+                                            f"{completeness_result['date_range_required']['start'][:10]} to "
+                                            f"{completeness_result['date_range_required']['end'][:10]} "
+                                            f"({completeness_result['date_range_required']['days']} days, "
+                                            f"required: {completeness_result['date_range_required']['required_days']} days)"
+                                        )
+                                        
+                                        # Missing data info
+                                        if completeness_result['missing_minutes'] > 0:
+                                            st.warning(
+                                                f"**Missing**: {completeness_result['missing_minutes']:,} minutes "
+                                                f"({completeness_result['gap_count']} gap(s))"
+                                            )
+                                            
+                                            if completeness_result.get('first_missing'):
+                                                st.caption(f"First missing: {completeness_result['first_missing'][:19]} UTC")
+                                            if completeness_result.get('last_missing'):
+                                                st.caption(f"Last missing: {completeness_result['last_missing'][:19]} UTC")
+                                        
+                                        # AI Explanations
+                                        explanations = explain_missing_data(completeness_result)
+                                        if explanations:
+                                            st.markdown("#### 💡 Analysis & Explanations")
+                                            for exp in explanations:
+                                                st.markdown(exp)
+                                        
+                                        # Gap details (if any)
+                                        if completeness_result.get('gaps'):
+                                            st.markdown(f"#### 📊 Gap Details ({len(completeness_result['gaps'])} gap(s))")
+                                            # Show first 10 gaps in a compact format
+                                            gap_text = []
+                                            for i, gap in enumerate(completeness_result['gaps'][:10], 1):
+                                                gap_text.append(
+                                                    f"Gap {i}: {gap['start'][:19]} to {gap['end'][:19]} UTC "
+                                                    f"({gap['duration_minutes']} minutes)"
+                                                )
+                                            if len(completeness_result['gaps']) > 10:
+                                                gap_text.append(f"\n... and {len(completeness_result['gaps']) - 10} more gaps")
+                                            
+                                            # Display in a code block for better readability
+                                            st.code("\n".join(gap_text), language=None)
+                                            
+                                            # Optionally show all gaps in a DataFrame
+                                            if len(completeness_result['gaps']) <= 20:  # Show table if not too many gaps
+                                                gap_data = []
+                                                for i, gap in enumerate(completeness_result['gaps'], 1):
+                                                    gap_data.append({
+                                                        "Gap #": i,
+                                                        "Start (UTC)": gap['start'][:19],
+                                                        "End (UTC)": gap['end'][:19],
+                                                        "Duration (min)": gap['duration_minutes']
+                                                    })
+                                                st.dataframe(pd.DataFrame(gap_data), use_container_width=True, hide_index=True)
+                                        
+                                        # Coverage requirement check
+                                        if not completeness_result.get('meets_requirement', False):
+                                            st.error(
+                                                f"⚠️ **Coverage Requirement Not Met**: "
+                                                f"Data covers {completeness_result['date_range_required']['days']} days, "
+                                                f"but {completeness_result['date_range_required']['required_days']} days are required for {check_asset_class}."
+                                            )
+                                        
+                                    except Exception as e:
+                                        st.error(f"Error checking completeness: {str(e)}")
+                                        import traceback
+                                        st.code(traceback.format_exc())
+                            else:
+                                st.info("Click the button above to check data completeness for this instrument.")
+                        else:
+                            st.info(f"Symbol '{check_symbol}' not found in database. Ingest data first to check completeness.")
+                    except Exception as e:
+                        st.info(f"Error checking database: {str(e)}. Ingest data first to check completeness.")
+                else:
+                    st.warning("Database not configured. Cannot check completeness.")
+        
         if selected_instrument_item != "Add...":
             # 1. Polygon API Ingestion (Primary)
-            with st.expander(f"Data Management: {selected_instrument_item} (Polygon API)", expanded=True):
+            with st.expander(f"Data Management: {selected_instrument_item} (Polygon API)", expanded=False):
                 st.info(f"Ingest 1-minute data for {selected_instrument_item} directly from Polygon API. Automatically resumes from latest timestamp to now.")
                 
                 # Default API Symbol Logic - use conversion function for all instruments
@@ -1095,8 +1258,6 @@ def phase1_foundation_data():
                 if st.button("Fetch & Ingest from API", key=safe_btn_key):
                     with st.spinner("Fetching data from Polygon..."):
                         # CRITICAL: Clean the symbol immediately - remove all whitespace including newlines
-                        # DEBUG: Log original symbol for troubleshooting
-                        api_symbol_original = api_symbol
                         api_symbol_cleaned = api_symbol.strip().replace('\n', '').replace('\r', '').replace('\t', '') if api_symbol else ""
                         
                         # CRITICAL FIX: If the cleaned symbol still contains "/" (like "EUR/USD"), 
@@ -1106,10 +1267,6 @@ def phase1_foundation_data():
                             original_for_display = api_symbol_cleaned
                             api_symbol_cleaned = convert_instrument_to_polygon_symbol(selected_category, api_symbol_cleaned)
                             st.info(f"ℹ️ Detected currency pair with '/', converted '{original_for_display}' → '{api_symbol_cleaned}'")
-                        
-                        # DEBUG: Show what we received
-                        st.write(f"🔍 DEBUG: Original symbol: '{api_symbol_original}' (length: {len(api_symbol_original) if api_symbol_original else 0})")
-                        st.write(f"🔍 DEBUG: Cleaned symbol: '{api_symbol_cleaned}' (length: {len(api_symbol_cleaned)})")
                         
                         # Validate symbol is not empty or just a single character
                         if not api_symbol_cleaned or len(api_symbol_cleaned) <= 1:
@@ -1217,7 +1374,7 @@ def phase1_foundation_data():
         # Show upload UI for PipXpert or when Add... is selected
         if selected_provider == "PipXpert" or selected_provider == "Add...":
             if selected_provider == "PipXpert":
-                with st.expander("PipXpert Signal Data"):
+                with st.expander("PipXpert Signal Data", expanded=False):
                     st.info("Upload PipXpert signal data from Excel file.")
                     provider_name = "PipXpert"
                     # symbol input removed as it is now read from the file
@@ -1290,7 +1447,7 @@ def phase1_foundation_data():
                             st.error(f"Error reading file: {str(e)}")
             
             elif selected_provider == "Add...":
-                with st.expander("Add New Signal Provider"):
+                with st.expander("Add New Signal Provider", expanded=False):
                     st.write("Enter signal provider details and upload data file.")
                     
                     provider_name = st.text_input("Provider Name", key="new_provider_name", help="Enter the name of the signal provider")
@@ -1375,9 +1532,7 @@ def phase1_foundation_data():
         # View Stored Signals for Selected Provider
         if selected_provider and selected_provider != "Add...":
             st.markdown("---")
-            # PipXpert should be collapsed by default, others expanded
-            is_expanded = selected_provider != "PipXpert"
-            with st.expander(f"📋 View Stored Signals: {selected_provider}", expanded=is_expanded):
+            with st.expander(f"📋 View Stored Signals: {selected_provider}", expanded=False):
                 # Import here locally to avoid circular imports or long top-level imports
                 from tradingagents.database.db_service import get_provider_signals
                 
@@ -1601,7 +1756,7 @@ def phase1_foundation_data():
                                             )
                                             
                                             if prov_signals:
-                                                with st.expander(f"Recent Signals from {provider_display} ({len(prov_signals)})"):
+                                                with st.expander(f"Recent Signals from {provider_display} ({len(prov_signals)})", expanded=False):
                                                     p_df = pd.DataFrame(prov_signals)
                                                     if not p_df.empty:
                                                         # Select relevant columns
@@ -2199,7 +2354,7 @@ def phase1_foundation_data():
                 freshness_cutoff_minutes = 2880
                 market_status_msg = "Market is closed (weekend/after hours). Allowing older data."
             st.caption(f"🕐 Current UTC time: {now_utc.strftime('%Y-%m-%d %H:%M:%S')}")
-            with st.expander("🔍 Debug: Latest Data Query Results", expanded=True):
+            with st.expander("🔍 Debug: Latest Data Query Results", expanded=False):
                 st.write(f"**Direct Database Query Results:**")
                 if db_check_info.get("error"):
                     st.error(f"Database query error: {db_check_info['error']}")
@@ -2863,7 +3018,7 @@ def phase2_master_data_ai():
             
             # Detailed calculation breakdown
             st.markdown("---")
-            with st.expander("📊 How These Metrics Are Calculated", expanded=True):
+            with st.expander("📊 How These Metrics Are Calculated", expanded=False):
                 st.markdown("""
                 ### Calculation Methodology:
                 
@@ -2979,7 +3134,7 @@ def phase2_master_data_ai():
                             else:
                                 st.warning(f"⚠️ Master data partially saved: {saved_count} succeeded, {failed_count} failed. Check errors below.")
                                 if save_result.get("errors"):
-                                    with st.expander("View Errors"):
+                                    with st.expander("View Errors", expanded=False):
                                         for error in save_result.get("errors", [])[:5]:
                                             st.error(error)
                     except Exception as e:
@@ -3050,7 +3205,7 @@ def phase2_master_data_ai():
                         )
                         st.markdown(summary)
 
-                        with st.expander("Raw vendor output"):
+                        with st.expander("Raw vendor output", expanded=False):
                             st.code(
                                 macro_news if isinstance(macro_news, str) else str(macro_news),
                                 language="json",
@@ -3156,7 +3311,7 @@ def phase2_master_data_ai():
                                 st.markdown(summary)
 
                                 # Raw vendor data in a nested expander
-                                with st.expander("Raw vendor output"):
+                                with st.expander("Raw vendor output", expanded=False):
                                     st.code(
                                         text_value if isinstance(text_value, str) else str(text_value),
                                         language="json",
@@ -3563,7 +3718,7 @@ def phase2_master_data_ai():
         if "document_analyses" in st.session_state and st.session_state.document_analyses:
             st.subheader("Recent Document Analyses")
             for analysis in st.session_state.document_analyses[-5:]:  # Show last 5
-                with st.expander(f"{analysis['symbol']} - {analysis['title']}"):
+                with st.expander(f"{analysis['symbol']} - {analysis['title']}", expanded=False):
                     if analysis['analysis'].get('success'):
                         st.write("**Analysis:**", analysis['analysis']['analysis'])
                     else:
@@ -3681,7 +3836,7 @@ def phase2_master_data_ai():
                             details = ai_analysis.get("details", "")
                             st.error(f"AI analysis unavailable: {error_msg}")
                             if details:
-                                with st.expander("Error Details"):
+                                with st.expander("Error Details", expanded=False):
                                     st.code(details)
                     
                     # Document insights
@@ -3690,7 +3845,7 @@ def phase2_master_data_ai():
                         st.subheader("Document Insights")
                         st.caption(f"**Source**: `research_documents` table → {len(doc_insights)} document(s) found for {selected_symbol}")
                         for insight in doc_insights:
-                            with st.expander(f"📄 {insight.get('filename', 'Unknown')}"):
+                            with st.expander(f"📄 {insight.get('filename', 'Unknown')}", expanded=False):
                                 signals = insight.get("signals", {})
                                 if signals.get("success"):
                                     st.write(f"**Sentiment:** {signals.get('overall_sentiment', 'N/A')}")
@@ -4152,12 +4307,12 @@ def _render_datascan_output(datascan_result: dict):
         st.markdown(datascan_result["report"])
 
     if datascan_result.get("prompt"):
-        with st.expander("View Generated Prompt Payload"):
+        with st.expander("View Generated Prompt Payload", expanded=False):
             st.code(datascan_result["prompt"], language="markdown")
 
     samples = datascan_result.get("samples") or {}
     if samples:
-        with st.expander("Recent Candles Preview (D1 / M5 / M1)"):
+        with st.expander("Recent Candles Preview (D1 / M5 / M1)", expanded=False):
             for label in ("daily", "m5", "m1"):
                 sample_table = samples.get(label)
                 if sample_table:
@@ -4547,7 +4702,7 @@ def phase3_trading_engine_core():
                         st.success(f"✅ Phase 2 Complete! Score: {phase2_result['score']}/{phase2_result['max_score']} ({score_ratio*100:.1f}%)")
                         
                         # Show stages
-                        with st.expander("View Stage Details"):
+                        with st.expander("View Stage Details", expanded=False):
                             for stage in phase2_result["stages"]:
                                 status = "✅" if stage["pass"] else "❌"
                                 st.write(f"{status} **{stage['name']}**: {stage['detail']}")
@@ -4600,13 +4755,13 @@ def phase3_trading_engine_core():
                     # Show AI analysis if available
                     ai_analysis = recommendation_result.get('ai_analysis', {})
                     if ai_analysis and not ai_analysis.get('error'):
-                        with st.expander("View AI Analysis"):
+                        with st.expander("View AI Analysis", expanded=False):
                             st.write(ai_analysis.get('analysis_text', 'No analysis available'))
                     
                     # Show fire test summary
                     fire_test = recommendation_result.get('fire_test', {})
                     if fire_test and not fire_test.get('error'):
-                        with st.expander("View Fire Test Summary"):
+                        with st.expander("View Fire Test Summary", expanded=False):
                             st.metric("Fire Test Score", f"{fire_test.get('score', 0)}/{fire_test.get('max_score', 7)}")
                             for stage in fire_test.get('stages', []):
                                 status = "✅" if stage['pass'] else "❌"
@@ -5081,7 +5236,7 @@ def phase4_session_management_execution():
                 
                 pnl_color = "🟢" if pnl >= 0 else "🔴"
                 
-                with st.expander(f"{pnl_color} {symbol} | Entry: ${entry_price:.2f} | Current: ${current_price:.2f} | P&L: ${pnl:.2f} ({pnl_pct:+.2f}%)"):
+                with st.expander(f"{pnl_color} {symbol} | Entry: ${entry_price:.2f} | Current: ${current_price:.2f} | P&L: ${pnl:.2f} ({pnl_pct:+.2f}%)", expanded=False):
                     col_trade1, col_trade2 = st.columns(2)
                     
                     with col_trade1:

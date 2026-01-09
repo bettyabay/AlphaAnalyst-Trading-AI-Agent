@@ -84,7 +84,7 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
         elif isinstance(end_date, str):
             # Try multiple date formats
             try:
-             end_dt = datetime.strptime(end_date, "%Y%m%d")
+                end_dt = datetime.strptime(end_date, "%Y%m%d")
             except ValueError:
                 try:
                     end_dt = datetime.strptime(end_date, "%Y-%m-%d")
@@ -199,7 +199,7 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
             elif isinstance(start_date, str):
                 # Try multiple date formats
                 try:
-                 start_dt = datetime.strptime(start_date, "%Y%m%d")
+                    start_dt = datetime.strptime(start_date, "%Y%m%d")
                 except ValueError:
                     try:
                         start_dt = datetime.strptime(start_date, "%Y-%m-%d")
@@ -371,7 +371,7 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
         # Final safety check before API call
         if not polygon_symbol or len(polygon_symbol.strip()) <= 1:
             return {"success": False, "message": f"❌ CRITICAL: Symbol validation failed. polygon_symbol='{polygon_symbol}' is invalid. Original input was '{api_symbol}'"}
-        
+            
         # Fetch data from Polygon
         # Ensure symbol is clean before API call (final cleanup)
         polygon_symbol_final = polygon_symbol_clean if polygon_symbol_clean else polygon_symbol.strip().replace('\n', '').replace('\r', '').replace('\t', '')
