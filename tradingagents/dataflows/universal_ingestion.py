@@ -93,8 +93,20 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
                         end_dt = datetime.fromisoformat(end_date)
                     except ValueError:
                         return {"success": False, "message": f"Invalid end_date format: '{end_date}'. Use YYYY-MM-DD or YYYYMMDD"}
+            
+            # If end_date is today, cap it to now_utc - 15 minutes for safety
+            # This prevents requesting incomplete day data that causes 403 errors
+            today_date = now_utc.date()
+            if end_dt.date() == today_date and end_dt > (now_utc - timedelta(minutes=15)):
+                end_dt = now_utc - timedelta(minutes=15)
+                print(f"📅 End date is today - capping to current time minus 15min safety buffer: {end_dt.strftime('%Y-%m-%d %H:%M:%S')} UTC")
         else:
             end_dt = end_date
+            # If end_date is today, cap it to now_utc - 15 minutes for safety
+            today_date = now_utc.date()
+            if end_dt.date() == today_date and end_dt > (now_utc - timedelta(minutes=15)):
+                end_dt = now_utc - timedelta(minutes=15)
+                print(f"📅 End date is today - capping to current time minus 15min safety buffer: {end_dt.strftime('%Y-%m-%d %H:%M:%S')} UTC")
         
         # Ensure end_date is not in the future (return error instead of clamping)
         # Allow same day (end_dt can be today, just not in the future)
@@ -413,6 +425,13 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
             if chunk_end < chunk_start:
                 chunk_end = chunk_start
             
+            # For today's date, cap the end time to current time (not end of day)
+            # This prevents 403 errors when requesting full day data that hasn't completed yet
+            today_date = now_utc.date()
+            if chunk_end.date() == today_date and chunk_end > now_utc:
+                chunk_end = now_utc - timedelta(minutes=15)  # Safety buffer: 15 minutes before now
+                print(f"📅 Today's chunk detected - capping end time to current time: {chunk_end.strftime('%Y-%m-%d %H:%M:%S')} UTC")
+            
             # CRITICAL: Validate chunk dates are not too far in the future before making API call
             # Allow same day (up to 1 hour buffer for timezone/clock drift)
             if chunk_start.year > current_year + 1 or chunk_end.year > current_year + 1:
@@ -420,6 +439,7 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
             if chunk_start > now_utc + timedelta(hours=1) or chunk_end > now_utc + timedelta(hours=1):
                 return {"success": False, "message": f"❌ BLOCKED: Chunk date is more than 1 hour in the future. Start: {chunk_start.strftime('%Y-%m-%d %H:%M:%S')}, End: {chunk_end.strftime('%Y-%m-%d %H:%M:%S')}. Current: {now_utc.strftime('%Y-%m-%d %H:%M:%S')}. API call prevented."}
             
+            # Use date strings for API call (Polygon accepts YYYY-MM-DD format)
             chunk_s_str = chunk_start.strftime("%Y-%m-%d")
             chunk_e_str = chunk_end.strftime("%Y-%m-%d")
             
@@ -455,7 +475,8 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
                             return {"success": False, "message": f"❌ Polygon 403 Forbidden: Polygon does NOT provide 1-minute data for indices (I:SPX) due to licensing restrictions.\n\n✅ **SOLUTION**: Use SPY instead of I:SPX. SPY is an ETF that tracks the S&P 500.\n\nDate range: {chunk_s_str} to {chunk_e_str}"}
                         else:
                             # Check if symbol is truncated (just "C" or "I")
-                            symbol_display = polygon_symbol_final if polygon_symbol_final else api_symbol
+                            # Use api_symbol for display to avoid truncation issues
+                            symbol_display = api_symbol.strip().replace('\n', '').replace('\r', '').replace('\t', '') if api_symbol else (polygon_symbol_final if polygon_symbol_final else "UNKNOWN")
                             if symbol_display in ["C", "I", "C:", "I:"]:
                                 return {"success": False, "message": f"❌ Polygon 403 Forbidden: Symbol '{symbol_display}' is incomplete/truncated.\n\n💡 **SOLUTION**: The symbol was truncated. For currencies, use full format like 'C:EURUSD' (not just 'C').\n\nOriginal input: '{api_symbol}'\nConverted symbol: '{polygon_symbol_final}'\nAsset class: {asset_class}\n\nDate range: {chunk_s_str} to {chunk_e_str}"}
                             else:
@@ -463,14 +484,21 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
                                 today_str = datetime.utcnow().strftime("%Y-%m-%d")
                                 is_today = chunk_s_str == today_str
                                 is_commodity = asset_class == "Commodities"
+                                is_currency = asset_class == "Currencies"
+                                is_24_7_market = is_commodity or is_currency  # Commodities and currencies trade 24/7
                                 
-                                # For commodities (like gold), markets are open 24/7, so don't skip today's data automatically
+                                # For commodities (like gold) and currencies (forex), markets are open 24/7, 
+                                # so don't skip today's data automatically - but if we get a 403, skip and continue
                                 # Only skip if we've already fetched some data (meaning this is a subsequent chunk that failed)
-                                # For stocks/currencies: If we've already fetched some data, OR if it's today's date, skip the chunk
+                                # For stocks: If we've already fetched some data, OR if it's today's date, skip the chunk
                                 # (today's data might not be available yet before market opens)
-                                if all_dataframes or (is_today and not is_commodity):
-                                    if is_today and not is_commodity:
+                                # For 24/7 markets on today: Skip the chunk (likely Polygon plan limitation for this pair)
+                                if all_dataframes or (is_today and not is_24_7_market) or (is_today and is_24_7_market):
+                                    if is_today and not is_24_7_market:
                                         reason = "today's data not yet available (market may not have opened yet)"
+                                    elif is_today and is_24_7_market:
+                                        # For 24/7 markets, 403 usually means Polygon plan limitation, not timing
+                                        reason = "Polygon plan limitation (this currency pair may not be available for 1-minute data on free plan)"
                                     else:
                                         reason = "no data for this date (weekend/holiday or data not yet available)"
                                     print(f"⚠️ 403 Forbidden for {chunk_s_str} to {chunk_e_str} ({reason}). Skipping chunk and continuing...")
@@ -478,13 +506,7 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
                                     chunk_success = True  # Mark as handled, continue to next chunk
                                     break
                                 else:
-                                    # No data fetched yet - check if it's today's date (market not open yet)
-                                    # But skip this check for commodities (24/7 markets)
-                                    if chunk_s_str == today_str and not is_commodity:
-                                        # It's today and not a commodity - market likely hasn't opened yet
-                                        return {"success": False, "message": f"❌ No data available for '{symbol_display}' on {today_str}.\n\n⏰ **MARKET NOT OPEN YET**: The market hasn't opened yet for today ({today_str}), so intraday data is not available.\n\n**Symbol**: {symbol_display}\n**Date**: {today_str}\n**Current UTC**: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}\n\n💡 **Solutions**:\n1. **Wait for market to open**: US markets typically open at 9:30 AM ET (14:30 UTC)\n2. **Try again later**: After the market opens, data will become available\n3. **Use historical dates**: If you need data immediately, try ingesting from a previous date range\n4. **Check market hours**: Verify if today is a trading day (not a weekend or holiday)\n\n📅 **Note**: Polygon requires the market to be open before 1-minute intraday data becomes available for the current day."}
-                                    
-                                    # Not today - might be a symbol-wide issue
+                                    # No data fetched yet and not today - might be a symbol-wide issue
                                     # Check if it's a currency pair
                                     if polygon_symbol_final.startswith("C:") or asset_class == "Currencies":
                                         return {"success": False, "message": f"❌ Polygon 403 Forbidden: {error_str}\n\n⚠️ **POLYGON PLAN LIMITATION**: This currency pair may not be available for 1-minute data on your Polygon free plan.\n\n**Symbol**: {symbol_display}\n**Original input**: '{api_symbol}'\n**Date range**: {chunk_s_str} to {chunk_e_str}\n\n💡 **Possible Solutions**:\n1. Check if your Polygon plan includes forex minute data\n2. Try a different currency pair (e.g., GBPUSD works)\n3. Use daily data instead of 1-minute data\n4. Upgrade your Polygon plan for access to more currency pairs\n\n📚 **Note**: Polygon's free plan has limited currency pair coverage. Some pairs like EUR/USD may require a paid plan for 1-minute data."}
@@ -514,7 +536,8 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
                             return {"success": False, "message": f"❌ Polygon 403 Forbidden: Polygon does NOT provide 1-minute data for indices (I:SPX) due to licensing restrictions.\n\n✅ **SOLUTION**: Use SPY instead of I:SPX. SPY is an ETF that tracks the S&P 500.\n\nDate range: {chunk_s_str} to {chunk_e_str}"}
                         else:
                             # Check if symbol is truncated (just "C" or "I")
-                            symbol_display = polygon_symbol_final if polygon_symbol_final else api_symbol
+                            # Use api_symbol for display to avoid truncation issues
+                            symbol_display = api_symbol.strip().replace('\n', '').replace('\r', '').replace('\t', '') if api_symbol else (polygon_symbol_final if polygon_symbol_final else "UNKNOWN")
                             if symbol_display in ["C", "I", "C:", "I:"]:
                                 return {"success": False, "message": f"❌ Polygon 403 Forbidden: Symbol '{symbol_display}' is incomplete/truncated.\n\n💡 **SOLUTION**: The symbol was truncated. For currencies, use full format like 'C:EURUSD' (not just 'C').\n\nOriginal input: '{api_symbol}'\nConverted symbol: '{polygon_symbol_final}'\nAsset class: {asset_class}\n\nDate range: {chunk_s_str} to {chunk_e_str}"}
                             else:
@@ -522,14 +545,21 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
                                 today_str = datetime.utcnow().strftime("%Y-%m-%d")
                                 is_today = chunk_s_str == today_str
                                 is_commodity = asset_class == "Commodities"
+                                is_currency = asset_class == "Currencies"
+                                is_24_7_market = is_commodity or is_currency  # Commodities and currencies trade 24/7
                                 
-                                # For commodities (like gold), markets are open 24/7, so don't skip today's data automatically
+                                # For commodities (like gold) and currencies (forex), markets are open 24/7, 
+                                # so don't skip today's data automatically - but if we get a 403, skip and continue
                                 # Only skip if we've already fetched some data (meaning this is a subsequent chunk that failed)
-                                # For stocks/currencies: If we've already fetched some data, OR if it's today's date, skip the chunk
+                                # For stocks: If we've already fetched some data, OR if it's today's date, skip the chunk
                                 # (today's data might not be available yet before market opens)
-                                if all_dataframes or (is_today and not is_commodity):
-                                    if is_today and not is_commodity:
+                                # For 24/7 markets on today: Skip the chunk (likely Polygon plan limitation for this pair)
+                                if all_dataframes or (is_today and not is_24_7_market) or (is_today and is_24_7_market):
+                                    if is_today and not is_24_7_market:
                                         reason = "today's data not yet available (market may not have opened yet)"
+                                    elif is_today and is_24_7_market:
+                                        # For 24/7 markets, 403 usually means Polygon plan limitation, not timing
+                                        reason = "Polygon plan limitation (this currency pair may not be available for 1-minute data on free plan)"
                                     else:
                                         reason = "no data for this date (weekend/holiday or data not yet available)"
                                     print(f"⚠️ 403 Forbidden for {chunk_s_str} to {chunk_e_str} ({reason}). Skipping chunk and continuing...")
@@ -537,13 +567,7 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
                                     chunk_success = True  # Mark as handled, continue to next chunk
                                     break
                                 else:
-                                    # No data fetched yet - check if it's today's date (market not open yet)
-                                    # But skip this check for commodities (24/7 markets)
-                                    if chunk_s_str == today_str and not is_commodity:
-                                        # It's today and not a commodity - market likely hasn't opened yet
-                                        return {"success": False, "message": f"❌ No data available for '{symbol_display}' on {today_str}.\n\n⏰ **MARKET NOT OPEN YET**: The market hasn't opened yet for today ({today_str}), so intraday data is not available.\n\n**Symbol**: {symbol_display}\n**Date**: {today_str}\n**Current UTC**: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}\n\n💡 **Solutions**:\n1. **Wait for market to open**: US markets typically open at 9:30 AM ET (14:30 UTC)\n2. **Try again later**: After the market opens, data will become available\n3. **Use historical dates**: If you need data immediately, try ingesting from a previous date range\n4. **Check market hours**: Verify if today is a trading day (not a weekend or holiday)\n\n📅 **Note**: Polygon requires the market to be open before 1-minute intraday data becomes available for the current day."}
-                                    
-                                    # Not today - might be a symbol-wide issue
+                                    # No data fetched yet and not today - might be a symbol-wide issue
                                     # Check if it's a currency pair
                                     if polygon_symbol_final.startswith("C:") or asset_class == "Currencies":
                                         return {"success": False, "message": f"❌ Polygon 403 Forbidden: {error_str}\n\n⚠️ **POLYGON PLAN LIMITATION**: This currency pair may not be available for 1-minute data on your Polygon free plan.\n\n**Symbol**: {symbol_display}\n**Original input**: '{api_symbol}'\n**Date range**: {chunk_s_str} to {chunk_e_str}\n\n💡 **Possible Solutions**:\n1. Check if your Polygon plan includes forex minute data\n2. Try a different currency pair (e.g., GBPUSD works)\n3. Use daily data instead of 1-minute data\n4. Upgrade your Polygon plan for access to more currency pairs\n\n📚 **Note**: Polygon's free plan has limited currency pair coverage. Some pairs like EUR/USD may require a paid plan for 1-minute data."}
@@ -577,8 +601,31 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
                 return {"success": False, "message": f"❌ Date validation error: End date {e_str} (year: {end_dt.year}) is in the future. This should have been caught earlier. Current date: {now_utc.strftime('%Y-%m-%d')}"}
             
             # Ensure symbol is properly cleaned for display (remove all whitespace including newlines)
-            symbol_display = polygon_symbol_final.strip().replace('\n', '').replace('\r', '').replace('\t', '') if polygon_symbol_final else (api_symbol.strip().replace('\n', '').replace('\r', '').replace('\t', '') if api_symbol else "UNKNOWN")
+            # Use api_symbol first to avoid truncation issues
             api_symbol_clean = api_symbol.strip().replace('\n', '').replace('\r', '').replace('\t', '') if api_symbol else "UNKNOWN"
+            polygon_symbol_clean = polygon_symbol_final.strip().replace('\n', '').replace('\r', '').replace('\t', '') if polygon_symbol_final else ""
+            
+            # Determine the best symbol to display
+            # Priority: 1) Full polygon_symbol if available, 2) api_symbol if not truncated, 3) Extract from polygon_symbol
+            if polygon_symbol_clean and len(polygon_symbol_clean) > 2:
+                # Use polygon_symbol if it's complete (e.g., "C:EURUSD")
+                if ":" in polygon_symbol_clean:
+                    # Extract the actual symbol part (e.g., "C:EURUSD" -> "EURUSD")
+                    symbol_display = polygon_symbol_clean.split(":", 1)[1]
+                else:
+                    symbol_display = polygon_symbol_clean
+            elif api_symbol_clean and api_symbol_clean not in ["C", "I", "C:", "I:", "UNKNOWN"]:
+                # Use api_symbol if it's not truncated
+                symbol_display = api_symbol_clean
+            elif polygon_symbol_clean:
+                # Fallback to polygon_symbol even if short
+                if ":" in polygon_symbol_clean:
+                    symbol_display = polygon_symbol_clean.split(":", 1)[1]
+                else:
+                    symbol_display = polygon_symbol_clean
+            else:
+                # Last resort
+                symbol_display = api_symbol_clean if api_symbol_clean != "UNKNOWN" else "UNKNOWN"
             
             # Check if this might be a Polygon restriction issue
             if symbol_display.startswith("I:") or api_symbol_clean.upper() in ["I:SPX", "SPX", "^SPX"]:
@@ -661,7 +708,11 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
         if skipped_chunks:
             today_str = datetime.utcnow().strftime("%Y-%m-%d")
             skipped_today = [chunk for chunk in skipped_chunks if chunk.startswith(today_str)]
-            if skipped_today:
+            is_24_7 = asset_class == "Commodities" or asset_class == "Currencies"
+            if skipped_today and is_24_7:
+                # For 24/7 markets, today's skip is likely a Polygon plan limitation
+                skipped_info = f"\n\n⚠️ Note: {len(skipped_chunks)} date chunk(s) were skipped: {', '.join(skipped_chunks)}\n💡 Today's data may not be available due to Polygon plan limitations for this {asset_class.lower()} pair. Try a different pair (e.g., GBPUSD for currencies) or upgrade your Polygon plan."
+            elif skipped_today:
                 skipped_info = f"\n\n⚠️ Note: {len(skipped_chunks)} date chunk(s) were skipped: {', '.join(skipped_chunks)}\n💡 Today's data ({today_str}) may not be available yet if the market hasn't opened. Try again later after market hours."
             else:
                 skipped_info = f"\n\n⚠️ Note: {len(skipped_chunks)} date chunk(s) were skipped (no data available): {', '.join(skipped_chunks)}"
