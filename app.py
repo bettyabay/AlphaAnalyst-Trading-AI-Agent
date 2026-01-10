@@ -21,7 +21,6 @@ from phi.tools.googlesearch import GoogleSearch
 # Phase 1 imports
 from tradingagents.database.config import get_supabase
 from tradingagents.dataflows.ingestion_pipeline import DataIngestionPipeline, convert_instrument_to_polygon_symbol
-from tradingagents.dataflows.gold_ingestion import ingest_gold_data
 from tradingagents.dataflows.universal_ingestion import ingest_market_data, ingest_from_polygon_api
 from tradingagents.dataflows.signal_provider_ingestion import ingest_signal_provider_data, validate_signal_provider_data
 from tradingagents.dataflows.kpi_calculator import calculate_kpi
@@ -1322,6 +1321,7 @@ def phase1_foundation_data():
                                 )
                             else:
                                 # Use universal ingestion for other asset classes
+                                # Always ingests up to current UTC time (when button is clicked)
                                 result = ingest_from_polygon_api(
                                     api_symbol=api_symbol_cleaned,  # Use cleaned symbol
                                     asset_class=selected_category,

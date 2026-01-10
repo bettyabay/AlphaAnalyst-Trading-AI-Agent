@@ -72,9 +72,9 @@ class CoverageRecord:
             "label": req.label,
             "required_start": req.start.isoformat(),
             "required_end": req.end.isoformat(),
-            "db_start": self.db_start.isoformat() if self.db_start else None,
-            "db_end": self.db_end.isoformat() if self.db_end else None,
-            "rows": self.row_count,
+            "db_start": self.db_start.isoformat() if self.db_start else "N/A (no data found)",
+            "db_end": self.db_end.isoformat() if self.db_end else "N/A (no data found)",
+            "rows": self.row_count if self.row_count is not None else 0,
             "head_gap_min": round(self.head_gap_minutes, 1),
             "tail_gap_min": round(self.tail_gap_minutes, 1),
             "status": self.status(),
@@ -176,40 +176,116 @@ class DataCoverageService:
         if not self.supabase:
             return None, None
 
+        # Get base table and fields
         try:
             table, time_field, _ = self._table_fields(interval)
-            earliest = (
-                self.supabase.table(table)
-                .select(time_field)
-                .eq("symbol", symbol)
-                .order(time_field, desc=False)
-                .limit(1)
-                .execute()
-            )
-            latest = (
-                self.supabase.table(table)
-                .select(time_field)
-                .eq("symbol", symbol)
-                .order(time_field, desc=True)
-                .limit(1)
-                .execute()
-            )
-        except Exception as exc:  # pragma: no cover - network safeguard
-            logger.warning(
-                "Coverage guardrail failed to query bounds for %s (%s): %s",
-                symbol,
-                interval,
-                exc,
-            )
+        except ValueError:
+            logger.warning(f"No table config for interval '{interval}'")
             return None, None
 
-        earliest_val = (
-            earliest.data[0].get(time_field) if getattr(earliest, "data", None) else None
+        # For 1min data, determine which tables to check based on asset class and symbol format
+        tables_to_try = []
+        if interval == "1min":
+            symbol_upper = symbol.upper()
+            # 1. Prioritize explicit asset_class routing
+            if self.asset_class == "Commodities":
+                tables_to_try = ["market_data_commodities_1min"]
+            elif self.asset_class == "Indices":
+                tables_to_try = ["market_data_indices_1min"]
+            elif self.asset_class == "Currencies":
+                tables_to_try = ["market_data_currencies_1min"]
+            elif self.asset_class == "Stocks":
+                tables_to_try = ["market_data_stocks_1min"]
+            else:
+                # 2. Fallback to symbol pattern matching - try multiple tables
+                # Check for commodities first (XAU, GOLD) even if it has C: prefix
+                if "XAU" in symbol_upper or "GOLD" in symbol_upper or "*" in symbol_upper:
+                    tables_to_try.append("market_data_commodities_1min")
+                # Check for currencies if it has C: prefix or / separator
+                if symbol_upper.startswith("C:") or "/" in symbol_upper:
+                    tables_to_try.append("market_data_currencies_1min")
+                # Check for indices if it has I: prefix or ^ prefix
+                if symbol_upper.startswith("I:") or symbol_upper.startswith("^"):
+                    tables_to_try.append("market_data_indices_1min")
+                # Default to stocks if no match
+                if not tables_to_try:
+                    tables_to_try.append("market_data_stocks_1min")
+        else:
+            # For non-1min intervals, use the table from config
+            tables_to_try = [table]
+
+        # Try multiple symbol formats (e.g., "C:XAUUSD" might be stored as "XAUUSD" or vice versa)
+        symbols_to_try = [symbol]
+        symbol_upper = symbol.upper()
+        
+        # Add alternative formats
+        if symbol_upper.startswith("C:"):
+            # For "C:XAUUSD", try both "C:XAUUSD" and "XAUUSD"
+            base_symbol = symbol_upper[2:]  # Remove "C:" prefix
+            symbols_to_try.extend([base_symbol, symbol_upper])
+        elif symbol_upper.startswith("I:"):
+            # For "I:SPX", try both "I:SPX", "^SPX", and "SPX"
+            base_symbol = symbol_upper[2:]
+            symbols_to_try.extend([f"^{base_symbol}", base_symbol, symbol_upper])
+        elif "XAU" in symbol_upper or "GOLD" in symbol_upper:
+            # For "XAUUSD", try both "XAUUSD" and "C:XAUUSD"
+            symbols_to_try.extend([f"C:{symbol_upper}", symbol_upper])
+        elif symbol_upper.startswith("^"):
+            # For "^SPX", try both "^SPX", "I:SPX", and "SPX"
+            base_symbol = symbol_upper[1:]
+            symbols_to_try.extend([f"I:{base_symbol}", base_symbol, symbol_upper])
+        
+        # Remove duplicates while preserving order
+        symbols_to_try = list(dict.fromkeys(symbols_to_try))
+        
+        # Try each table and symbol format combination
+        for try_table in tables_to_try:
+            for try_symbol in symbols_to_try:
+                try:
+                    earliest_resp = (
+                        self.supabase.table(try_table)
+                        .select(time_field)
+                        .eq("symbol", try_symbol)
+                        .order(time_field, desc=False)
+                        .limit(1)
+                        .execute()
+                    )
+                    latest_resp = (
+                        self.supabase.table(try_table)
+                        .select(time_field)
+                        .eq("symbol", try_symbol)
+                        .order(time_field, desc=True)
+                        .limit(1)
+                        .execute()
+                    )
+                    
+                    # Check if we got results
+                    earliest_data = getattr(earliest_resp, "data", None)
+                    latest_data = getattr(latest_resp, "data", None)
+                    
+                    if earliest_data and len(earliest_data) > 0 and latest_data and len(latest_data) > 0:
+                        earliest_val = earliest_data[0].get(time_field)
+                        latest_val = latest_data[0].get(time_field)
+                        db_start = self._parse_ts(earliest_val)
+                        db_end = self._parse_ts(latest_val)
+                        if db_start and db_end:
+                            logger.debug(
+                                f"Found bounds for {symbol} (tried as '{try_symbol}') in {try_table}: {db_start} to {db_end}"
+                            )
+                            return db_start, db_end
+                except Exception as exc:
+                    # Continue to next table/symbol combination
+                    logger.debug(
+                        f"Failed to query bounds for {symbol} (tried as '{try_symbol}') in {try_table}: {exc}"
+                    )
+                    continue
+        
+        # No results found in any format
+        logger.warning(
+            f"Coverage guardrail: No data found for symbol '{symbol}' in table '{table}' "
+            f"(tried formats: {symbols_to_try}, interval: {interval})"
         )
-        latest_val = (
-            latest.data[0].get(time_field) if getattr(latest, "data", None) else None
-        )
-        return self._parse_ts(earliest_val), self._parse_ts(latest_val)
+        return None, None
 
     def _count_rows(
         self, symbol: str, interval: str, start: datetime, end: datetime
@@ -217,29 +293,79 @@ class DataCoverageService:
         if not self.supabase:
             return None
 
-        table, time_field, is_date = self._table_fields(interval)
+        try:
+            table, time_field, is_date = self._table_fields(interval)
+        except ValueError:
+            logger.warning(f"No table config for interval '{interval}'")
+            return None
+
+        # For 1min data, determine which tables to check (same logic as _get_bounds)
+        tables_to_try = []
+        if interval == "1min":
+            symbol_upper = symbol.upper()
+            # 1. Prioritize explicit asset_class routing
+            if self.asset_class == "Commodities":
+                tables_to_try = ["market_data_commodities_1min"]
+            elif self.asset_class == "Indices":
+                tables_to_try = ["market_data_indices_1min"]
+            elif self.asset_class == "Currencies":
+                tables_to_try = ["market_data_currencies_1min"]
+            elif self.asset_class == "Stocks":
+                tables_to_try = ["market_data_stocks_1min"]
+            else:
+                # 2. Fallback to symbol pattern matching - try multiple tables
+                if "XAU" in symbol_upper or "GOLD" in symbol_upper or "*" in symbol_upper:
+                    tables_to_try.append("market_data_commodities_1min")
+                if symbol_upper.startswith("C:") or "/" in symbol_upper:
+                    tables_to_try.append("market_data_currencies_1min")
+                if symbol_upper.startswith("I:") or symbol_upper.startswith("^"):
+                    tables_to_try.append("market_data_indices_1min")
+                if not tables_to_try:
+                    tables_to_try.append("market_data_stocks_1min")
+        else:
+            tables_to_try = [table]
+
         start_value = start.date().isoformat() if is_date else start.isoformat()
         end_value = end.date().isoformat() if is_date else end.isoformat()
 
-        try:
-            resp = (
-                self.supabase.table(table)
-                .select(time_field, count="exact")
-                .eq("symbol", symbol)
-                .gte(time_field, start_value)
-                .lte(time_field, end_value)
-                .limit(1)
-                .execute()
-            )
-            return getattr(resp, "count", None)
-        except Exception as exc:  # pragma: no cover - network safeguard
-            logger.warning(
-                "Coverage guardrail failed to count rows for %s (%s): %s",
-                symbol,
-                interval,
-                exc,
-            )
-            return None
+        # Try multiple symbol formats (same as _get_bounds)
+        symbols_to_try = [symbol]
+        symbol_upper = symbol.upper()
+        if symbol_upper.startswith("C:"):
+            symbols_to_try.extend([symbol_upper[2:], symbol_upper])
+        elif symbol_upper.startswith("I:"):
+            base_symbol = symbol_upper[2:]
+            symbols_to_try.extend([f"^{base_symbol}", base_symbol, symbol_upper])
+        elif "XAU" in symbol_upper or "GOLD" in symbol_upper:
+            symbols_to_try.extend([f"C:{symbol_upper}", symbol_upper])
+        elif symbol_upper.startswith("^"):
+            base_symbol = symbol_upper[1:]
+            symbols_to_try.extend([f"I:{base_symbol}", base_symbol, symbol_upper])
+        symbols_to_try = list(dict.fromkeys(symbols_to_try))
+
+        # Try each table and symbol format combination
+        for try_table in tables_to_try:
+            for try_symbol in symbols_to_try:
+                try:
+                    resp = (
+                        self.supabase.table(try_table)
+                        .select(time_field, count="exact")
+                        .eq("symbol", try_symbol)
+                        .gte(time_field, start_value)
+                        .lte(time_field, end_value)
+                        .limit(1)
+                        .execute()
+                    )
+                    count = getattr(resp, "count", None)
+                    if count is not None and count > 0:
+                        logger.debug(f"Found {count} rows for {symbol} (tried as '{try_symbol}') in {try_table}")
+                        return count
+                except Exception as exc:
+                    logger.debug(f"Failed to count rows for {symbol} (tried as '{try_symbol}') in {try_table}: {exc}")
+                    continue
+        
+        # No rows found in any table/format combination
+        return 0
 
     # --------------------------------------------------------------------- #
     # Public API

@@ -7,30 +7,25 @@ import traceback
 from datetime import datetime, timedelta
 import pytz
 
-def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=None, years=2, db_symbol=None, auto_resume=True):
+def ingest_from_polygon_api(api_symbol, asset_class, db_symbol=None, auto_resume=True):
     """
     Ingest data directly from Polygon API into the appropriate Supabase table.
-    Handles timezone conversion to GMT+4 (Dubai).
-    Automatically resumes from latest timestamp if auto_resume=True.
     
-    Default: Fetches last 2 years of 1-minute data (from 2024 to now).
-    """
-    """
-    Ingest data directly from Polygon API into the appropriate Supabase table.
-    Handles timezone conversion to GMT+4 (Dubai).
-    Automatically resumes from latest timestamp if auto_resume=True.
+    CORE RULES:
+    1. Database-Driven Start Time: Always queries DB for latest timestamp, starts from (latest + 1 minute)
+    2. Dynamic End Time: Always ingests up to current UTC time (when button is clicked) - 15min safety buffer
+    3. Initial Backfill: When no data exists, uses asset-class-specific rules (2 years for most, 1 year for indices)
+    4. Data Integrity: Enforces OHLC validation and uniqueness
+    5. Resume Behavior: Always ingests from latest DB timestamp up to current UTC time
     
     Args:
         api_symbol: Polygon symbol (e.g. "AAPL", "C:XAUUSD") or Barchart symbol to be converted
         asset_class: "Commodities", "Indices", "Currencies", "Stocks"
-        start_date: Optional start date (datetime or YYYYMMDD string). Ignored if auto_resume=True and data exists.
-        end_date: Optional end date (datetime or YYYYMMDD string). Defaults to now_utc - 15min if not provided.
-        years: Number of years to fetch if start_date is not provided (only used if no existing data)
-        db_symbol: Symbol to store in DB (defaults to api_symbol if None)
-        auto_resume: If True, automatically resume from latest timestamp in DB. If False, use start_date.
+        db_symbol: Symbol to store in DB (defaults to converted polygon_symbol if None)
+        auto_resume: If True, automatically resume from latest timestamp in DB. If False, uses initial backfill rules.
         
     Returns:
-        dict: {"success": bool, "message": str}
+        dict: {"success": bool, "message": str, "stats": dict}
     """
     # Determine target table
     table_map = {
@@ -45,18 +40,40 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
         return {"success": False, "message": f"Unknown asset class: {asset_class}"}
 
     try:
+        # Initialize ingestion statistics
+        ingestion_stats = {
+            "symbol": api_symbol,
+            "asset_class": asset_class,
+            "start_timestamp": None,
+            "end_timestamp": None,
+            "rows_ingested": 0,
+            "missing_minutes": [],
+            "api_failures": 0,
+            "api_retries": 0
+        }
+        
         print(f"🚀 Starting ingestion for symbol: '{api_symbol}', asset_class: '{asset_class}', auto_resume: {auto_resume}")
         
         sb = get_supabase()
         if not sb:
-            return {"success": False, "message": "Supabase not configured (check .env)"}
+            return {"success": False, "message": "Supabase not configured (check .env)", "stats": ingestion_stats}
         
         print(f"✅ Supabase connection established")
         
-        # Get current UTC time once (critical for date validation)
-        now_utc = datetime.utcnow()
-        current_year = now_utc.year
-        print(f"📅 Current UTC: {now_utc.strftime('%Y-%m-%d %H:%M:%S')}, Current year: {current_year}")
+        # CRITICAL: Always use current UTC time as end time (captured when button is clicked)
+        # This ensures we always ingest up to the latest available data
+        # Make it timezone-aware to match ts_utc (which is timezone-aware)
+        utc_tz = pytz.UTC
+        now_utc_naive = datetime.utcnow()
+        now_utc = utc_tz.localize(now_utc_naive)  # Make timezone-aware for comparison with ts_utc
+        current_year = now_utc_naive.year
+        
+        # Store end time in stats (GMT+4 format for display)
+        gmt4_tz = pytz.timezone('Asia/Dubai')
+        now_gmt4 = now_utc.astimezone(gmt4_tz)
+        ingestion_stats["end_timestamp"] = now_gmt4.isoformat()
+        
+        print(f"📅 Ingestion End Time (Current UTC): {now_gmt4.strftime('%Y-%m-%d %H:%M:%S')} GMT+4 ({now_utc.strftime('%Y-%m-%d %H:%M:%S')} UTC)")
         
         # Validate input symbol first - strip all whitespace including newlines
         api_symbol = api_symbol.strip().replace('\n', '').replace('\r', '').replace('\t', '') if api_symbol else ""
@@ -83,46 +100,12 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
             example = examples.get(asset_class, "I:SPX, C:EURUSD, AAPL")
             return {"success": False, "message": f"❌ Invalid API symbol: '{api_symbol}'. Please enter a full symbol.\n\nExamples for {asset_class}: {example}\n\nNote: For indices, use format 'I:SYMBOL' (e.g., I:SPX). For currencies, use 'C:PAIR' (e.g., C:EURUSD)."}
         
-        # Determine end date (default to now_utc - 15min for intraday safety buffer)
-        if not end_date:
-            end_dt = now_utc - timedelta(minutes=15)
-        elif isinstance(end_date, str):
-            # Try multiple date formats
-            try:
-                end_dt = datetime.strptime(end_date, "%Y%m%d")
-            except ValueError:
-                try:
-                    end_dt = datetime.strptime(end_date, "%Y-%m-%d")
-                except ValueError:
-                    try:
-                        end_dt = datetime.fromisoformat(end_date)
-                    except ValueError:
-                        return {"success": False, "message": f"Invalid end_date format: '{end_date}'. Use YYYY-MM-DD or YYYYMMDD"}
-            
-            # If end_date is today, cap it to now_utc - 15 minutes for safety
-            # This prevents requesting incomplete day data that causes 403 errors
-            today_date = now_utc.date()
-            if end_dt.date() == today_date and end_dt > (now_utc - timedelta(minutes=15)):
-                end_dt = now_utc - timedelta(minutes=15)
-                print(f"📅 End date is today - capping to current time minus 15min safety buffer: {end_dt.strftime('%Y-%m-%d %H:%M:%S')} UTC")
-        else:
-            end_dt = end_date
-            # If end_date is today, cap it to now_utc - 15 minutes for safety
-            today_date = now_utc.date()
-            if end_dt.date() == today_date and end_dt > (now_utc - timedelta(minutes=15)):
-                end_dt = now_utc - timedelta(minutes=15)
-                print(f"📅 End date is today - capping to current time minus 15min safety buffer: {end_dt.strftime('%Y-%m-%d %H:%M:%S')} UTC")
+        # CRITICAL: Use current UTC time as end time (with 15-minute safety buffer)
+        # This ensures we always ingest up to the latest available data
+        # end_dt needs to be naive for date calculations, so convert timezone-aware now_utc to naive
+        end_dt = (now_utc - timedelta(minutes=15)).replace(tzinfo=None)
         
-        # Ensure end_date is not in the future (return error instead of clamping)
-        # Allow same day (end_dt can be today, just not in the future)
-        # Check if year is more than 1 year ahead (catches obvious errors, but allows current year)
-        if end_dt.year > current_year + 1:
-            return {"success": False, "message": f"❌ End date year {end_dt.year} is too far in the future (current year: {current_year}). End date: {end_dt.strftime('%Y-%m-%d %H:%M:%S')}, Current UTC: {now_utc.strftime('%Y-%m-%d %H:%M:%S')}. This may be caused by bad data in the database or incorrect date parsing."}
-        elif end_dt > now_utc + timedelta(hours=1):  # Allow up to 1 hour in the future (timezone buffer)
-            return {"success": False, "message": f"❌ End date {end_dt.strftime('%Y-%m-%d %H:%M:%S')} is more than 1 hour in the future. Current UTC: {now_utc.strftime('%Y-%m-%d %H:%M:%S')}. This may be caused by bad data in the database or incorrect date parsing."}
-        
-        # Debug: Log end_dt to help diagnose
-        print(f"🔍 End date after parsing: {end_dt.strftime('%Y-%m-%d %H:%M:%S')} (year: {end_dt.year}, current year: {current_year})")
+        print(f"📅 End time (current UTC - 15min safety buffer): {end_dt.strftime('%Y-%m-%d %H:%M:%S')} UTC")
         
         # Auto-resume: Check for latest timestamp in database
         start_dt = None
@@ -156,13 +139,25 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
                 target_symbol = db_symbol if db_symbol else polygon_symbol_for_resume
                 # Try multiple symbol formats (what might be in DB vs what we're using)
                 symbols_to_try = [target_symbol, polygon_symbol_for_resume, api_symbol]
+                
+                # For currencies, try both with and without C: prefix (data might be stored as EURUSD or C:EURUSD)
+                if asset_class == "Currencies":
+                    if polygon_symbol_for_resume.startswith("C:"):
+                        # Try both C:EURUSD and EURUSD
+                        symbols_to_try.append(polygon_symbol_for_resume[2:])  # e.g., "EURUSD" from "C:EURUSD"
+                        symbols_to_try.append(polygon_symbol_for_resume)  # e.g., "C:EURUSD"
+                    else:
+                        # If input doesn't have C:, try adding it
+                        symbols_to_try.append(f"C:{polygon_symbol_for_resume}")  # e.g., "C:EURUSD" from "EURUSD"
+                        symbols_to_try.append(polygon_symbol_for_resume)  # e.g., "EURUSD"
+                
                 if target_symbol == "^XAUUSD" or polygon_symbol_for_resume == "C:XAUUSD":
-                    symbols_to_try.extend(["C:XAUUSD", "GOLD", "^XAUUSD"])
+                    symbols_to_try.extend(["C:XAUUSD", "GOLD", "^XAUUSD", "XAUUSD"])
                 elif target_symbol == "^SPX" or polygon_symbol_for_resume == "I:SPX":
                     symbols_to_try.extend(["I:SPX", "S&P 500", "^SPX", "SPY"])
-                elif asset_class == "Currencies" and polygon_symbol_for_resume.startswith("C:"):
-                    # For currencies, also try without the C: prefix
-                    symbols_to_try.append(polygon_symbol_for_resume[2:])  # e.g., "EURUSD" from "C:EURUSD"
+                
+                # Remove duplicates while preserving order
+                symbols_to_try = list(dict.fromkeys(symbols_to_try))
                 
                 latest_ts = None
                 found_symbol = None
@@ -216,18 +211,22 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
                                     print(f"🔍 Parsed timestamp - GMT+4: {latest_ts_gmt4.strftime('%Y-%m-%d %H:%M:%S')}, UTC: {latest_ts_utc.strftime('%Y-%m-%d %H:%M:%S')}")
                                     print(f"🔍 Current UTC: {now_utc.strftime('%Y-%m-%d %H:%M:%S')}, Current year: {current_year}")
                                     
-                                    # Validate timestamp from database is not in the future
+                                    # Validate timestamp from database is not too far in the future
                                     # Allow up to 1 hour in the future (timezone/clock drift buffer)
+                                    # Use now_utc_naive for comparison since latest_ts_utc is naive (after replace(tzinfo=None))
                                     if latest_ts_utc.year > current_year + 1:
                                         print(f"⚠️ Database timestamp year {latest_ts_utc.year} is too far in the future (current: {current_year}). Ignoring.")
                                         continue
-                                    elif latest_ts_utc > now_utc + timedelta(hours=1):
+                                    elif latest_ts_utc > now_utc_naive + timedelta(hours=1):
                                         print(f"⚠️ Database timestamp {latest_ts_utc.strftime('%Y-%m-%d %H:%M:%S')} is more than 1 hour in the future. Ignoring.")
                                         continue
                                     
                                     # Found valid timestamp - use it
                                     start_dt = latest_ts_utc + timedelta(minutes=1)  # Resume from next minute
                                     found_symbol = try_sym
+                                    
+                                    # Store latest timestamp in stats for display in success message
+                                    ingestion_stats["start_timestamp"] = latest_ts_gmt4.isoformat()
                                     
                                     print(f"✅ Auto-resume: Found latest data for '{found_symbol}'")
                                     print(f"🔄 Latest (GMT+4): {latest_ts_gmt4.strftime('%Y-%m-%d %H:%M:%S')}")
@@ -240,84 +239,78 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
                         print(f"⚠️ Error querying database for symbol '{try_sym}': {e}")
                         continue
                 
-                # If no existing data found, use default (2 years back)
-                # Default: Last 2 years of data (from 2024 to now)
+                # If no existing data found, apply initial backfill rules based on asset class
                 if start_dt is None:
                     print(f"ℹ️ No existing data found in database for any of the symbol formats: {symbols_to_try}")
-                    print(f"ℹ️ Starting fresh ingestion from 2 years ago...")
-                    safe_end = now_utc - timedelta(minutes=15)
-                    start_dt = safe_end - timedelta(days=730)  # 2 years = 730 days
-                    end_dt = safe_end  # Ensure end_dt is also safe
-                    print(f"📅 Using default 2-year range: {start_dt.strftime('%Y-%m-%d')} to {end_dt.strftime('%Y-%m-%d')}")
-                    print(f"📅 Calculated start_dt: {start_dt.strftime('%Y-%m-%d %H:%M:%S')} UTC (year: {start_dt.year})")
-                    print(f"📅 Calculated end_dt: {end_dt.strftime('%Y-%m-%d %H:%M:%S')} UTC (year: {end_dt.year})")
                     
-                    # CRITICAL: Double-check that start_dt is not in the future
-                    if start_dt.year > current_year or start_dt > now_utc:
-                        print(f"❌ ERROR: Calculated start_dt is invalid! start_dt.year={start_dt.year}, current_year={current_year}, start_dt={start_dt}, now_utc={now_utc}")
-                        # Force to 2 years ago
-                        start_dt = now_utc - timedelta(days=730)
-                        end_dt = now_utc - timedelta(minutes=15)
-                        print(f"🔧 Corrected to: {start_dt.strftime('%Y-%m-%d')} to {end_dt.strftime('%Y-%m-%d')}")
+                    # Initial backfill rules: Calculate start time based on asset class
+                    # End time is always current UTC time (when button is clicked)
+                    if asset_class == "Indices":
+                        backfill_days = 365  # 1 year for indices
+                        print(f"ℹ️ Starting fresh ingestion: Indices - {backfill_days} days back from current UTC time")
+                    else:
+                        # Commodities, Currencies, Stocks: 2 years
+                        backfill_days = 730  # 2 years
+                        print(f"ℹ️ Starting fresh ingestion: {asset_class} - {backfill_days} days back from current UTC time")
+                    
+                    # Calculate start time: end_dt - backfill_days
+                    # This ensures the backfill ends at current UTC time
+                    start_dt = end_dt - timedelta(days=backfill_days)
+                    
+                    print(f"📅 Initial backfill range: {start_dt.strftime('%Y-%m-%d %H:%M:%S')} to {end_dt.strftime('%Y-%m-%d %H:%M:%S')} UTC")
+                    print(f"📅 Backfill period: {backfill_days} days ({backfill_days // 365} years)")
+                    
+                    # Validate start_dt is not before a reasonable date (e.g., year 2000)
+                    if start_dt.year < 2000:
+                        print(f"⚠️ Calculated start_dt is too far in the past ({start_dt.year}). Limiting to year 2000.")
+                        start_dt = datetime(2000, 1, 1)
                 else:
                     print(f"✅ Auto-resume successful! Will continue from {start_dt.strftime('%Y-%m-%d %H:%M:%S')} UTC")
                     
-                    # Validate start_dt immediately after calculation
-                    if start_dt and (start_dt.year > current_year + 1 or start_dt > now_utc + timedelta(hours=1)):
-                        print(f"⚠️ Calculated start_dt {start_dt.strftime('%Y-%m-%d %H:%M:%S')} is invalid (year: {start_dt.year}, current: {current_year}). Using safe default.")
-                        safe_end = now_utc - timedelta(minutes=15)
-                        start_dt = safe_end - timedelta(days=730)
-                        end_dt = safe_end
-                        print(f"📅 Reset to safe default: {start_dt.strftime('%Y-%m-%d')} to {end_dt.strftime('%Y-%m-%d')}")
+                    # Validate start_dt is reasonable
+                    if start_dt and start_dt.year < 2000:
+                        print(f"⚠️ Start_dt is too far in the past ({start_dt.year}). Limiting to year 2000.")
+                        start_dt = datetime(2000, 1, 1)
+                    
+                    # Ensure start_dt doesn't exceed end_dt
+                    if start_dt >= end_dt:
+                        print(f"⚠️ Start_dt ({start_dt}) >= end_dt ({end_dt}). Data is already up to date.")
+                        return {
+                            "success": True, 
+                            "message": f"Data for {api_symbol} is already up to date. Latest: {(start_dt - timedelta(minutes=1)).strftime('%Y-%m-%d %H:%M:%S')} UTC",
+                            "stats": ingestion_stats
+                        }
             except Exception as e:
-                # Fallback to default if auto-resume fails (2 years)
+                # Fallback to default if auto-resume fails
                 print(f"❌ Auto-resume exception: {e}")
                 traceback.print_exc()
-                safe_end = now_utc - timedelta(minutes=15)
-                start_dt = safe_end - timedelta(days=730)  # 2 years
-                end_dt = safe_end
-                print(f"⚠️ Auto-resume failed, using default 2-year range: {start_dt.strftime('%Y-%m-%d')} to {end_dt.strftime('%Y-%m-%d')}")
+                # Use asset-class-specific backfill
+                backfill_days = 365 if asset_class == "Indices" else 730
+                start_dt = end_dt - timedelta(days=backfill_days)
+                print(f"⚠️ Auto-resume failed, using initial backfill: {backfill_days} days from button-click time")
         else:
-            # Manual start date (auto_resume=False)
-            print(f"ℹ️ Auto-resume is disabled. Using manual start_date parameter.")
-            if not start_date:
-                # Default to 2 years back (730 days) - last 2 years from 2024 to now
-                start_dt = end_dt - timedelta(days=730)
-            elif isinstance(start_date, str):
-                # Try multiple date formats
-                try:
-                    start_dt = datetime.strptime(start_date, "%Y%m%d")
-                except ValueError:
-                    try:
-                        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-                    except ValueError:
-                        start_dt = datetime.fromisoformat(start_date)
+            # Manual mode (auto_resume=False) - still use database-driven start time for consistency
+            print(f"ℹ️ Auto-resume is disabled, but still using database-driven start time.")
+            # Apply same initial backfill rules as auto_resume=True
+            if asset_class == "Indices":
+                backfill_days = 365  # 1 year for indices
             else:
-                start_dt = start_date
-            
-            # Ensure start_date is not in the future and is before end_date
-            if start_dt.year > current_year or start_dt > now_utc:
-                print(f"⚠️ Start date {start_dt.strftime('%Y-%m-%d')} is invalid. Recalculating from safe end_dt.")
-                safe_end = now_utc - timedelta(minutes=15)
-                start_dt = safe_end - timedelta(days=730)  # 2 years default
-                end_dt = safe_end
-            if start_dt > end_dt:
-                print(f"⚠️ Start date {start_dt.strftime('%Y-%m-%d')} is after end date {end_dt.strftime('%Y-%m-%d')}. Recalculating.")
-                safe_end = now_utc - timedelta(minutes=15)
-                start_dt = safe_end - timedelta(days=730)  # 2 years default
-                end_dt = safe_end
+                backfill_days = 730  # 2 years for others
+            start_dt = end_dt - timedelta(days=backfill_days)
+            print(f"📅 Using initial backfill: {backfill_days} days from button-click time")
         
         # Validate dates BEFORE formatting - allow same day but not far future
         # Allow current year and next year (catches obvious errors like 2030+ but allows today)
         if end_dt.year > current_year + 1:
-            return {"success": False, "message": f"❌ End date year {end_dt.year} is too far in the future (current: {current_year}). Date: {end_dt.strftime('%Y-%m-%d %H:%M:%S')}. This may be caused by bad data in the database. Current UTC: {now_utc.strftime('%Y-%m-%d %H:%M:%S')}"}
+            return {"success": False, "message": f"❌ End date year {end_dt.year} is too far in the future (current: {current_year}). Date: {end_dt.strftime('%Y-%m-%d %H:%M:%S')}. This may be caused by bad data in the database. Current UTC: {now_utc.strftime('%Y-%m-%d %H:%M:%S')}", "stats": ingestion_stats}
         
         if start_dt.year > current_year + 1:
-            return {"success": False, "message": f"❌ Start date year {start_dt.year} is too far in the future (current: {current_year}). Date: {start_dt.strftime('%Y-%m-%d %H:%M:%S')}. This may be caused by bad data in the database. Current UTC: {now_utc.strftime('%Y-%m-%d %H:%M:%S')}"}
+            return {"success": False, "message": f"❌ Start date year {start_dt.year} is too far in the future (current: {current_year}). Date: {start_dt.strftime('%Y-%m-%d %H:%M:%S')}. This may be caused by bad data in the database. Current UTC: {now_utc.strftime('%Y-%m-%d %H:%M:%S')}", "stats": ingestion_stats}
         
         # Allow up to 1 hour in the future (timezone/clock drift buffer)
-        if end_dt > now_utc + timedelta(hours=1):
-            return {"success": False, "message": f"❌ End date ({end_dt.strftime('%Y-%m-%d %H:%M:%S')}) is more than 1 hour in the future. Current UTC: {now_utc.strftime('%Y-%m-%d %H:%M:%S')}"}
+        # Use now_utc_naive for date comparisons since end_dt is naive
+        if end_dt > now_utc_naive + timedelta(hours=1):
+            return {"success": False, "message": f"❌ End date ({end_dt.strftime('%Y-%m-%d %H:%M:%S')}) is more than 1 hour in the future. Current UTC: {now_utc_naive.strftime('%Y-%m-%d %H:%M:%S')}", "stats": ingestion_stats}
         
         if start_dt > end_dt:
             return {"success": False, "message": f"❌ Invalid date range: start ({start_dt.strftime('%Y-%m-%d %H:%M:%S')}) is after end ({end_dt.strftime('%Y-%m-%d %H:%M:%S')})"}
@@ -334,12 +327,13 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
             latest_msg = f"Latest: {(start_dt - timedelta(minutes=1)).strftime('%Y-%m-%d %H:%M:%S')}" if auto_resume else ""
             print(f"⚠️ WARNING: start_dt ({start_dt.strftime('%Y-%m-%d %H:%M:%S')}) >= end_dt ({end_dt.strftime('%Y-%m-%d %H:%M:%S')})")
             print(f"⚠️ This usually means data is already up to date, but checking if this is correct...")
-            # If start_dt is today and end_dt is today, this might be a bug - don't return early
-            if start_dt.date() == end_dt.date() == now_utc.date():
-                print(f"⚠️ Both dates are today - this might indicate auto-resume didn't find data. Checking database...")
-                # Don't return early - let it try to fetch (will likely get 403 for today, but that's better than silently failing)
+            # If start_dt is at current time, this might be a bug - don't return early
+            # Use now_utc_naive for date comparisons since start_dt and end_dt are naive
+            if start_dt.date() == end_dt.date() == now_utc_naive.date():
+                print(f"⚠️ Both dates are at current UTC time - this might indicate auto-resume didn't find data. Checking database...")
+                # Don't return early - let it try to fetch (will likely get 403, but that's better than silently failing)
             else:
-                return {"success": True, "message": f"Data for {api_symbol} is already up to date. {latest_msg} End: {end_dt.strftime('%Y-%m-%d %H:%M:%S')}"}
+                return {"success": True, "message": f"Data for {api_symbol} is already up to date. {latest_msg} End: {end_dt.strftime('%Y-%m-%d %H:%M:%S')}", "stats": ingestion_stats}
             
         # Convert symbol to Polygon format using the conversion function
         # This handles currencies (EUR/USD -> C:EURUSD), indices, stocks, etc.
@@ -450,7 +444,7 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
         print(f"   start_dt: {start_dt.strftime('%Y-%m-%d %H:%M:%S')} UTC (year: {start_dt.year})")
         print(f"   end_dt: {end_dt.strftime('%Y-%m-%d %H:%M:%S')} UTC (year: {end_dt.year})")
         print(f"   current_year: {current_year}")
-        print(f"   now_utc: {now_utc.strftime('%Y-%m-%d %H:%M:%S')} UTC")
+        print(f"   Current UTC: {now_utc.strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"{'='*60}\n")
         
         # Format dates for API call
@@ -460,17 +454,18 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
         # Final date validation before API call - CRITICAL CHECKS (MUST PREVENT API CALL)
         now_str = now_utc.strftime("%Y-%m-%d")
         
-        # Check year first (catches 2026 dates immediately)
+        # Check year first (catches invalid years)
         if end_dt.year > current_year or start_dt.year > current_year:
-            return {"success": False, "message": f"❌ BLOCKED: Date range contains future year. Start: {s_str} (year: {start_dt.year}), End: {e_str} (year: {end_dt.year}). Current year: {current_year}. API call prevented."}
+            return {"success": False, "message": f"❌ BLOCKED: Date range contains invalid year. Start: {s_str} (year: {start_dt.year}), End: {e_str} (year: {end_dt.year}). Current year: {current_year}. API call prevented.", "stats": ingestion_stats}
         
         # Check if dates are in the future
-        if end_dt > now_utc or start_dt > now_utc:
-            return {"success": False, "message": f"❌ BLOCKED: Date range contains future dates. Start: {start_dt.strftime('%Y-%m-%d %H:%M:%S')}, End: {end_dt.strftime('%Y-%m-%d %H:%M:%S')}. Current: {now_utc.strftime('%Y-%m-%d %H:%M:%S')}. API call prevented."}
+        # Use now_utc_naive for date comparisons since end_dt and start_dt are naive
+        if end_dt > now_utc_naive or start_dt > now_utc_naive:
+            return {"success": False, "message": f"❌ BLOCKED: Date range contains future dates. Start: {start_dt.strftime('%Y-%m-%d %H:%M:%S')}, End: {end_dt.strftime('%Y-%m-%d %H:%M:%S')}. Current UTC: {now_utc_naive.strftime('%Y-%m-%d %H:%M:%S')}. API call prevented.", "stats": ingestion_stats}
         
         # Check formatted date strings
         if e_str > now_str or s_str > now_str:
-            return {"success": False, "message": f"❌ BLOCKED: Date strings are in the future. Start: {s_str}, End: {e_str}. Current: {now_str}. API call prevented."}
+            return {"success": False, "message": f"❌ BLOCKED: Date strings are in the future. Start: {s_str}, End: {e_str}. Current UTC: {now_str}. API call prevented.", "stats": ingestion_stats}
         
         # Final safety check before API call
         if not polygon_symbol or len(polygon_symbol.strip()) <= 1:
@@ -480,8 +475,9 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
         # Ensure symbol is clean before API call (final cleanup)
         polygon_symbol_final = polygon_symbol_clean if polygon_symbol_clean else polygon_symbol.strip().replace('\n', '').replace('\r', '').replace('\t', '')
         
-        # CRITICAL DEBUG: If start_dt is today, something is wrong - check database directly
-        if start_dt.date() == now_utc.date() and auto_resume:
+        # CRITICAL DEBUG: If start_dt is at current UTC time, something is wrong - check database directly
+        # Use now_utc_naive for date comparisons since start_dt is naive
+        if start_dt.date() == now_utc_naive.date() and auto_resume:
             print(f"\n{'='*60}")
             print(f"🔍 DEBUGGING: Start date is TODAY but auto-resume is enabled!")
             print(f"{'='*60}")
@@ -519,11 +515,12 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
         print(f"   End Date:   {e_str} ({end_dt.strftime('%Y-%m-%d %H:%M:%S')} UTC)")
         print(f"   Date Range: {s_str} to {e_str}")
         print(f"   Total Days: {(end_dt - start_dt).days} days")
-        print(f"   Current UTC: {now_utc.strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"   Current UTC: {now_utc_naive.strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"   Auto-resume was: {'ENABLED' if auto_resume else 'DISABLED'}")
-        if start_dt.date() == now_utc.date():
-            print(f"   ⚠️ WARNING: Start date is TODAY ({start_dt.date()}) - auto-resume may not have found existing data!")
-            print(f"   ⚠️ Expected: Start date should be ~2 years ago ({now_utc.date() - timedelta(days=730)}) if no data found")
+        # Use now_utc_naive for date comparisons since start_dt is naive
+        if start_dt.date() == now_utc_naive.date():
+            print(f"   ⚠️ WARNING: Start date is at current UTC time ({start_dt.date()}) - auto-resume may not have found existing data!")
+            print(f"   ⚠️ Expected: Start date should be ~2 years ago ({now_utc_naive.date() - timedelta(days=730)}) if no data found")
         print(f"{'='*60}\n")
         
         # CRITICAL: For Polygon free plan, we need to chunk by 1 day and add rate limiting
@@ -545,8 +542,17 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
             _last_polygon_call = time.time()
         
         # Helper function to process and insert a single chunk dataframe
-        def process_and_insert_chunk(chunk_df, chunk_date_str, target_symbol, target_table):
-            """Process a chunk dataframe and insert it into the database immediately"""
+        def process_and_insert_chunk(chunk_df, chunk_date_str, target_symbol, target_table, chunk_start_utc=None):
+            """Process a chunk dataframe and insert it into the database immediately
+            
+            Args:
+                chunk_df: DataFrame with market data
+                chunk_date_str: Date string for logging
+                target_symbol: Symbol to store in DB
+                target_table: Target table name
+                chunk_start_utc: Actual start time for this chunk (timezone-aware UTC datetime)
+                              Used to filter out records before resume point
+            """
             if chunk_df.empty:
                 return 0
             
@@ -554,10 +560,20 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
             utc_tz = pytz.timezone('UTC')
             gmt4_tz = pytz.timezone('Asia/Dubai')
             
+            # Convert chunk_start to timezone-aware if provided (for filtering)
+            if chunk_start_utc is not None:
+                if chunk_start_utc.tzinfo is None:
+                    chunk_start_utc_aware = utc_tz.localize(chunk_start_utc)
+                else:
+                    chunk_start_utc_aware = chunk_start_utc.astimezone(utc_tz)
+            else:
+                chunk_start_utc_aware = None
+            
             # Ensure timestamp is the index
             if "timestamp" in chunk_df.columns:
                 chunk_df = chunk_df.set_index("timestamp")
             
+            filtered_count = 0
             for timestamp, row in chunk_df.iterrows():
                 if pd.isna(row.get("close")):
                     continue
@@ -569,20 +585,64 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
                     else:
                         ts_utc = timestamp.astimezone(utc_tz)
                     
+                    # CRITICAL: Filter out records before chunk_start (resume point)
+                    # This prevents re-ingesting old data when resuming mid-day
+                    if chunk_start_utc_aware is not None and ts_utc < chunk_start_utc_aware:
+                        filtered_count += 1
+                        continue
+                    
                     ts_gmt4 = ts_utc.astimezone(gmt4_tz)
+                    
+                    # Extract OHLC values
+                    open_price = float(row["open"])
+                    high_price = float(row["high"])
+                    low_price = float(row["low"])
+                    close_price = float(row["close"])
+                    
+                    # OHLC Validation: Enforce data integrity rules
+                    # low ≤ open, low ≤ close, high ≥ open, high ≥ close
+                    validation_errors = []
+                    if low_price > open_price:
+                        validation_errors.append(f"low ({low_price}) > open ({open_price})")
+                    if low_price > close_price:
+                        validation_errors.append(f"low ({low_price}) > close ({close_price})")
+                    if high_price < open_price:
+                        validation_errors.append(f"high ({high_price}) < open ({open_price})")
+                    if high_price < close_price:
+                        validation_errors.append(f"high ({high_price}) < close ({close_price})")
+                    
+                    if validation_errors:
+                        print(f"⚠️ OHLC validation failed for {ts_gmt4.strftime('%Y-%m-%d %H:%M:%S')}: {', '.join(validation_errors)}. Skipping record.")
+                        continue
+                    
+                    # CRITICAL: Filter out records before chunk_start (resume point)
+                    # This prevents re-ingesting old data when resuming mid-day
+                    # chunk_start_utc_aware is passed from the outer scope
+                    if chunk_start_utc_aware is not None and ts_utc < chunk_start_utc_aware:
+                        continue  # Skip records before resume point
+                    
+                    # Ensure timestamp doesn't exceed current UTC time
+                    if ts_utc > now_utc:
+                        # Skip records in the future
+                        continue
                     
                     record = {
                         "symbol": str(target_symbol),
                         "timestamp": ts_gmt4.isoformat(),
-                        "open": float(row["open"]),
-                        "high": float(row["high"]),
-                        "low": float(row["low"]),
-                        "close": float(row["close"]),
+                        "open": open_price,
+                        "high": high_price,
+                        "low": low_price,
+                        "close": close_price,
                         "volume": int(row["volume"]) if pd.notnull(row.get("volume")) else 0
                     }
                     db_rows.append(record)
                 except (ValueError, TypeError) as e:
+                    print(f"⚠️ Error processing row at {timestamp}: {e}")
                     continue
+            
+            # Log if we filtered out records before resume point
+            if filtered_count > 0 and chunk_start_utc_aware is not None:
+                print(f"🔍 Filtered out {filtered_count} records before resume point ({chunk_start_utc_aware.strftime('%Y-%m-%d %H:%M:%S')} UTC)")
             
             if not db_rows:
                 return 0
@@ -630,19 +690,26 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
             if chunk_end < chunk_start:
                 chunk_end = chunk_start
             
-            # For today's date, cap the end time to current time (not end of day)
-            # This prevents 403 errors when requesting full day data that hasn't completed yet
-            today_date = now_utc.date()
-            if chunk_end.date() == today_date and chunk_end > now_utc:
-                chunk_end = now_utc - timedelta(minutes=15)  # Safety buffer: 15 minutes before now
-                print(f"📅 Today's chunk detected - capping end time to current time: {chunk_end.strftime('%Y-%m-%d %H:%M:%S')} UTC")
+            # CRITICAL: Cap chunk_end to current UTC time (naive)
+            # Never process data beyond current time
+            # Use now_utc_naive for date comparisons since chunk_end is naive
+            if chunk_end > now_utc_naive:
+                chunk_end = now_utc_naive
+                print(f"📅 Chunk end capped to current UTC: {chunk_end.strftime('%Y-%m-%d %H:%M:%S')} UTC")
+            
+            # Also cap chunk_start to current UTC time (naive)
+            if chunk_start > now_utc_naive:
+                print(f"⏭️ Skipping chunk {chunk_s_str} - start time is beyond current UTC time")
+                chunk_start = chunk_end + timedelta(days=1)
+                continue
             
             # CRITICAL: Validate chunk dates are not too far in the future before making API call
             # Allow same day (up to 1 hour buffer for timezone/clock drift)
             if chunk_start.year > current_year + 1 or chunk_end.year > current_year + 1:
-                return {"success": False, "message": f"❌ BLOCKED: Chunk date contains future year. Start: {chunk_start.strftime('%Y-%m-%d')} (year: {chunk_start.year}), End: {chunk_end.strftime('%Y-%m-%d')} (year: {chunk_end.year}). Current year: {current_year}. API call prevented."}
-            if chunk_start > now_utc + timedelta(hours=1) or chunk_end > now_utc + timedelta(hours=1):
-                return {"success": False, "message": f"❌ BLOCKED: Chunk date is more than 1 hour in the future. Start: {chunk_start.strftime('%Y-%m-%d %H:%M:%S')}, End: {chunk_end.strftime('%Y-%m-%d %H:%M:%S')}. Current: {now_utc.strftime('%Y-%m-%d %H:%M:%S')}. API call prevented."}
+                return {"success": False, "message": f"❌ BLOCKED: Chunk date contains future year. Start: {chunk_start.strftime('%Y-%m-%d')} (year: {chunk_start.year}), End: {chunk_end.strftime('%Y-%m-%d')} (year: {chunk_end.year}). Current year: {current_year}. API call prevented.", "stats": ingestion_stats}
+            # Use now_utc_naive for date comparisons since chunk_start and chunk_end are naive
+            if chunk_start > now_utc_naive + timedelta(hours=1) or chunk_end > now_utc_naive + timedelta(hours=1):
+                return {"success": False, "message": f"❌ BLOCKED: Chunk date is more than 1 hour in the future. Start: {chunk_start.strftime('%Y-%m-%d %H:%M:%S')}, End: {chunk_end.strftime('%Y-%m-%d %H:%M:%S')}. Current UTC: {now_utc_naive.strftime('%Y-%m-%d %H:%M:%S')}. API call prevented.", "stats": ingestion_stats}
             
             # Use date strings for API call (Polygon accepts YYYY-MM-DD format)
             chunk_s_str = chunk_start.strftime("%Y-%m-%d")
@@ -665,8 +732,11 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
                         print(f"✅ Fetched {len(chunk_df)} records for {chunk_s_str} to {chunk_e_str}")
                         
                         # Insert immediately after fetching
+                        # Pass chunk_start (timezone-aware) to filter out records before resume point
+                        # Convert chunk_start to timezone-aware UTC for comparison
+                        chunk_start_utc_aware = utc_tz.localize(chunk_start) if chunk_start.tzinfo is None else chunk_start.astimezone(utc_tz)
                         try:
-                            inserted_count = process_and_insert_chunk(chunk_df, chunk_s_str, target_symbol, target_table)
+                            inserted_count = process_and_insert_chunk(chunk_df, chunk_s_str, target_symbol, target_table, chunk_start_utc_aware)
                             if inserted_count > 0:
                                 total_inserted_all_chunks += inserted_count
                                 print(f"💾 Inserted {inserted_count} records for {chunk_s_str} to {chunk_e_str} (total so far: {total_inserted_all_chunks})")
@@ -820,8 +890,9 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
         # Just prepare the success message
         if total_inserted_all_chunks == 0:
             # Re-validate dates and symbol before showing error (in case something went wrong)
-            if end_dt.year > current_year or end_dt > now_utc:
-                return {"success": False, "message": f"❌ Date validation error: End date {e_str} (year: {end_dt.year}) is in the future. This should have been caught earlier. Current date: {now_utc.strftime('%Y-%m-%d')}"}
+            # Use now_utc_naive for date comparisons since end_dt is naive
+            if end_dt.year > current_year or end_dt > now_utc_naive:
+                return {"success": False, "message": f"❌ Date validation error: End date {e_str} (year: {end_dt.year}) is in the future. This should have been caught earlier. Current UTC: {now_utc_naive.strftime('%Y-%m-%d %H:%M:%S')}", "stats": ingestion_stats}
             
             # Ensure symbol is properly cleaned for display (remove all whitespace including newlines)
             # Use api_symbol first to avoid truncation issues
@@ -850,28 +921,76 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
                 # Last resort
                 symbol_display = api_symbol_clean if api_symbol_clean != "UNKNOWN" else "UNKNOWN"
             
+            # Check if data is already fully ingested (up to latest time)
+            # If start_dt >= end_dt, data is already fully ingested (no new data to fetch)
+            # OR if start_dt is very close to end_dt (within 3 hours), likely already caught up
+            # OR if we found existing data in DB (auto-resume) and got 0 inserts, data is fully ingested
+            # start_dt is the resume point (latest in DB + 1 minute), end_dt is current UTC - 15min
+            # If we found existing data and got 0 inserts, all fetched records were duplicates (filtered out), so data is fully ingested
+            time_diff_minutes = (end_dt - start_dt).total_seconds() / 60 if end_dt > start_dt else 0
+            found_existing_data = ingestion_stats.get("start_timestamp") is not None  # Data was found in DB during auto-resume
+            
+            # Data is fully ingested if:
+            # 1. start_dt >= end_dt (no new data to fetch)
+            # 2. Time difference is small (< 3 hours) - already caught up
+            # 3. We found existing data in DB (auto-resume worked) and got 0 inserts - all records were duplicates, so data is fully ingested
+            #    In this case, we fetched data from Polygon but all were filtered out as duplicates (before resume point)
+            is_up_to_date = start_dt >= end_dt or time_diff_minutes < 180 or found_existing_data  # If found existing data and 0 inserts, data is fully ingested
+            
+            if is_up_to_date:
+                # Data is already fully ingested - show success message
+                # Get latest timestamp from stats if available (the resume point indicates we're at latest)
+                latest_msg = ""
+                if ingestion_stats.get("start_timestamp"):
+                    # start_timestamp is the latest data found in DB (before adding 1 minute)
+                    # Format it nicely for display
+                    try:
+                        latest_ts_str = ingestion_stats.get("start_timestamp")
+                        if latest_ts_str:
+                            # Handle ISO format with or without timezone
+                            latest_ts_str = latest_ts_str.replace('Z', '+00:00')
+                            latest_ts = datetime.fromisoformat(latest_ts_str)
+                            latest_msg = f" Latest data in database: {latest_ts.strftime('%Y-%m-%d %H:%M:%S')}"
+                        else:
+                            latest_msg = ""
+                    except Exception as e:
+                        # If parsing fails, just use the raw string
+                        latest_msg = f" Latest data in database: {ingestion_stats.get('start_timestamp')}"
+                elif ingestion_stats.get("end_timestamp"):
+                    latest_msg = f" Latest data: {ingestion_stats.get('end_timestamp')}"
+                
+                return {
+                    "success": True, 
+                    "message": f"✅ Data for '{symbol_display}' is fully ingested up to the latest available time.{latest_msg}",
+                    "stats": ingestion_stats
+                }
+            
             # Check if this might be a Polygon restriction issue
             if symbol_display.startswith("I:") or api_symbol_clean.upper() in ["I:SPX", "SPX", "^SPX"]:
                 return {"success": False, "message": f"❌ No data returned from Polygon for '{symbol_display}' ({s_str} to {e_str}).\n\n⚠️ **POLYGON RESTRICTION**: Polygon does NOT provide 1-minute data for indices (I:SPX, I:DJI, etc.) due to licensing restrictions.\n\n✅ **SOLUTION**: Use SPY instead of I:SPX. SPY is an ETF that tracks the S&P 500 and Polygon provides full minute history for it.\n\n💡 **Recommendation**: Change your symbol from 'I:SPX' to 'SPY' in the Polygon Symbol field.\n\nDebug: api_symbol='{api_symbol_clean}', polygon_symbol='{symbol_display}', asset_class='{asset_class}'"}
             
             return {"success": False, "message": f"❌ No data available for '{symbol_display}' on {s_str}."}
-                 
+            
+        # Update final stats
+        ingestion_stats["rows_ingested"] = total_inserted_all_chunks
+        ingestion_stats["api_failures"] = len([c for c in skipped_chunks if "403" in c or "429" in c])
+        
         # All data was inserted as we went - prepare final success message
-        resume_msg = f" (resumed from latest)" if auto_resume and start_dt else ""
+        resume_msg = f" (resumed from latest)" if auto_resume and ingestion_stats.get("start_timestamp") else ""
         timezone_note = " (converted from UTC to GMT+4)"
         date_range_info = f"Date range: {s_str} to {e_str} ({(end_dt - start_dt).days} days)"
         
         # Add info about skipped chunks if any
         skipped_info = ""
         if skipped_chunks:
-            today_str = datetime.utcnow().strftime("%Y-%m-%d")
-            skipped_today = [chunk for chunk in skipped_chunks if chunk.startswith(today_str)]
+            end_date_str = now_gmt4.strftime("%Y-%m-%d")
+            skipped_at_end = [chunk for chunk in skipped_chunks if chunk.startswith(end_date_str)]
             is_24_7 = asset_class == "Commodities" or asset_class == "Currencies"
-            if skipped_today and is_24_7:
-                # For 24/7 markets, today's skip is likely a Polygon plan limitation
-                skipped_info = f"\n\n⚠️ Note: {len(skipped_chunks)} date chunk(s) were skipped: {', '.join(skipped_chunks)}\n💡 Today's data may not be available due to Polygon plan limitations for this {asset_class.lower()} pair. Try a different pair (e.g., GBPUSD for currencies) or upgrade your Polygon plan."
-            elif skipped_today:
-                skipped_info = f"\n\n⚠️ Note: {len(skipped_chunks)} date chunk(s) were skipped: {', '.join(skipped_chunks)}\n💡 Today's data ({today_str}) may not be available yet if the market hasn't opened. Try again later after market hours."
+            if skipped_at_end and is_24_7:
+                # For 24/7 markets, end date skip is likely a Polygon plan limitation
+                skipped_info = f"\n\n⚠️ Note: {len(skipped_chunks)} date chunk(s) were skipped: {', '.join(skipped_chunks)}\n💡 Data at ingestion end time may not be available due to Polygon plan limitations for this {asset_class.lower()} pair. Try a different pair (e.g., GBPUSD for currencies) or upgrade your Polygon plan."
+            elif skipped_at_end:
+                skipped_info = f"\n\n⚠️ Note: {len(skipped_chunks)} date chunk(s) were skipped: {', '.join(skipped_chunks)}\n💡 Data at ingestion end time ({end_date_str}) may not be available yet if the market hasn't opened."
             else:
                 skipped_info = f"\n\n⚠️ Note: {len(skipped_chunks)} date chunk(s) were skipped (no data available): {', '.join(skipped_chunks)}"
         
@@ -882,7 +1001,15 @@ def ingest_from_polygon_api(api_symbol, asset_class, start_date=None, end_date=N
             success_message = f"✅ Ingestion completed for {target_symbol}.\n\n{date_range_info}{timezone_note}.\n\nℹ️ Note: All records were duplicates or already exist in the database.{resume_msg}{skipped_info}"
         
         print(f"🎉 {success_message}")
-        return {"success": True, "message": success_message}
+        print(f"\n📊 Ingestion Statistics:")
+        print(f"   Symbol: {ingestion_stats['symbol']}")
+        print(f"   Start: {ingestion_stats.get('start_timestamp', 'N/A')}")
+        print(f"   End: {ingestion_stats.get('end_timestamp', 'N/A')}")
+        print(f"   Rows Ingested: {ingestion_stats['rows_ingested']}")
+        print(f"   API Failures: {ingestion_stats['api_failures']}")
+        print(f"   Missing Minutes: {len(ingestion_stats['missing_minutes'])}")
+        
+        return {"success": True, "message": success_message, "stats": ingestion_stats}
 
     except Exception as e:
         traceback.print_exc()
