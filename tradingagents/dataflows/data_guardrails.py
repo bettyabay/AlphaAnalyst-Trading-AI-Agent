@@ -507,6 +507,7 @@ class DataCoverageService:
                         
                         # Use pipeline with converted Polygon symbol and GMT+4 timezone conversion
                         # The pipeline will convert UTC timestamps from Polygon to GMT+4 (Asia/Dubai) before storing
+                        # Pass asset_class so pipeline can also do symbol conversion as a safeguard
                         success = pipeline.ingest_historical_data(
                             symbol=polygon_symbol,  # Use converted Polygon symbol format (e.g., "C:USDJPY")
                             interval="daily" if interval == "1d" else interval,
@@ -515,6 +516,7 @@ class DataCoverageService:
                             chunk_days=task["chunk_days"],
                             resume_from_latest=False,  # Don't use auto-resume for backfill - use explicit dates
                             target_timezone="Asia/Dubai",  # Convert UTC to GMT+4 (Asia/Dubai) before storing
+                            asset_class=self.asset_class,  # Pass asset_class for symbol conversion safeguard
                         )
                     else:
                         # For non-1min data, use pipeline as before

@@ -16,3 +16,6 @@ __pycache__/
 
 # Uploads (since your log showed these files too)
 uploads/
+
+# Telegram session files
+telegram_session.session

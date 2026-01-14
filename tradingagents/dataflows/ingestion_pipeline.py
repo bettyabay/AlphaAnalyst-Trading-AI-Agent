@@ -154,6 +154,7 @@ class DataIngestionPipeline:
         end_date: Optional[datetime] = None,
         resume_from_latest: bool = True,
         target_timezone: Optional[str] = None,
+        asset_class: Optional[str] = None,  # Added to support symbol conversion
     ) -> bool:
         """Ingest historical data for a symbol, with chunked fetching and retry/backoff for intraday data.
 
@@ -253,6 +254,15 @@ class DataIngestionPipeline:
             if start_date > end_date:
                 print(f"Start date {start_date} is after end date {end_date}. Cannot ingest.")
                 return False
+
+            # For 1min data, convert symbol to Polygon format if asset_class is provided
+            # This ensures currencies get "C:" prefix (EURUSD -> C:EURUSD), indices get "I:" prefix, etc.
+            if interval in ("1min", "1-minute", "1m") and asset_class:
+                # Convert symbol to Polygon format based on asset class
+                original_symbol = symbol
+                symbol = convert_instrument_to_polygon_symbol(asset_class, symbol)
+                if original_symbol != symbol:
+                    print(f"🔄 Auto-converting symbol '{original_symbol}' to Polygon format '{symbol}' for asset class '{asset_class}'")
 
             if interval in ("5min", "5-minute", "5m"):
                 target_table = "market_data_5min"

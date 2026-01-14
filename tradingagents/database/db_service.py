@@ -285,6 +285,117 @@ def get_provider_signals(
 
 
 # ============================================================================
+# TELEGRAM CHANNELS TABLE OPERATIONS
+# ============================================================================
+
+def add_telegram_channel(
+    channel_username: str,
+    provider_name: str,
+    is_active: bool = True
+) -> Optional[Dict]:
+    """Add or update a Telegram channel configuration"""
+    supabase = get_supabase()
+    if not supabase:
+        return None
+    
+    try:
+        # Normalize channel username
+        if not channel_username.startswith('@'):
+            channel_username = f"@{channel_username}"
+        
+        payload = {
+            "channel_username": channel_username,
+            "provider_name": provider_name,
+            "is_active": is_active,
+            "updated_at": datetime.now().isoformat()
+        }
+        
+        # Upsert (insert or update)
+        result = supabase.table("telegram_channels").upsert(
+            payload,
+            on_conflict="channel_username"
+        ).execute()
+        
+        if result.data and len(result.data) > 0:
+            return result.data[0]
+        return None
+    except Exception as e:
+        # If table doesn't exist, return None (table will be created via migration)
+        if "relation" in str(e).lower() or "does not exist" in str(e).lower():
+            print(f"⚠️ telegram_channels table doesn't exist. Please run migration.")
+            return None
+        print(f"Error adding telegram channel: {e}")
+        return None
+
+
+def get_telegram_channels(is_active: Optional[bool] = None) -> List[Dict]:
+    """Get all Telegram channel configurations"""
+    supabase = get_supabase()
+    if not supabase:
+        return []
+    
+    try:
+        query = supabase.table("telegram_channels").select("*")
+        
+        if is_active is not None:
+            query = query.eq("is_active", is_active)
+        
+        query = query.order("created_at", desc=True)
+        result = query.execute()
+        return result.data if result.data else []
+    except Exception as e:
+        # If table doesn't exist, return empty list
+        if "relation" in str(e).lower() or "does not exist" in str(e).lower():
+            return []
+        print(f"Error getting telegram channels: {e}")
+        return []
+
+
+def update_telegram_channel_status(
+    channel_username: str,
+    is_active: bool
+) -> bool:
+    """Update the active status of a Telegram channel"""
+    supabase = get_supabase()
+    if not supabase:
+        return False
+    
+    try:
+        if not channel_username.startswith('@'):
+            channel_username = f"@{channel_username}"
+        
+        result = supabase.table("telegram_channels").update({
+            "is_active": is_active,
+            "updated_at": datetime.now().isoformat()
+        }).eq("channel_username", channel_username).execute()
+        
+        return result.data is not None and len(result.data) > 0
+    except Exception as e:
+        print(f"Error updating telegram channel status: {e}")
+        return False
+
+
+def delete_telegram_channel(channel_username: str) -> bool:
+    """Delete a Telegram channel configuration"""
+    supabase = get_supabase()
+    if not supabase:
+        return False
+    
+    try:
+        if not channel_username.startswith('@'):
+            channel_username = f"@{channel_username}"
+        
+        result = supabase.table("telegram_channels").delete().eq(
+            "channel_username", channel_username
+        ).execute()
+        
+        return True
+    except Exception as e:
+        print(f"Error deleting telegram channel: {e}")
+        return False
+
+
+# ============================================================================
 # PORTFOLIO TABLE OPERATIONS
 # ============================================================================
 

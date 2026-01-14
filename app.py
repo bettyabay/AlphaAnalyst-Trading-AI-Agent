@@ -1554,6 +1554,132 @@ def phase1_foundation_data():
                     elif signal_file:
                         st.warning("Please fill in provider name before uploading")
         
+        # Telegram Channel Configuration
+        st.markdown("---")
+        with st.expander("📱 Telegram Signal Channels", expanded=False):
+            st.markdown("### Configure Real-Time Signal Channels")
+            st.info("💡 Connect to Telegram channels to automatically receive and parse trading signals in real-time.")
+            
+            # Check if telethon is available
+            try:
+                import telethon
+                telethon_available = True
+            except ImportError:
+                telethon_available = False
+                st.warning("⚠️ `telethon` not installed. Install with: `pip install telethon`")
+                st.code("pip install telethon", language="bash")
+            
+            if telethon_available:
+                # Check for Telegram API credentials
+                import os
+                telegram_api_id = os.getenv("TELEGRAM_API_ID")
+                telegram_api_hash = os.getenv("TELEGRAM_API_HASH")
+                
+                if not telegram_api_id or not telegram_api_hash:
+                    st.warning("⚠️ Telegram API credentials not configured.")
+                    st.info("""
+                    **To set up Telegram integration:**
+                    1. Go to https://my.telegram.org/apps
+                    2. Create a new application
+                    3. Get your `api_id` and `api_hash`
+                    4. Add them to your `.env` file:
+                       ```
+                       TELEGRAM_API_ID=your_api_id
+                       TELEGRAM_API_HASH=your_api_hash
+                       ```
+                    """)
+                else:
+                    st.success("✅ Telegram API credentials configured")
+                    
+                    # Channel configuration
+                    from tradingagents.database.db_service import (
+                        get_telegram_channels, 
+                        add_telegram_channel, 
+                        delete_telegram_channel,
+                        update_telegram_channel_status
+                    )
+                    
+                    col_ch1, col_ch2 = st.columns([3, 1])
+                    with col_ch1:
+                        channel_username = st.text_input(
+                            "Channel Username", 
+                            placeholder="@signal_provider",
+                            key="telegram_channel_username",
+                            help="Enter the Telegram channel username (e.g., @signal_provider)"
+                        )
+                    with col_ch2:
+                        provider_name_telegram = st.text_input(
+                            "Provider Name",
+                            placeholder="Provider1",
+                            key="telegram_provider_name",
+                            help="Name of the signal provider"
+                        )
+                    
+                    col_add, col_refresh = st.columns([1, 1])
+                    with col_add:
+                        if st.button("➕ Add Channel", key="add_telegram_channel"):
+                            if channel_username and provider_name_telegram:
+                                result = add_telegram_channel(channel_username, provider_name_telegram)
+                                if result:
+                                    st.success(f"✅ Added channel: {channel_username}")
+                                    st.rerun()
+                                else:
+                                    st.error("❌ Failed to add channel. Check if table exists.")
+                            else:
+                                st.warning("⚠️ Please enter both channel username and provider name")
+                    
+                    with col_refresh:
+                        if st.button("🔄 Refresh", key="refresh_telegram_channels"):
+                            st.rerun()
+                    
+                    # List active channels
+                    st.markdown("#### Active Channels")
+                    channels = get_telegram_channels()
+                    
+                    if channels:
+                        for channel in channels:
+                            col_status, col_info, col_actions = st.columns([1, 3, 2])
+                            with col_status:
+                                status_icon = "🟢" if channel.get("is_active") else "🔴"
+                                st.write(status_icon)
+                            with col_info:
+                                st.write(f"**{channel['channel_username']}** ({channel['provider_name']})")
+                                if channel.get("last_check_at"):
+                                    st.caption(f"Last check: {channel['last_check_at'][:19]}")
+                            with col_actions:
+                                if channel.get("is_active"):
+                                    if st.button("⏸️ Pause", key=f"pause_{channel['id']}"):
+                                        update_telegram_channel_status(channel['channel_username'], False)
+                                        st.rerun()
+                                else:
+                                    if st.button("▶️ Resume", key=f"resume_{channel['id']}"):
+                                        update_telegram_channel_status(channel['channel_username'], True)
+                                        st.rerun()
+                                if st.button("🗑️ Delete", key=f"delete_{channel['id']}"):
+                                    delete_telegram_channel(channel['channel_username'])
+                                    st.rerun()
+                    else:
+                        st.info("No Telegram channels configured. Add a channel above to start monitoring.")
+                    
+                    # Instructions for running the worker
+                    st.markdown("---")
+                    st.markdown("#### 🚀 Start Monitoring")
+                    st.info("""
+                    **To start monitoring Telegram channels:**
+                    
+                    1. Add channels above
+                    2. Run the Telegram worker in a separate terminal:
+                       ```bash
+                       python -m tradingagents.dataflows.telegram_signal_worker
+                       ```
+                    
+                    The worker will:
+                    - Connect to Telegram
+                    - Monitor all active channels
+                    - Parse incoming signals
+                    - Save signals to database automatically
+                    """)
+        
         # View Stored Signals for Selected Provider
         if selected_provider and selected_provider != "Add...":
             st.markdown("---")
@@ -1583,6 +1709,82 @@ def phase1_foundation_data():
                     st.caption(f"Showing last {len(df_signals)} signals.")
                 else:
                     st.info(f"No stored signals found for {selected_provider}.")
+        
+        # Real-Time Signal Feed
+        st.markdown("---")
+        with st.expander("🔴 Live Signal Feed", expanded=False):
+            st.markdown("### Real-Time Trading Signals")
+            
+            from tradingagents.database.db_service import get_provider_signals
+            
+            # Filter options
+            col_filter1, col_filter2, col_filter3 = st.columns(3)
+            with col_filter1:
+                all_providers = ["All"] + (st.session_state.get("signal_providers", []) or []) + ["PipXpert"]
+                # Get unique providers from database
+                try:
+                    all_signals = get_provider_signals(limit=1000)
+                    if all_signals:
+                        db_providers = list(set([s.get("provider_name") for s in all_signals if s.get("provider_name")]))
+                        all_providers = ["All"] + sorted(set(all_providers[1:] + db_providers))
+                except:
+                    pass
+                
+                filter_provider = st.selectbox("Provider", all_providers, key="signal_feed_provider")
+            with col_filter2:
+                # Get unique symbols from database
+                try:
+                    all_signals = get_provider_signals(limit=1000)
+                    if all_signals:
+                        db_symbols = sorted(list(set([s.get("symbol") for s in all_signals if s.get("symbol")])))
+                        filter_symbol = st.selectbox("Symbol", ["All"] + db_symbols, key="signal_feed_symbol")
+                    else:
+                        filter_symbol = st.selectbox("Symbol", ["All"], key="signal_feed_symbol")
+                except:
+                    filter_symbol = st.selectbox("Symbol", ["All"], key="signal_feed_symbol")
+            with col_filter3:
+                filter_action = st.selectbox("Action", ["All", "Buy", "Sell"], key="signal_feed_action")
+            
+            # Refresh button
+            if st.button("🔄 Refresh Feed", key="refresh_signal_feed"):
+                st.rerun()
+            
+            # Fetch latest signals
+            latest_signals = get_provider_signals(
+                provider=filter_provider if filter_provider != "All" else None,
+                symbol=filter_symbol if filter_symbol != "All" else None,
+                limit=50
+            )
+            
+            # Filter by action if needed
+            if filter_action != "All":
+                latest_signals = [s for s in latest_signals if s.get("action", "").lower() == filter_action.lower()]
+            
+            if latest_signals:
+                df_signals = pd.DataFrame(latest_signals)
+                
+                # Show latest signal prominently
+                if len(df_signals) > 0:
+                    latest = df_signals.iloc[0]
+                    action_emoji = "🟢" if latest.get("action", "").lower() == "buy" else "🔴"
+                    st.success(
+                        f"{action_emoji} **Latest Signal**: {latest.get('action', '').upper()} "
+                        f"{latest.get('symbol', '')} @ {latest.get('entry_price', '')} "
+                        f"(Provider: {latest.get('provider_name', 'N/A')})"
+                    )
+                
+                # Display signals table
+                display_cols = ['signal_date', 'symbol', 'action', 'entry_price', 'stop_loss', 'target_1', 'target_2', 'target_3', 'provider_name']
+                available_cols = [c for c in display_cols if c in df_signals.columns]
+                
+                st.dataframe(
+                    df_signals[available_cols].sort_values('signal_date', ascending=False),
+                    use_container_width=True,
+                    hide_index=True
+                )
+                st.caption(f"Showing {len(df_signals)} signal(s). Auto-refresh: Click 'Refresh Feed' to update.")
+            else:
+                st.info("No signals found. Make sure monitoring is active and channels are configured.")
 
     with col_c:
         kpi_options = ["ATR", "Volume", "VWAP", "EMA", "SMA", "RSI", "MACD", "Bollinger Bands", "Stochastic", "Momentum", "Add..."] + (st.session_state.get("kpi_indicators", []) or [])
