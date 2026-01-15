@@ -63,6 +63,10 @@ class TelegramSignalService:
         self.is_connected = False
         self.monitored_channels = {}  # {channel_username: provider_name}
         self.message_handlers = []  # List of callback functions
+        
+        # Timezone objects for conversions
+        self.utc_tz = pytz.timezone('UTC')
+        self.gmt4_tz = pytz.timezone('Asia/Dubai')
     
     async def connect(self) -> bool:
         """
@@ -144,13 +148,14 @@ class TelegramSignalService:
             del self.monitored_channels[channel_username]
             print(f"Removed channel: {channel_username}")
     
-    async def save_signal(self, signal_data: Dict, provider_name: str) -> bool:
+    async def save_signal(self, signal_data: Dict, provider_name: str, channel_username: str = None) -> bool:
         """
         Save parsed signal to database.
         
         Args:
             signal_data: Parsed signal data from parser
             provider_name: Name of the signal provider
+            channel_username: Telegram channel username (optional, will be included in provider_name)
             
         Returns:
             True if saved successfully
@@ -161,11 +166,53 @@ class TelegramSignalService:
                 print("❌ Supabase not configured")
                 return False
             
+            # Build provider_name with channel username if provided
+            final_provider_name = provider_name
+            if channel_username:
+                # Remove @ if present and format as "ProviderName (@channelname)"
+                channel_clean = channel_username.lstrip('@')
+                final_provider_name = f"{provider_name} (@{channel_clean})"
+            
+            # Convert signal_date from UTC to GMT+4 if needed
+            signal_date = signal_data.get("signal_date")
+            if signal_date:
+                # If signal_date is a string, parse it
+                if isinstance(signal_date, str):
+                    try:
+                        # Try parsing ISO format
+                        if 'T' in signal_date:
+                            # Remove timezone info if present and assume UTC
+                            signal_date_str = signal_date.split('+')[0].split('Z')[0].split('.')[0]
+                            dt_utc = datetime.strptime(signal_date_str, '%Y-%m-%dT%H:%M:%S')
+                            dt_utc = self.utc_tz.localize(dt_utc)
+                        else:
+                            dt_utc = datetime.strptime(signal_date, '%Y-%m-%d %H:%M:%S')
+                            dt_utc = self.utc_tz.localize(dt_utc)
+                    except:
+                        # If parsing fails, use current time in UTC
+                        dt_utc = datetime.now(self.utc_tz)
+                elif isinstance(signal_date, datetime):
+                    # If already a datetime, ensure it's UTC
+                    if signal_date.tzinfo is None:
+                        dt_utc = self.utc_tz.localize(signal_date)
+                    else:
+                        dt_utc = signal_date.astimezone(self.utc_tz)
+                else:
+                    # Fallback to current time in UTC
+                    dt_utc = datetime.now(self.utc_tz)
+                
+                # Convert UTC to GMT+4 (Asia/Dubai)
+                dt_gmt4 = dt_utc.astimezone(self.gmt4_tz)
+                signal_date_gmt4 = dt_gmt4.isoformat()
+            else:
+                # If no signal_date provided, use current time in GMT+4
+                signal_date_gmt4 = datetime.now(self.gmt4_tz).isoformat()
+            
             # Prepare record for database
             record = {
-                "provider_name": provider_name,
+                "provider_name": final_provider_name,
                 "symbol": signal_data.get("symbol", "").upper(),
-                "signal_date": signal_data.get("signal_date"),
+                "signal_date": signal_date_gmt4,
                 "action": signal_data.get("action", "").lower(),
                 "entry_price": signal_data.get("entry_price"),
                 "stop_loss": signal_data.get("stop_loss"),
@@ -175,7 +222,7 @@ class TelegramSignalService:
                 "target_4": signal_data.get("target_4"),
                 "target_5": signal_data.get("target_5"),
                 "timezone_offset": "+04:00",
-                "created_at": datetime.now(pytz.timezone('Asia/Dubai')).isoformat()
+                "created_at": datetime.now(self.gmt4_tz).isoformat()
             }
             
             # Remove None values
@@ -193,6 +240,8 @@ class TelegramSignalService:
                 
         except Exception as e:
             print(f"❌ Error saving signal to database: {e}")
+            import traceback
+            traceback.print_exc()
             return False
     
     async def start_monitoring(self, on_new_signal: Optional[Callable] = None):
@@ -216,35 +265,57 @@ class TelegramSignalService:
         @self.client.on(events.NewMessage)
         async def handler(event):
             try:
-                # Get channel username
+                # STEP 1: Check if message is from a monitored channel FIRST
                 chat = await event.get_chat()
                 channel_username = getattr(chat, 'username', None)
+                channel_id = getattr(chat, 'id', None)
                 
-                if not channel_username:
-                    # Try to get channel ID or title
-                    channel_id = getattr(chat, 'id', None)
-                    # Check if this channel is in our monitored list
-                    # We'll match by checking if the message came from a monitored channel
-                    found_provider = None
-                    for ch_username, provider in self.monitored_channels.items():
-                        # Try to match by username or check if we're monitoring this chat
-                        if channel_username == ch_username.replace('@', ''):
-                            found_provider = provider
-                            break
+                # Check if this message is from a monitored channel
+                provider_name = None
+                is_monitored = False
+                
+                if channel_username:
+                    # Normalize channel username (remove @ if present, then add it)
+                    channel_username_clean = channel_username.lower().strip().lstrip('@')
+                    channel_key = f"@{channel_username_clean}"
                     
-                    if not found_provider:
-                        # Try to match by checking message content or channel title
-                        chat_title = getattr(chat, 'title', '')
-                        # For now, we'll process all messages and check if they contain signals
-                        # This is less efficient but works for channels we can't identify by username
-                        pass
+                    # Try exact match first
+                    provider_name = self.monitored_channels.get(channel_key)
+                    
+                    # If not found, try case-insensitive match
+                    if not provider_name:
+                        for monitored_ch, monitored_provider in self.monitored_channels.items():
+                            if monitored_ch.lower().lstrip('@') == channel_username_clean:
+                                provider_name = monitored_provider
+                                channel_key = monitored_ch  # Use the exact key from monitored_channels
+                                break
+                    
+                    if provider_name:
+                        is_monitored = True
+                    # Silently skip unmonitored channels (no logging needed)
                 
-                # Get message text
+                # Skip messages from non-monitored channels immediately
+                if not is_monitored:
+                    return
+                
+                # STEP 2: Now we know it's from a monitored channel - get message text
                 message_text = event.message.message
                 
+                # Log ALL messages from monitored channels for debugging
+                if message_text:
+                    preview = message_text[:100].replace('\n', ' ')
+                    print(f"📩 Message from @{channel_username} ({provider_name}): {preview}...")
+                else:
+                    # Message has no text - check if it has media
+                    if event.message.media:
+                        print(f"🖼️  Image/media message from @{channel_username} ({provider_name}) - skipping")
+                    else:
+                        print(f"⚠️  Empty message from @{channel_username} ({provider_name}) - skipping")
+                    return
+                
+                # STEP 3: Apply filtering to skip non-signal messages
                 # Skip if message is empty or only contains media (images, videos, etc.)
-                if not message_text or not message_text.strip():
-                    # Check if message has media attachments (images, videos, etc.)
+                if not message_text.strip():
                     if event.message.media:
                         # Skip image-only messages or messages with media but no text
                         return
@@ -253,11 +324,13 @@ class TelegramSignalService:
                 
                 # Quick check: Skip if message is too short (likely not a signal)
                 if len(message_text.strip()) < 20:
+                    print(f"   ⏭️  Too short ({len(message_text.strip())} chars) - skipping")
                     return
                 
                 # Quick check: Skip if message doesn't contain any price-like numbers
                 # Signals should have at least one decimal number (price)
                 if not re.search(r'\d+\.\d+', message_text):
+                    print(f"   ⏭️  No price numbers found - skipping")
                     return
                 
                 # Quick check: Skip if message doesn't contain BUY/SELL or currency pair indicators
@@ -270,53 +343,52 @@ class TelegramSignalService:
                 )
                 
                 if not has_trading_keywords:
-                    # Not a trading signal, skip silently
+                    print(f"   ⏭️  No trading keywords found - skipping")
                     return
                 
-                # Check if this message is from a monitored channel
-                provider_name = None
-                if channel_username:
-                    channel_key = f"@{channel_username}"
-                    provider_name = self.monitored_channels.get(channel_key)
-                
-                # If we couldn't identify the provider, try to match by content
-                # or process if we're monitoring all channels
-                if not provider_name:
-                    # Try to find provider by checking all monitored channels
-                    # For now, we'll use a default or try to extract from message
-                    provider_name = "Telegram_Channel"  # Default
-                
-                # Debug: Log potential signal messages from monitored channels (first 200 chars)
-                if provider_name:
-                    preview = message_text[:200].replace('\n', ' ')
-                    print(f"📩 Potential signal from {channel_username or 'unknown'} ({provider_name}): {preview}...")
+                # STEP 4: Message passed all filters - try to parse
+                print(f"   ✅ Potential signal detected - parsing...")
                 
                 # Parse the message
                 parsed_signal = self.parser.parse(message_text)
                 
                 if parsed_signal:
-                    print(f"✅ Signal parsed successfully:")
-                    print(f"   {parsed_signal['action'].upper()} {parsed_signal['symbol']} @ {parsed_signal['entry_price']}")
+                    print(f"   ✅ Signal parsed successfully:")
+                    print(f"      {parsed_signal['action'].upper()} {parsed_signal['symbol']} @ {parsed_signal['entry_price']}")
                     if parsed_signal.get('stop_loss'):
-                        print(f"   SL: {parsed_signal['stop_loss']}")
-                    if parsed_signal.get('target_1'):
-                        print(f"   TP1: {parsed_signal['target_1']}")
+                        print(f"      SL: {parsed_signal['stop_loss']}")
+                    for i in range(1, 6):
+                        if parsed_signal.get(f'target_{i}'):
+                            print(f"      TP{i}: {parsed_signal[f'target_{i}']}")
                     
-                    # Save to database
-                    await self.save_signal(parsed_signal, provider_name)
+                    # Get message date from Telegram (UTC) and use it as signal_date
+                    message_date_utc = event.message.date
+                    if message_date_utc:
+                        # Ensure it's timezone-aware (Telegram dates are UTC)
+                        if message_date_utc.tzinfo is None:
+                            message_date_utc = self.utc_tz.localize(message_date_utc)
+                        else:
+                            message_date_utc = message_date_utc.astimezone(self.utc_tz)
+                        # Update signal_date with Telegram message date (will be converted to GMT+4 in save_signal)
+                        parsed_signal['signal_date'] = message_date_utc.isoformat()
+                    
+                    # Save to database (pass channel_username to include in provider_name)
+                    await self.save_signal(parsed_signal, provider_name, channel_username)
                     
                     # Call callback if provided
                     if on_new_signal:
                         await on_new_signal(parsed_signal, provider_name)
                 else:
                     # Message doesn't contain a signal - log for debugging
-                    if provider_name:
-                        print(f"⚠️ Could not parse signal from message (format may not match expected pattern)")
-                        # Show a preview to help debug
-                        lines = message_text.split('\n')[:5]
-                        print(f"   Message preview (first 5 lines):")
-                        for i, line in enumerate(lines, 1):
-                            print(f"   {i}. {line[:80]}")
+                    print(f"   ❌ Could not parse signal from message")
+                    print(f"   Full message (first 10 lines):")
+                    lines = message_text.split('\n')
+                    for i, line in enumerate(lines[:10], 1):
+                        print(f"      {i}. {line}")
+                    if len(lines) > 10:
+                        remaining = len(lines) - 10
+                        print(f"      ... ({remaining} more lines)")
+                    print("   ---")
                     
             except Exception as e:
                 print(f"❌ Error processing message: {e}")
@@ -359,6 +431,130 @@ class TelegramSignalService:
             
         except Exception as e:
             print(f"❌ Error getting messages: {e}")
+            return []
+    
+    async def fetch_all_channel_messages(
+        self,
+        channel_username: str,
+        limit: Optional[int] = None,
+        min_id: Optional[int] = None,
+        filter_signals_only: bool = False
+    ) -> List[Dict]:
+        """
+        Fetch all messages from a Telegram channel.
+        Useful for exporting all signal formats to Excel.
+        
+        Args:
+            channel_username: Channel username (e.g., "@signal_provider")
+            limit: Maximum number of messages to fetch (None = all available from channel creation)
+            min_id: Minimum message ID to fetch from (for pagination)
+            filter_signals_only: If True, only return messages that contain signals
+            
+        Returns:
+            List of message dictionaries with full text and metadata (and parsed signal if filter_signals_only=True)
+        """
+        if not self.is_connected:
+            await self.connect()
+        
+        try:
+            if not channel_username.startswith('@'):
+                channel_username = f"@{channel_username}"
+            
+            messages = []
+            count = 0
+            signal_count = 0
+            
+            # Prepare parameters for iter_messages (handle None values)
+            # If limit is None, fetch all messages from channel creation
+            iter_params = {}
+            if limit is not None:
+                iter_params['limit'] = limit
+            if min_id is not None:
+                iter_params['min_id'] = min_id
+            
+            async for message in self.client.iter_messages(channel_username, **iter_params):
+                # Get message text (handle empty messages)
+                message_text = message.message or ""
+                
+                # Skip empty messages
+                if not message_text.strip():
+                    continue
+                
+                # If filtering for signals only, apply the same filters as start_monitoring
+                if filter_signals_only:
+                    # Apply signal detection filters
+                    if len(message_text.strip()) < 20:
+                        continue
+                    
+                    # Check for price-like numbers
+                    if not re.search(r'\d+\.\d+', message_text):
+                        continue
+                    
+                    # Check for trading keywords
+                    has_trading_keywords = (
+                        re.search(r'\b(BUY|SELL|buy|sell)\b', message_text, re.IGNORECASE) or
+                        re.search(r'[A-Z]{3,4}/[A-Z]{3,4}|[A-Z]{6,7}', message_text) or
+                        re.search(r'📣', message_text) or
+                        re.search(r'Direction', message_text, re.IGNORECASE) or
+                        re.search(r'Entry', message_text, re.IGNORECASE)
+                    )
+                    
+                    if not has_trading_keywords:
+                        continue
+                    
+                    # Try to parse the signal
+                    parsed_signal = self.parser.parse(message_text)
+                    if not parsed_signal:
+                        continue  # Skip if can't parse as signal
+                    
+                    signal_count += 1
+                else:
+                    parsed_signal = None
+                
+                # Get message date in UTC
+                message_date = message.date
+                if message_date:
+                    if message_date.tzinfo is None:
+                        message_date = self.utc_tz.localize(message_date)
+                    else:
+                        message_date = message_date.astimezone(self.utc_tz)
+                    date_str = message_date.isoformat()
+                else:
+                    date_str = None
+                    message_date = None
+                
+                msg_dict = {
+                    "message_id": message.id,
+                    "text": message_text,
+                    "date": date_str,
+                    "has_media": message.media is not None,
+                    "is_reply": message.is_reply,
+                    "views": getattr(message, 'views', None),
+                    "forwards": getattr(message, 'forwards', None)
+                }
+                
+                # Add parsed signal if available
+                if parsed_signal:
+                    msg_dict["parsed_signal"] = parsed_signal
+                    # Add signal_date from message date
+                    if message_date:
+                        parsed_signal['signal_date'] = message_date.isoformat()
+                
+                messages.append(msg_dict)
+                
+                count += 1
+                if count % 100 == 0:
+                    print(f"   Fetched {count} messages... ({signal_count} signals)" if filter_signals_only else f"   Fetched {count} messages...")
+            
+            print(f"✅ Fetched {len(messages)} total messages from {channel_username}")
+            if filter_signals_only:
+                print(f"   📊 Found {signal_count} signal messages")
+            return messages
+            
+        except Exception as e:
+            print(f"❌ Error fetching messages from {channel_username}: {e}")
+            import traceback
+            traceback.print_exc()
             return []
 
 

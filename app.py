@@ -1554,11 +1554,11 @@ def phase1_foundation_data():
                     elif signal_file:
                         st.warning("Please fill in provider name before uploading")
         
-        # Telegram Channel Configuration
+        # Fetch and Save Telegram Signals
         st.markdown("---")
-        with st.expander("📱 Telegram Signal Channels", expanded=False):
-            st.markdown("### Configure Real-Time Signal Channels")
-            st.info("💡 Connect to Telegram channels to automatically receive and parse trading signals in real-time.")
+        with st.expander("📥 Fetch & Save Telegram Signals", expanded=False):
+            st.markdown("### Fetch and Save Signal Messages from Telegram Channel")
+            st.info("💡 Fetch all signal-related messages from a Telegram channel, save them to the database, and export to Excel.")
             
             # Check if telethon is available
             try:
@@ -1591,94 +1591,185 @@ def phase1_foundation_data():
                 else:
                     st.success("✅ Telegram API credentials configured")
                     
-                    # Channel configuration
-                    from tradingagents.database.db_service import (
-                        get_telegram_channels, 
-                        add_telegram_channel, 
-                        delete_telegram_channel,
-                        update_telegram_channel_status
-                    )
-                    
-                    col_ch1, col_ch2 = st.columns([3, 1])
-                    with col_ch1:
-                        channel_username = st.text_input(
-                            "Channel Username", 
-                            placeholder="@signal_provider",
-                            key="telegram_channel_username",
-                            help="Enter the Telegram channel username (e.g., @signal_provider)"
-                        )
-                    with col_ch2:
-                        provider_name_telegram = st.text_input(
-                            "Provider Name",
-                            placeholder="Provider1",
-                            key="telegram_provider_name",
-                            help="Name of the signal provider"
-                        )
-                    
-                    col_add, col_refresh = st.columns([1, 1])
-                    with col_add:
-                        if st.button("➕ Add Channel", key="add_telegram_channel"):
-                            if channel_username and provider_name_telegram:
-                                result = add_telegram_channel(channel_username, provider_name_telegram)
-                                if result:
-                                    st.success(f"✅ Added channel: {channel_username}")
-                                    st.rerun()
-                                else:
-                                    st.error("❌ Failed to add channel. Check if table exists.")
+                    if telethon_available and telegram_api_id and telegram_api_hash:
+                from tradingagents.dataflows.telegram_signal_service import TelegramSignalService
+                from tradingagents.dataflows.signal_export import export_telegram_messages_to_excel
+                import asyncio
+                
+                        col_provider, col_channel = st.columns([1, 2])
+                        with col_provider:
+                            provider_name_input = st.text_input(
+                                "Provider Name",
+                                placeholder="PipXpert",
+                                key="fetch_provider_name",
+                                help="Name of the signal provider (e.g., PipXpert)"
+                            )
+                        with col_channel:
+                            fetch_channel = st.text_input(
+                                "Channel Username",
+                                placeholder="@signal_provider",
+                                key="fetch_channel_username",
+                                help="Enter the Telegram channel username to fetch signal messages from. Will fetch all messages from channel creation."
+                            )
+                        
+                        st.info("💡 This will fetch all signal-related messages from the channel's creation date, save them to the database, and export them in market data format (symbol, timestamp, open, high, low, close, volume).")
+                        
+                        if st.button("📥 Fetch & Save Signal Messages", key="fetch_telegram_messages"):
+                            if fetch_channel and provider_name_input:
+                                with st.spinner(f"Fetching and saving signal messages from {fetch_channel} (this may take a while for channels with many messages)..."):
+                                    try:
+                                        # Create service instance
+                                        service = TelegramSignalService()
+                                        
+                                        # Connect and fetch messages (all from channel creation, signals only)
+                                        async def fetch_and_save_messages():
+                                            await service.connect()
+                                            messages = await service.fetch_all_channel_messages(
+                                                fetch_channel,
+                                                limit=None,  # Fetch all messages from channel creation
+                                                filter_signals_only=True  # Only signal-related messages
+                                            )
+                                            
+                                            # Save signals to database
+                                            saved_count = 0
+                                            for msg in messages:
+                                                parsed_signal = msg.get('parsed_signal')
+                                                if parsed_signal:
+                                                    # Save signal to database
+                                                    success = await service.save_signal(
+                                                        parsed_signal,
+                                                        provider_name_input,
+                                                        fetch_channel
+                                                    )
+                                                    if success:
+                                                        saved_count += 1
+                                            
+                                            await service.disconnect()
+                                            return messages, saved_count
+                                        
+                                        messages, saved_count = asyncio.run(fetch_and_save_messages())
+                                        
+                                        if messages:
+                                            st.success(f"✅ Fetched {len(messages)} signal messages from {fetch_channel}")
+                                            st.success(f"💾 Saved {saved_count} signals to database")
+                                            
+                                            # Export to Excel in market data format
+                                            excel_file = export_telegram_messages_to_excel(
+                                                messages, 
+                                                fetch_channel,
+                                                format_as_market_data=True
+                                            )
+                                            
+                                            # Download button
+                                            channel_clean = fetch_channel.lstrip('@').replace('/', '_')
+                                            filename = f"telegram_signals_{channel_clean}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+                                            
+                                            st.download_button(
+                                                label="📥 Download Signals as Excel (Market Data Format)",
+                                                data=excel_file.getvalue(),
+                                                file_name=filename,
+                                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                                key="download_telegram_messages"
+                                            )
+                                            
+                                            # Show preview
+                                            st.markdown("#### Signal Preview (First 10)")
+                                            # Convert to DataFrame for preview
+                                            preview_data = []
+                                            for msg in messages[:10]:
+                                                signal = msg.get('parsed_signal', {})
+                                                if signal:
+                                                    preview_data.append({
+                                                        'symbol': signal.get('symbol', ''),
+                                                        'action': signal.get('action', ''),
+                                                        'entry_price': signal.get('entry_price', ''),
+                                                        'stop_loss': signal.get('stop_loss', ''),
+                                                        'target_1': signal.get('target_1', ''),
+                                                        'date': msg.get('date', '')
+                                                    })
+                                            
+                                            if preview_data:
+                                                df_preview = pd.DataFrame(preview_data)
+                                                st.dataframe(df_preview, use_container_width=True)
+                                        else:
+                                            st.warning(f"No signal messages found in {fetch_channel}")
+                                    except Exception as e:
+                                        st.error(f"❌ Error fetching messages: {str(e)}")
+                                        import traceback
+                                        st.code(traceback.format_exc())
                             else:
-                                st.warning("⚠️ Please enter both channel username and provider name")
-                    
-                    with col_refresh:
-                        if st.button("🔄 Refresh", key="refresh_telegram_channels"):
-                            st.rerun()
-                    
-                    # List active channels
-                    st.markdown("#### Active Channels")
-                    channels = get_telegram_channels()
-                    
-                    if channels:
-                        for channel in channels:
-                            col_status, col_info, col_actions = st.columns([1, 3, 2])
-                            with col_status:
-                                status_icon = "🟢" if channel.get("is_active") else "🔴"
-                                st.write(status_icon)
-                            with col_info:
-                                st.write(f"**{channel['channel_username']}** ({channel['provider_name']})")
-                                if channel.get("last_check_at"):
-                                    st.caption(f"Last check: {channel['last_check_at'][:19]}")
-                            with col_actions:
-                                if channel.get("is_active"):
-                                    if st.button("⏸️ Pause", key=f"pause_{channel['id']}"):
-                                        update_telegram_channel_status(channel['channel_username'], False)
-                                        st.rerun()
-                                else:
-                                    if st.button("▶️ Resume", key=f"resume_{channel['id']}"):
-                                        update_telegram_channel_status(channel['channel_username'], True)
-                                        st.rerun()
-                                if st.button("🗑️ Delete", key=f"delete_{channel['id']}"):
-                                    delete_telegram_channel(channel['channel_username'])
-                                    st.rerun()
-                    else:
-                        st.info("No Telegram channels configured. Add a channel above to start monitoring.")
-                    
-                    # Instructions for running the worker
-                    st.markdown("---")
-                    st.markdown("#### 🚀 Start Monitoring")
-                    st.info("""
-                    **To start monitoring Telegram channels:**
-                    
-                    1. Add channels above
-                    2. Run the Telegram worker in a separate terminal:
-                       ```bash
-                       python -m tradingagents.dataflows.telegram_signal_worker
-                       ```
-                    
-                    The worker will:
-                    - Connect to Telegram
-                    - Monitor all active channels
-                    - Parse incoming signals
-                    - Save signals to database automatically
-                    """)
+                                st.warning("⚠️ Please enter both provider name and channel username")
+        
+        # Export Signals to Excel
+        with st.expander("📊 Export Signals to Excel", expanded=False):
+            st.markdown("### Export All Signals from Database")
+            st.info("💡 Export all signals from the database to Excel format for backup or analysis.")
+            
+            from tradingagents.dataflows.signal_export import export_signals_to_excel
+            from tradingagents.database.db_service import get_provider_signals
+            
+            col_export1, col_export2, col_export3 = st.columns(3)
+            with col_export1:
+                export_provider = st.selectbox(
+                    "Provider (Optional)",
+                    ["All"] + (merged_providers if 'merged_providers' in locals() else []),
+                    key="export_provider_filter"
+                )
+            with col_export2:
+                # Get unique symbols from database
+                try:
+                    all_signals = get_provider_signals(limit=10000)
+                    unique_symbols = sorted(list(set([s.get("symbol") for s in all_signals if s.get("symbol")])))
+                    export_symbol = st.selectbox(
+                        "Symbol (Optional)",
+                        ["All"] + unique_symbols,
+                        key="export_symbol_filter"
+                    )
+                except:
+                    export_symbol = st.selectbox("Symbol (Optional)", ["All"], key="export_symbol_filter")
+            with col_export3:
+                export_limit = st.number_input(
+                    "Limit (Optional)",
+                    min_value=None,
+                    max_value=100000,
+                    value=None,
+                    key="export_limit",
+                    help="Leave empty to export all signals"
+                )
+            
+            if st.button("📊 Export Signals to Excel", key="export_signals_btn"):
+                with st.spinner("Exporting signals..."):
+                    try:
+                        provider_filter = None if export_provider == "All" else export_provider
+                        symbol_filter = None if export_symbol == "All" else export_symbol
+                        
+                        excel_file = export_signals_to_excel(
+                            symbol=symbol_filter,
+                            provider=provider_filter,
+                            limit=export_limit
+                        )
+                        
+                        # Generate filename
+                        filename_parts = ["signals"]
+                        if provider_filter:
+                            filename_parts.append(provider_filter.replace(" ", "_"))
+                        if symbol_filter:
+                            filename_parts.append(symbol_filter)
+                        filename_parts.append(datetime.now().strftime('%Y%m%d_%H%M%S'))
+                        filename = "_".join(filename_parts) + ".xlsx"
+                        
+                        st.success("✅ Signals exported successfully!")
+                        st.download_button(
+                            label="📥 Download Excel File",
+                            data=excel_file.getvalue(),
+                            file_name=filename,
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key="download_signals_excel"
+                        )
+                    except Exception as e:
+                        st.error(f"❌ Error exporting signals: {str(e)}")
+                        import traceback
+                        st.code(traceback.format_exc())
         
         # View Stored Signals for Selected Provider
         if selected_provider and selected_provider != "Add...":
@@ -1710,81 +1801,6 @@ def phase1_foundation_data():
                 else:
                     st.info(f"No stored signals found for {selected_provider}.")
         
-        # Real-Time Signal Feed
-        st.markdown("---")
-        with st.expander("🔴 Live Signal Feed", expanded=False):
-            st.markdown("### Real-Time Trading Signals")
-            
-            from tradingagents.database.db_service import get_provider_signals
-            
-            # Filter options
-            col_filter1, col_filter2, col_filter3 = st.columns(3)
-            with col_filter1:
-                all_providers = ["All"] + (st.session_state.get("signal_providers", []) or []) + ["PipXpert"]
-                # Get unique providers from database
-                try:
-                    all_signals = get_provider_signals(limit=1000)
-                    if all_signals:
-                        db_providers = list(set([s.get("provider_name") for s in all_signals if s.get("provider_name")]))
-                        all_providers = ["All"] + sorted(set(all_providers[1:] + db_providers))
-                except:
-                    pass
-                
-                filter_provider = st.selectbox("Provider", all_providers, key="signal_feed_provider")
-            with col_filter2:
-                # Get unique symbols from database
-                try:
-                    all_signals = get_provider_signals(limit=1000)
-                    if all_signals:
-                        db_symbols = sorted(list(set([s.get("symbol") for s in all_signals if s.get("symbol")])))
-                        filter_symbol = st.selectbox("Symbol", ["All"] + db_symbols, key="signal_feed_symbol")
-                    else:
-                        filter_symbol = st.selectbox("Symbol", ["All"], key="signal_feed_symbol")
-                except:
-                    filter_symbol = st.selectbox("Symbol", ["All"], key="signal_feed_symbol")
-            with col_filter3:
-                filter_action = st.selectbox("Action", ["All", "Buy", "Sell"], key="signal_feed_action")
-            
-            # Refresh button
-            if st.button("🔄 Refresh Feed", key="refresh_signal_feed"):
-                st.rerun()
-            
-            # Fetch latest signals
-            latest_signals = get_provider_signals(
-                provider=filter_provider if filter_provider != "All" else None,
-                symbol=filter_symbol if filter_symbol != "All" else None,
-                limit=50
-            )
-            
-            # Filter by action if needed
-            if filter_action != "All":
-                latest_signals = [s for s in latest_signals if s.get("action", "").lower() == filter_action.lower()]
-            
-            if latest_signals:
-                df_signals = pd.DataFrame(latest_signals)
-                
-                # Show latest signal prominently
-                if len(df_signals) > 0:
-                    latest = df_signals.iloc[0]
-                    action_emoji = "🟢" if latest.get("action", "").lower() == "buy" else "🔴"
-                    st.success(
-                        f"{action_emoji} **Latest Signal**: {latest.get('action', '').upper()} "
-                        f"{latest.get('symbol', '')} @ {latest.get('entry_price', '')} "
-                        f"(Provider: {latest.get('provider_name', 'N/A')})"
-                    )
-                
-                # Display signals table
-                display_cols = ['signal_date', 'symbol', 'action', 'entry_price', 'stop_loss', 'target_1', 'target_2', 'target_3', 'provider_name']
-                available_cols = [c for c in display_cols if c in df_signals.columns]
-                
-                st.dataframe(
-                    df_signals[available_cols].sort_values('signal_date', ascending=False),
-                    use_container_width=True,
-                    hide_index=True
-                )
-                st.caption(f"Showing {len(df_signals)} signal(s). Auto-refresh: Click 'Refresh Feed' to update.")
-            else:
-                st.info("No signals found. Make sure monitoring is active and channels are configured.")
 
     with col_c:
         kpi_options = ["ATR", "Volume", "VWAP", "EMA", "SMA", "RSI", "MACD", "Bollinger Bands", "Stochastic", "Momentum", "Add..."] + (st.session_state.get("kpi_indicators", []) or [])

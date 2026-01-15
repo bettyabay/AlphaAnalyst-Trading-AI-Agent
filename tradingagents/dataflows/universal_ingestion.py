@@ -542,7 +542,7 @@ def ingest_from_polygon_api(api_symbol, asset_class, db_symbol=None, auto_resume
             _last_polygon_call = time.time()
         
         # Helper function to process and insert a single chunk dataframe
-        def process_and_insert_chunk(chunk_df, chunk_date_str, target_symbol, target_table, chunk_start_utc=None):
+        def process_and_insert_chunk(chunk_df, chunk_date_str, target_symbol, target_table, resume_point_utc=None):
             """Process a chunk dataframe and insert it into the database immediately
             
             Args:
@@ -550,8 +550,8 @@ def ingest_from_polygon_api(api_symbol, asset_class, db_symbol=None, auto_resume
                 chunk_date_str: Date string for logging
                 target_symbol: Symbol to store in DB
                 target_table: Target table name
-                chunk_start_utc: Actual start time for this chunk (timezone-aware UTC datetime)
-                              Used to filter out records before resume point
+                resume_point_utc: Not used for filtering (kept for compatibility)
+                                Since we use upsert, duplicates are handled by primary key (symbol, timestamp)
             """
             if chunk_df.empty:
                 return 0
@@ -560,20 +560,10 @@ def ingest_from_polygon_api(api_symbol, asset_class, db_symbol=None, auto_resume
             utc_tz = pytz.timezone('UTC')
             gmt4_tz = pytz.timezone('Asia/Dubai')
             
-            # Convert chunk_start to timezone-aware if provided (for filtering)
-            if chunk_start_utc is not None:
-                if chunk_start_utc.tzinfo is None:
-                    chunk_start_utc_aware = utc_tz.localize(chunk_start_utc)
-                else:
-                    chunk_start_utc_aware = chunk_start_utc.astimezone(utc_tz)
-            else:
-                chunk_start_utc_aware = None
-            
             # Ensure timestamp is the index
             if "timestamp" in chunk_df.columns:
                 chunk_df = chunk_df.set_index("timestamp")
             
-            filtered_count = 0
             for timestamp, row in chunk_df.iterrows():
                 if pd.isna(row.get("close")):
                     continue
@@ -584,12 +574,6 @@ def ingest_from_polygon_api(api_symbol, asset_class, db_symbol=None, auto_resume
                         ts_utc = utc_tz.localize(timestamp)
                     else:
                         ts_utc = timestamp.astimezone(utc_tz)
-                    
-                    # CRITICAL: Filter out records before chunk_start (resume point)
-                    # This prevents re-ingesting old data when resuming mid-day
-                    if chunk_start_utc_aware is not None and ts_utc < chunk_start_utc_aware:
-                        filtered_count += 1
-                        continue
                     
                     ts_gmt4 = ts_utc.astimezone(gmt4_tz)
                     
@@ -615,12 +599,6 @@ def ingest_from_polygon_api(api_symbol, asset_class, db_symbol=None, auto_resume
                         print(f"⚠️ OHLC validation failed for {ts_gmt4.strftime('%Y-%m-%d %H:%M:%S')}: {', '.join(validation_errors)}. Skipping record.")
                         continue
                     
-                    # CRITICAL: Filter out records before chunk_start (resume point)
-                    # This prevents re-ingesting old data when resuming mid-day
-                    # chunk_start_utc_aware is passed from the outer scope
-                    if chunk_start_utc_aware is not None and ts_utc < chunk_start_utc_aware:
-                        continue  # Skip records before resume point
-                    
                     # Ensure timestamp doesn't exceed current UTC time
                     if ts_utc > now_utc:
                         # Skip records in the future
@@ -640,9 +618,8 @@ def ingest_from_polygon_api(api_symbol, asset_class, db_symbol=None, auto_resume
                     print(f"⚠️ Error processing row at {timestamp}: {e}")
                     continue
             
-            # Log if we filtered out records before resume point
-            if filtered_count > 0 and chunk_start_utc_aware is not None:
-                print(f"🔍 Filtered out {filtered_count} records before resume point ({chunk_start_utc_aware.strftime('%Y-%m-%d %H:%M:%S')} UTC)")
+            # Note: We don't filter by resume point anymore since upsert handles duplicates
+            # All valid records from the fetched data will be ingested
             
             if not db_rows:
                 return 0
@@ -732,11 +709,10 @@ def ingest_from_polygon_api(api_symbol, asset_class, db_symbol=None, auto_resume
                         print(f"✅ Fetched {len(chunk_df)} records for {chunk_s_str} to {chunk_e_str}")
                         
                         # Insert immediately after fetching
-                        # Pass chunk_start (timezone-aware) to filter out records before resume point
-                        # Convert chunk_start to timezone-aware UTC for comparison
-                        chunk_start_utc_aware = utc_tz.localize(chunk_start) if chunk_start.tzinfo is None else chunk_start.astimezone(utc_tz)
+                        # Note: We don't filter by resume point anymore - upsert handles duplicates via primary key
+                        # All valid records from the fetched data will be ingested
                         try:
-                            inserted_count = process_and_insert_chunk(chunk_df, chunk_s_str, target_symbol, target_table, chunk_start_utc_aware)
+                            inserted_count = process_and_insert_chunk(chunk_df, chunk_s_str, target_symbol, target_table, resume_point_utc=None)
                             if inserted_count > 0:
                                 total_inserted_all_chunks += inserted_count
                                 print(f"💾 Inserted {inserted_count} records for {chunk_s_str} to {chunk_e_str} (total so far: {total_inserted_all_chunks})")
