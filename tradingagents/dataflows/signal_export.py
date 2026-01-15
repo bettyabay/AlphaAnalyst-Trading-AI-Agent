@@ -158,7 +158,8 @@ def export_signals_to_excel(
 def export_telegram_messages_to_excel(
     messages: List[Dict], 
     channel_username: str,
-    format_as_market_data: bool = False
+    format_as_market_data: bool = False,
+    format_as_signal_provider: bool = False
 ) -> BytesIO:
     """
     Export raw Telegram messages to Excel format.
@@ -168,6 +169,7 @@ def export_telegram_messages_to_excel(
         messages: List of message dictionaries from fetch_all_channel_messages
         channel_username: Channel username for filename
         format_as_market_data: If True, export parsed signals in market data format (symbol, timestamp, open, high, low, close, volume)
+        format_as_signal_provider: If True, export in signal provider format (Date, Action, Currency Pair, Entry Price, Stop Loss, Target 1, etc.)
         
     Returns:
         BytesIO object containing Excel file
@@ -181,8 +183,103 @@ def export_telegram_messages_to_excel(
         output.seek(0)
         return output
     
+    # If format_as_signal_provider, convert signals to signal provider format (for upload via Signal Provider section)
+    if format_as_signal_provider:
+        signal_provider_rows = []
+        for msg in messages:
+            parsed_signal = msg.get('parsed_signal')
+            if not parsed_signal:
+                continue
+            
+            # Extract signal data
+            symbol = parsed_signal.get('symbol', '').upper()
+            signal_date = parsed_signal.get('signal_date') or msg.get('date')
+            action = parsed_signal.get('action', '').capitalize()  # Buy or Sell
+            entry_price = parsed_signal.get('entry_price')
+            stop_loss = parsed_signal.get('stop_loss')
+            target_1 = parsed_signal.get('target_1')
+            target_2 = parsed_signal.get('target_2')
+            target_3 = parsed_signal.get('target_3')
+            target_4 = parsed_signal.get('target_4')
+            target_5 = parsed_signal.get('target_5')
+            
+            if not symbol or not signal_date or not action or entry_price is None:
+                continue
+            
+            # Parse timestamp and convert to timezone-naive for Excel
+            try:
+                if isinstance(signal_date, str):
+                    ts = pd.to_datetime(signal_date, errors='coerce')
+                else:
+                    ts = pd.to_datetime(signal_date, errors='coerce')
+                
+                if pd.isna(ts):
+                    continue
+                
+                # Convert to timezone-naive (Excel doesn't support timezone-aware)
+                if isinstance(ts, pd.Timestamp):
+                    if ts.tz is not None:
+                        ts = ts.tz_localize(None)
+                    # Format as datetime for Excel
+                    date_value = ts
+                elif hasattr(ts, 'tzinfo') and ts.tzinfo is not None:
+                    # Python datetime with timezone
+                    date_value = ts.replace(tzinfo=None)
+                else:
+                    # Already timezone-naive
+                    date_value = ts
+            except Exception as e:
+                # Fallback: skip this record
+                continue
+            
+            # Build row in signal provider format
+            row = {
+                'Date': date_value,
+                'Action': action,
+                'Currency Pair': symbol,
+                'Entry Price': float(entry_price) if entry_price is not None else None
+            }
+            
+            # Add optional fields
+            if stop_loss is not None:
+                row['Stop Loss'] = float(stop_loss)
+            if target_1 is not None:
+                row['Target 1'] = float(target_1)
+            if target_2 is not None:
+                row['Target 2'] = float(target_2)
+            if target_3 is not None:
+                row['Target 3'] = float(target_3)
+            if target_4 is not None:
+                row['Target 4'] = float(target_4)
+            if target_5 is not None:
+                row['Target 5'] = float(target_5)
+            
+            signal_provider_rows.append(row)
+        
+        if not signal_provider_rows:
+            # Return empty Excel file
+            df = pd.DataFrame()
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                df.to_excel(writer, index=False, sheet_name='Signals')
+            output.seek(0)
+            return output
+        
+        df = pd.DataFrame(signal_provider_rows)
+        
+        # Ensure column order matches signal provider format
+        column_order = ['Date', 'Action', 'Currency Pair', 'Entry Price', 'Stop Loss', 
+                       'Target 1', 'Target 2', 'Target 3', 'Target 4', 'Target 5']
+        available_columns = [col for col in column_order if col in df.columns]
+        remaining_columns = [col for col in df.columns if col not in available_columns]
+        final_columns = available_columns + remaining_columns
+        df = df[final_columns]
+        
+        # Sort by Date
+        df = df.sort_values('Date')
+        
     # If format_as_market_data, convert signals to market data format
-    if format_as_market_data:
+    elif format_as_market_data:
         market_data_rows = []
         for msg in messages:
             parsed_signal = msg.get('parsed_signal')
@@ -319,14 +416,30 @@ def export_telegram_messages_to_excel(
     
     # Create Excel file in memory
     output = BytesIO()
-    sheet_name = 'Signals' if format_as_market_data else 'Messages'
+    if format_as_signal_provider:
+        sheet_name = 'Signals'
+    elif format_as_market_data:
+        sheet_name = 'Signals'
+    else:
+        sheet_name = 'Messages'
+    
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name=sheet_name)
         
         # Auto-adjust column widths
         worksheet = writer.sheets[sheet_name]
         for idx, col in enumerate(df.columns):
-            if format_as_market_data:
+            if format_as_signal_provider:
+                # Signal provider format: adjust widths
+                if col == 'Date':
+                    worksheet.column_dimensions[chr(65 + idx)].width = 20
+                elif col == 'Currency Pair':
+                    worksheet.column_dimensions[chr(65 + idx)].width = 15
+                elif col == 'Action':
+                    worksheet.column_dimensions[chr(65 + idx)].width = 10
+                else:
+                    worksheet.column_dimensions[chr(65 + idx)].width = 12
+            elif format_as_market_data:
                 # Market data format: standard widths
                 if col == 'timestamp':
                     worksheet.column_dimensions[chr(65 + idx)].width = 20
