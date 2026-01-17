@@ -164,9 +164,22 @@ class TelegramSignalService:
     async def disconnect(self):
         """Disconnect from Telegram."""
         if self.client and self.is_connected:
-            await self.client.disconnect()
-            self.is_connected = False
-            print("Disconnected from Telegram")
+            try:
+                await self.client.disconnect()
+                self.is_connected = False
+                print("Disconnected from Telegram")
+            except Exception as e:
+                # Handle database lock errors gracefully (common in deployed environments)
+                error_str = str(e).lower()
+                if "database is locked" in error_str or "locked" in error_str:
+                    # This is safe to ignore - the connection is still closed, just state wasn't saved
+                    # In deployed environments, this is common due to concurrent access
+                    self.is_connected = False
+                    # Don't print warning - it's expected in multi-instance deployments
+                else:
+                    # Log other errors but don't crash
+                    print(f"⚠️ Warning during disconnect: {e}")
+                    self.is_connected = False
     
     def add_channel(self, channel_username: str, provider_name: str):
         """

@@ -1613,14 +1613,24 @@ def phase1_foundation_data():
                                     
                                     # Connect and fetch messages (all from channel creation, signals only)
                                     async def fetch_messages():
-                                        await service.connect()
-                                        messages = await service.fetch_all_channel_messages(
-                                            fetch_channel,
-                                            limit=None,  # Fetch all messages from channel creation
-                                            filter_signals_only=True  # Only signal-related messages
-                                        )
-                                        await service.disconnect()
-                                        return messages
+                                        try:
+                                            await service.connect()
+                                            messages = await service.fetch_all_channel_messages(
+                                                fetch_channel,
+                                                limit=None,  # Fetch all messages from channel creation
+                                                filter_signals_only=True  # Only signal-related messages
+                                            )
+                                            return messages
+                                        finally:
+                                            # Always try to disconnect, even if there's an error
+                                            try:
+                                                await service.disconnect()
+                                            except Exception as disconnect_error:
+                                                # Ignore database lock errors during disconnect
+                                                error_str = str(disconnect_error).lower()
+                                                if "database is locked" not in error_str and "locked" not in error_str:
+                                                    # Only log non-lock errors
+                                                    print(f"Warning during disconnect: {disconnect_error}")
                                     
                                     messages = asyncio.run(fetch_messages())
                                     
