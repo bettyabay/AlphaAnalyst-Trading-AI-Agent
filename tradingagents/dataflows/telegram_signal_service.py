@@ -57,6 +57,18 @@ class TelegramSignalService:
                 "Set TELEGRAM_API_ID and TELEGRAM_API_HASH in .env or pass as arguments."
             )
         
+        # Check if session file should be loaded from base64 environment variable
+        session_b64 = os.getenv("TELEGRAM_SESSION_B64")
+        if session_b64 and not os.path.exists(self.session_file):
+            try:
+                import base64
+                session_data = base64.b64decode(session_b64)
+                with open(self.session_file, "wb") as f:
+                    f.write(session_data)
+                print("✅ Loaded session file from TELEGRAM_SESSION_B64")
+            except Exception as e:
+                print(f"⚠️ Failed to load session from TELEGRAM_SESSION_B64: {e}")
+        
         # Initialize Telegram client
         self.client = TelegramClient(self.session_file, int(self.api_id), self.api_hash)
         self.parser = TelegramSignalParser()
@@ -90,7 +102,20 @@ class TelegramSignalService:
             phone = self.phone_number
             if not phone:
                 print("📱 First-time setup: Phone number required for authentication")
-                phone = input("Enter your phone number (with country code, e.g., +1234567890): ").strip()
+                # Check if we're in an interactive environment
+                try:
+                    import sys
+                    if sys.stdin.isatty():
+                        phone = input("Enter your phone number (with country code, e.g., +1234567890): ").strip()
+                    else:
+                        print("❌ Non-interactive environment detected. Cannot prompt for phone number.")
+                        print("💡 Please set TELEGRAM_PHONE_NUMBER environment variable or upload session file.")
+                        return False
+                except:
+                    print("❌ Cannot read input in this environment.")
+                    print("💡 Please set TELEGRAM_PHONE_NUMBER environment variable or upload session file.")
+                    return False
+                
                 if not phone:
                     print("❌ Phone number is required for first-time authentication")
                     return False
@@ -103,7 +128,26 @@ class TelegramSignalService:
             
         except SessionPasswordNeededError:
             print("⚠️ Two-factor authentication required.")
-            password = input("Enter your 2FA password: ")
+            # Check for 2FA password in environment
+            password = os.getenv("TELEGRAM_2FA_PASSWORD")
+            if not password:
+                try:
+                    import sys
+                    if sys.stdin.isatty():
+                        password = input("Enter your 2FA password: ")
+                    else:
+                        print("❌ Non-interactive environment detected. Cannot prompt for 2FA password.")
+                        print("💡 Please set TELEGRAM_2FA_PASSWORD environment variable.")
+                        return False
+                except:
+                    print("❌ Cannot read input in this environment.")
+                    print("💡 Please set TELEGRAM_2FA_PASSWORD environment variable.")
+                    return False
+            
+            if not password:
+                print("❌ 2FA password is required")
+                return False
+                
             await self.client.sign_in(password=password)
             self.is_connected = True
             print("✅ Connected to Telegram (with 2FA)")
