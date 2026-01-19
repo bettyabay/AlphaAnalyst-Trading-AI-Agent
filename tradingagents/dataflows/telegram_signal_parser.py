@@ -57,6 +57,22 @@ class TelegramSignalParser:
         if entry_price is None or not isinstance(entry_price, (int, float)):
             return False
         
+        # Reject single-digit or very small integers as entry prices (likely not a real price)
+        # Forex prices are typically 1.0+ (like 1.1240) or 100+ (like 4595.92 for XAUUSD)
+        # Reject anything less than 0.1 or single-digit integers less than 10
+        if isinstance(entry_price, (int, float)):
+            if entry_price < 0.1:
+                return False
+            # Reject single-digit integers (1-9) as they're likely not prices
+            if isinstance(entry_price, int) and 1 <= entry_price <= 9:
+                return False
+            # Reject if it's a float but less than 1.0 (unless it's a very small decimal like 0.95)
+            if isinstance(entry_price, float) and 0.1 <= entry_price < 1.0:
+                # Allow small decimals like 0.95, 0.85 (some forex pairs can be below 1.0)
+                # But reject if it's clearly an integer like 3.0
+                if entry_price == int(entry_price) and entry_price < 10:
+                    return False
+        
         stop_loss = signal_data.get('stop_loss')
         if stop_loss is None or not isinstance(stop_loss, (int, float)):
             return False
@@ -112,23 +128,45 @@ class TelegramSignalParser:
         if not (has_direction and has_symbol and has_price):
             return None
         
-        # Try structured format parsing first (most common - PipXpert format)
-        parsed = self._parse_structured_format(message_text)
-        if parsed and self._validate_signal(parsed):
-            return parsed
-        
-        # Try inline format: SYMBOL ACTION ENTRY (Format 1 & 2)
-        parsed = self._parse_inline_format(message_text)
-        if parsed and self._validate_signal(parsed):
-            return parsed
+        # Try range format with explanation text FIRST (very specific pattern)
+        # This handles "at any price between X until Y" format
+        # If this pattern is detected, ONLY try this parser to avoid incorrect matches
+        if 'at any price between' in message_text.lower() or ('between' in message_text.lower() and 'until' in message_text.lower()):
+            parsed = self._parse_range_with_explanation(message_text)
+            if parsed and self._validate_signal(parsed):
+                return parsed
+            # If range format parser fails, still try other parsers as fallback
         
         # Try range format: "at any price between X till Y" (Format 3)
         parsed = self._parse_range_format(message_text)
         if parsed and self._validate_signal(parsed):
             return parsed
         
+        # Skip structured format if message contains range-like patterns to avoid incorrect matches
+        has_range_pattern = (
+            'between' in message_text.lower() and 
+            ('until' in message_text.lower() or 'till' in message_text.lower() or 'and' in message_text.lower())
+        )
+        
+        # Try structured format parsing (most common - PipXpert format)
+        # But skip if message has range patterns (already tried range parsers above)
+        if not has_range_pattern:
+            parsed = self._parse_structured_format(message_text)
+            if parsed and self._validate_signal(parsed):
+                return parsed
+        
+        # Try inline format: SYMBOL ACTION ENTRY (Format 1 & 2)
+        parsed = self._parse_inline_format(message_text)
+        if parsed and self._validate_signal(parsed):
+            return parsed
+        
         # Try alternative formats
         parsed = self._parse_compact_format(message_text)
+        if parsed and self._validate_signal(parsed):
+            return parsed
+        
+        # Try emoji format: XAUUSD BUY_ 4595 _ 92 with TP¹, TP², TP³
+        parsed = self._parse_emoji_format(message_text)
         if parsed and self._validate_signal(parsed):
             return parsed
         
@@ -230,22 +268,70 @@ class TelegramSignalParser:
                 except ValueError:
                     pass
             
-            # Pattern 2: "@ 1.3493" or "at 1.3493"
+            # Pattern 2: "@ 1.3493" or "at 1.3493" (but only match actual prices, not small integers)
             if not entry_price:
-                entry_match = re.search(r'[@\s]+([\d.]+)', text, re.IGNORECASE)
+                # Match "@" or "at" followed by a price (decimal with 2+ places or 4+ digit integer)
+                entry_match = re.search(r'[@\s]at\s+([\d.]+)', text, re.IGNORECASE)
                 if entry_match:
-                    try:
-                        entry_price = float(entry_match.group(1).strip())
-                    except ValueError:
-                        pass
+                    potential_price = entry_match.group(1).strip()
+                    # Only accept if it's a decimal with 2+ places or 4+ digit integer
+                    if re.match(r'\d+\.\d{2,6}|\d{4,}', potential_price):
+                        # Check it's not in a context like "3 Take Profit" or "3 trades"
+                        price_pattern = re.escape(potential_price)
+                        context_patterns = [
+                            rf'\b{price_pattern}\s+(?:Take\s+Profit|trades?|trade|targets?|position|minutes?)',
+                            rf'(?:Take\s+Profit|trades?|trade|targets?|position|minutes?).*?\b{price_pattern}',
+                        ]
+                        is_price = True
+                        for ctx_pattern in context_patterns:
+                            if re.search(ctx_pattern, text, re.IGNORECASE):
+                                is_price = False
+                                break
+                        if is_price:
+                            try:
+                                entry_price = float(potential_price)
+                            except ValueError:
+                                pass
             
             # Pattern 3: First price-like number after symbol/direction (decimal or integer)
+            # But avoid matching small integers that are clearly not prices (like "3" from "3 Take Profit Targets")
             if not entry_price:
-                # Find all numbers (decimals or large integers)
+                # Find all numbers (decimals with 2+ decimal places, or integers with 4+ digits)
+                # Exclude numbers that are clearly not prices (like "3" from "3 Take Profit", "3 trades", etc.)
                 price_matches = re.findall(r'\b(\d+\.\d{2,6}|\d{4,})\b', text)
-                if price_matches:
+                
+                # Filter out numbers that are clearly not prices
+                # Skip numbers that appear in context like "3 Take Profit", "3 trades", "1st trade", etc.
+                filtered_prices = []
+                for price_str in price_matches:
+                    # Check if this number appears in a context that suggests it's not a price
+                    price_pattern = re.escape(price_str)
+                    # Look for context that suggests it's not a price
+                    context_patterns = [
+                        rf'\b{price_pattern}\s+(?:Take\s+Profit|trades?|trade|targets?|position|minutes?|quiz)',
+                        rf'(?:Take\s+Profit|trades?|trade|targets?|position|minutes?|quiz).*?\b{price_pattern}',
+                        rf'\b(?:1st|2nd|3rd|4th|5th|first|second|third|fourth|fifth)\s+.*?\b{price_pattern}',
+                        rf'\btrade\s+{price_pattern}',  # "trade 1", "trade 2", "trade 3"
+                        rf'\b{price_pattern}\s*%',  # Percentage
+                        rf'Risk\s+{price_pattern}',  # Risk percentage
+                        rf'How\s+to\s+.*?\b{price_pattern}',  # "How to trade the signal with 3..."
+                        rf'signal\s+with\s+{price_pattern}',  # "signal with 3 targets"
+                        rf'place\s+{price_pattern}',  # "place 3 trades"
+                        rf'open\s+{price_pattern}',  # "open 3 trade position"
+                    ]
+                    
+                    is_price = True
+                    for ctx_pattern in context_patterns:
+                        if re.search(ctx_pattern, text, re.IGNORECASE):
+                            is_price = False
+                            break
+                    
+                    if is_price:
+                        filtered_prices.append(price_str)
+                
+                if filtered_prices:
                     try:
-                        entry_price = float(price_matches[0])
+                        entry_price = float(filtered_prices[0])
                     except (ValueError, IndexError):
                         pass
             
@@ -390,13 +476,38 @@ class TelegramSignalParser:
                 return None
             
             # Look for price patterns (numbers with decimals or large integers)
-            prices = re.findall(r'\b(\d+\.\d{2,6}|\d{4,})\b', text)
-            if len(prices) < 2:  # Need at least entry and stop loss
+            # Filter out numbers that are clearly not prices
+            price_matches = re.findall(r'\b(\d+\.\d{2,6}|\d{4,})\b', text)
+            
+            # Filter out numbers that are clearly not prices
+            filtered_prices = []
+            for price_str in price_matches:
+                # Check if this number appears in a context that suggests it's not a price
+                price_pattern = re.escape(price_str)
+                # Look for context that suggests it's not a price
+                context_patterns = [
+                    rf'\b{price_pattern}\s+(?:Take\s+Profit|trades?|trade|targets?|position)',
+                    rf'(?:Take\s+Profit|trades?|trade|targets?|position).*?\b{price_pattern}',
+                    rf'\b(?:1st|2nd|3rd|4th|5th|first|second|third|fourth|fifth)\s+.*?\b{price_pattern}',
+                    rf'\b{price_pattern}\s*%',  # Percentage
+                    rf'Risk\s+{price_pattern}',  # Risk percentage
+                ]
+                
+                is_price = True
+                for ctx_pattern in context_patterns:
+                    if re.search(ctx_pattern, text, re.IGNORECASE):
+                        is_price = False
+                        break
+                
+                if is_price:
+                    filtered_prices.append(price_str)
+            
+            if len(filtered_prices) < 2:  # Need at least entry and stop loss
                 return None
             
             # Assume first price is entry, second is stop loss
-            entry_price = float(prices[0])
-            stop_loss = float(prices[1])
+            entry_price = float(filtered_prices[0])
+            stop_loss = float(filtered_prices[1])
             
             result = {
                 "symbol": symbol,
@@ -407,7 +518,7 @@ class TelegramSignalParser:
             }
             
             # Additional prices might be targets
-            for i, price in enumerate(prices[2:], 1):
+            for i, price in enumerate(filtered_prices[2:], 1):
                 result[f"target_{i}"] = float(price)
             
             return result
@@ -576,9 +687,9 @@ class TelegramSignalParser:
         try:
             text_upper = text.upper()
             
-            # Look for "at any price between X till Y" or "between X and Y"
+            # Look for "at any price between X till Y" or "between X and Y" or "between X until Y"
             range_match = re.search(
-                r'between\s+([\d.]+)\s+(?:till|and|to)\s+([\d.]+)',
+                r'between\s+([\d.]+)\s+(?:till|until|and|to)\s+([\d.]+)',
                 text,
                 re.IGNORECASE
             )
@@ -672,6 +783,225 @@ class TelegramSignalParser:
             
         except Exception as e:
             print(f"Error parsing range format: {e}")
+            return None
+    
+    def _parse_emoji_format(self, text: str) -> Optional[Dict]:
+        """
+        Parse emoji format like:
+        XAUUSD BUY_ 4595 _ 92 📈📈
+        🟢 TP¹ 4600
+        🟢 TP² 4604
+        🟢 TP³ 4608__ OPNE
+        🔴 STOP LOSS ……4590 📉
+        Risk 0.1% 👤
+        """
+        try:
+            # Pattern: SYMBOL ACTION_ ENTRY _ DECIMAL (optional)
+            # Example: XAUUSD BUY_ 4595 _ 92
+            pattern = r'\b([A-Z]{3,8}|[a-z]{3,8})\s+(BUY|SELL)[_\s]+([\d.]+)(?:\s*[_\s]+\s*([\d.]+))?'
+            match = re.search(pattern, text, re.IGNORECASE)
+            
+            if not match:
+                return None
+            
+            potential_symbol = match.group(1).strip().upper()
+            action = match.group(2).strip().lower()
+            entry_main = match.group(3).strip()
+            entry_decimal = match.group(4).strip() if match.group(4) else None
+            
+            # Validate symbol
+            if not self._is_valid_trading_symbol(potential_symbol):
+                return None
+            
+            try:
+                symbol = self.normalize_symbol(potential_symbol)
+            except ValueError:
+                return None
+            
+            # Combine entry price: 4595 + 92 = 4595.92
+            if entry_decimal:
+                try:
+                    entry_price = float(f"{entry_main}.{entry_decimal}")
+                except ValueError:
+                    entry_price = float(entry_main)
+            else:
+                entry_price = float(entry_main)
+            
+            # Extract Stop Loss - look for "STOP LOSS" followed by dots and number
+            stop_loss = None
+            sl_patterns = [
+                r'STOP\s*LOSS[.\s]+([\d.]+)',  # STOP LOSS ……4590
+                r'STOP\s*LOSS[:\s]+([\d.]+)',  # STOP LOSS: 4590
+                r'SL[:\s]+([\d.]+)',  # SL: 4590
+            ]
+            for pattern in sl_patterns:
+                sl_match = re.search(pattern, text, re.IGNORECASE)
+                if sl_match:
+                    try:
+                        stop_loss = float(sl_match.group(1).strip())
+                        break
+                    except ValueError:
+                        continue
+            
+            # Extract Take Profit targets - look for TP¹, TP², TP³, etc.
+            targets = {}
+            
+            # Pattern 1: TP¹, TP², TP³ (with superscript numbers)
+            tp_superscript_patterns = [
+                r'TP[¹1][:\s]+([\d.]+)',
+                r'TP[²2][:\s]+([\d.]+)',
+                r'TP[³3][:\s]+([\d.]+)',
+                r'TP[⁴4][:\s]+([\d.]+)',
+                r'TP[⁵5][:\s]+([\d.]+)',
+            ]
+            for i, pattern in enumerate(tp_superscript_patterns, 1):
+                tp_match = re.search(pattern, text, re.IGNORECASE)
+                if tp_match:
+                    try:
+                        targets[f'target_{i}'] = float(tp_match.group(1).strip())
+                    except ValueError:
+                        continue
+            
+            # Pattern 2: TP1, TP2, TP3 (regular numbers) - if superscript didn't match
+            if not targets:
+                tp_matches = re.findall(r'TP(\d+)[:\s]+([\d.]+)', text, re.IGNORECASE)
+                for tp_num, tp_value in tp_matches:
+                    try:
+                        targets[f'target_{tp_num}'] = float(tp_value.strip())
+                    except ValueError:
+                        continue
+            
+            # Sort targets
+            sorted_targets = {}
+            for i in range(1, 6):
+                key = f'target_{i}'
+                if key in targets:
+                    sorted_targets[key] = targets[key]
+            
+            result = {
+                "symbol": symbol,
+                "action": action,
+                "entry_price": entry_price,
+                "stop_loss": stop_loss,
+                "signal_date": datetime.now(self.gmt4_tz).isoformat(),
+            }
+            
+            # Add targets
+            for i, (key, value) in enumerate(sorted_targets.items(), 1):
+                result[f"target_{i}"] = value
+            
+            return result
+            
+        except Exception as e:
+            print(f"Error parsing emoji format: {e}")
+            return None
+    
+    def _parse_range_with_explanation(self, text: str) -> Optional[Dict]:
+        """
+        Parse range format with explanation text like:
+        Buy EURUSD at any price between 1.1240 until 1.1220 = You can place 3 trades. 
+        
+        1st trade at 1.1240, 2nd trade at 1.1230, 3rd trade at 1.1220
+        
+        Take profit Target 1: 1.1290
+        Target 2: 1.1380
+        Target 3: 1.1460
+        Stop Loss: 1.1180
+        """
+        try:
+            # Look for "at any price between X until Y" or "between X and Y"
+            range_match = re.search(
+                r'at\s+any\s+price\s+between\s+([\d.]+)\s+until\s+([\d.]+)',
+                text,
+                re.IGNORECASE
+            )
+            if not range_match:
+                # Try without "at any price"
+                range_match = re.search(
+                    r'between\s+([\d.]+)\s+until\s+([\d.]+)',
+                    text,
+                    re.IGNORECASE
+                )
+            
+            if not range_match:
+                return None
+            
+            # Extract action (Buy/Sell) - should be before "at any price" or "between"
+            action_match = re.search(r'\b(BUY|SELL)\b', text[:range_match.start()], re.IGNORECASE)
+            if not action_match:
+                return None
+            
+            action = action_match.group(1).strip().lower()
+            
+            # Extract symbol - should be before "at any price" or "between"
+            symbol_match = None
+            
+            # Try currency/crypto pair pattern first (6-7 chars like EURUSD, BTCUSD)
+            symbol_match = re.search(r'\b([A-Z]{6,7})\b', text[:range_match.start()], re.IGNORECASE)
+            if symbol_match:
+                potential = symbol_match.group(1).strip().upper()
+                # Check against blacklist
+                blacklist = {'SIGNAL', 'FOREX', 'CRYPTO', 'TRADING', 'ANALYSIS', 'TARGET', 'ENTRY', 'PRICE', 'STOP', 'LOSS', 'PROFIT', 'RISK', 'OPEN', 'CLOSE', 'BUY', 'SELL', 'DIRECTION', 'BETWEEN', 'TILL', 'ANY', 'FOLLOW', 'RULES', 'CRYPTO', 'FOREX', 'PLACE', 'TRADES'}
+                if potential in blacklist:
+                    symbol_match = None
+            
+            if not symbol_match:
+                return None
+            
+            try:
+                symbol = self.normalize_symbol(symbol_match.group(1).strip().upper())
+            except ValueError:
+                return None
+            
+            # Calculate entry price (average of range)
+            try:
+                val1 = float(range_match.group(1).strip())
+                val2 = float(range_match.group(2).strip())
+                entry_price = (val1 + val2) / 2
+            except ValueError:
+                return None
+            
+            # Extract Stop Loss
+            stop_loss = None
+            sl_match = re.search(r'Stop\s*Loss[:\s]+([\d.]+)', text, re.IGNORECASE)
+            if sl_match:
+                try:
+                    stop_loss = float(sl_match.group(1).strip())
+                except ValueError:
+                    pass
+            
+            # Extract Targets (Target 1:, Target 2:, etc.)
+            targets = {}
+            target_matches = re.findall(r'Target\s*(\d+)[:\s]+([\d.]+)', text, re.IGNORECASE)
+            for target_num, target_value in target_matches:
+                try:
+                    targets[f'target_{target_num}'] = float(target_value.strip())
+                except ValueError:
+                    continue
+            
+            # Sort targets
+            sorted_targets = {}
+            for i in range(1, 6):
+                key = f'target_{i}'
+                if key in targets:
+                    sorted_targets[key] = targets[key]
+            
+            result = {
+                "symbol": symbol,
+                "action": action,
+                "entry_price": entry_price,
+                "stop_loss": stop_loss,
+                "signal_date": datetime.now(self.gmt4_tz).isoformat(),
+            }
+            
+            # Add targets
+            for i, (key, value) in enumerate(sorted_targets.items(), 1):
+                result[f"target_{i}"] = value
+            
+            return result
+            
+        except Exception as e:
+            print(f"Error parsing range with explanation format: {e}")
             return None
     
     def _is_valid_trading_symbol(self, symbol: str) -> bool:
