@@ -55,10 +55,78 @@ class CoverageRecord:
     tail_gap_minutes: float
 
     def status(self) -> str:
+        """
+        Determine coverage status, accounting for weekends and expected gaps.
+        Status is only "partial" if there are significant gaps during trading days.
+        Small gaps (< 30 days) are acceptable regardless of weekdays.
+        """
         if self.db_start is None or self.db_end is None:
             return "missing"
-        if self.head_gap_minutes <= 0 and self.tail_gap_minutes <= 0:
+        
+        # Calculate total required period for percentage calculation
+        total_required_minutes = max(1.0, (self.requirement.end - self.requirement.start).total_seconds() / 60.0)
+        
+        # Check if gaps are significant (not just weekends or small acceptable gaps)
+        head_significant = False
+        tail_significant = False
+        
+        # Acceptable gap thresholds: 30 days OR 5% of total period, whichever is larger
+        acceptable_gap_minutes = max(43200, total_required_minutes * 0.05)  # 30 days = 43200 minutes, or 5% of total
+        
+        if self.head_gap_minutes > 0:
+            # Head gap is acceptable if it's small (< 30 days or < 5% of total period)
+            if self.head_gap_minutes <= acceptable_gap_minutes:
+                head_significant = False
+            else:
+                # Larger gap - check if it contains weekdays
+                gap_start = self.requirement.start
+                gap_end = self.db_start
+                gap_duration_days = self.head_gap_minutes / 1440
+                sample_count = min(10, max(1, int(gap_duration_days)))
+                if sample_count > 0:
+                    for i in range(sample_count):
+                        # Distribute samples evenly across the gap
+                        if sample_count > 1:
+                            progress = i / (sample_count - 1)
+                        else:
+                            progress = 0.0
+                        sample_date = gap_start + timedelta(days=gap_duration_days * progress)
+                        if sample_date.weekday() < 5:  # Monday-Friday (0-4)
+                            head_significant = True
+                            break
+                # If gap is very large (> 1 week), consider it significant even if all weekends
+                if self.head_gap_minutes > 10080:
+                    head_significant = True
+        
+        if self.tail_gap_minutes > 0:
+            # Tail gap is acceptable if it's small (< 30 days or < 5% of total period)
+            if self.tail_gap_minutes <= acceptable_gap_minutes:
+                tail_significant = False
+            else:
+                # Larger gap - check if it contains weekdays
+                gap_start = self.db_end
+                gap_end = self.requirement.end
+                gap_duration_days = self.tail_gap_minutes / 1440
+                sample_count = min(10, max(1, int(gap_duration_days)))
+                if sample_count > 0:
+                    for i in range(sample_count):
+                        # Distribute samples evenly across the gap
+                        if sample_count > 1:
+                            progress = i / (sample_count - 1)
+                        else:
+                            progress = 0.0
+                        sample_date = gap_start + timedelta(days=gap_duration_days * progress)
+                        if sample_date.weekday() < 5:  # Monday-Friday (0-4)
+                            tail_significant = True
+                            break
+                # If gap is very large (> 1 week), consider it significant even if all weekends
+                if self.tail_gap_minutes > 10080:
+                    tail_significant = True
+        
+        # Only mark as "partial" if there are significant gaps
+        if not head_significant and not tail_significant:
             return "ready"
+        
         return "partial"
 
     def needs_backfill(self) -> bool:
@@ -105,39 +173,121 @@ class DataCoverageService:
     def _minutes_gap(self, start: datetime, end: datetime) -> float:
         return max(0.0, (end - start).total_seconds() / 60.0)
 
+    def _is_weekend(self, dt: datetime) -> bool:
+        """Check if a datetime falls on a weekend (Saturday or Sunday)."""
+        weekday = dt.weekday()  # 0=Monday, 6=Sunday
+        return weekday >= 5  # Saturday (5) or Sunday (6)
+
+    def _count_trading_minutes(self, start: datetime, end: datetime) -> float:
+        """
+        Count expected trading minutes between two datetimes, excluding weekends.
+        Assumes 24/5 trading (weekdays only) for forex/commodities, or market hours for stocks.
+        For simplicity, we count all weekday minutes and exclude weekend minutes.
+        """
+        if end <= start:
+            return 0.0
+        
+        total_minutes = self._minutes_gap(start, end)
+        
+        # Count weekend minutes to subtract
+        weekend_minutes = 0.0
+        current = start
+        while current < end:
+            if self._is_weekend(current):
+                # Count minutes in this weekend day
+                day_end = min(
+                    current.replace(hour=23, minute=59, second=59, microsecond=999999),
+                    end
+                )
+                weekend_minutes += self._minutes_gap(current, day_end)
+            # Move to next day
+            next_day = current + timedelta(days=1)
+            next_day = next_day.replace(hour=0, minute=0, second=0, microsecond=0)
+            if next_day >= end:
+                break
+            current = next_day
+        
+        return max(0.0, total_minutes - weekend_minutes)
+
+    def _is_gap_significant(self, gap_minutes: float, start: datetime, end: datetime) -> bool:
+        """
+        Determine if a gap is significant (not just weekends).
+        A gap is significant if it's more than 2 days (2880 minutes) of trading time,
+        or if it spans non-weekend periods.
+        """
+        if gap_minutes <= 0:
+            return False
+        
+        # If gap is less than 2 days, it's likely just weekends or minor gaps
+        if gap_minutes < 2880:  # 2 days = 2880 minutes
+            return False
+        
+        # Check if the gap period contains non-weekend days
+        # Sample a few dates in the gap to see if any are weekdays
+        gap_start = start
+        gap_end = end
+        if gap_end <= gap_start:
+            return False
+        
+        # Sample up to 10 dates across the gap
+        gap_duration = (gap_end - gap_start).total_seconds() / 86400  # days
+        sample_count = min(10, int(gap_duration))
+        
+        if sample_count == 0:
+            return gap_minutes > 1440  # More than 1 day
+        
+        for i in range(sample_count):
+            sample_date = gap_start + timedelta(days=(gap_duration * i / max(1, sample_count - 1)))
+            if not self._is_weekend(sample_date):
+                # Found a weekday in the gap, so it's significant
+                return True
+        
+        # All sampled dates are weekends, but gap is large - still consider significant
+        return gap_minutes > 10080  # More than 1 week
+
     def _requirements(self) -> Dict[str, CoverageRequirement]:
         """
-        Build requirements for 1-minute data only, with asset-class-specific start dates:
-            - Indices: 2025-01-13 → now minus 15 minutes
-            - Stocks: 2024-01-01 → now minus 15 minutes
-            - Commodities: 2024-01-10 → now minus 15 minutes
-            - Currencies: 2024-01-10 → now minus 15 minutes
+        Build requirements for 1-minute data only, with asset-class-specific start dates.
+        End date is set based on Polygon API limits:
+            - Indices: 1 year back (Polygon free plan limit)
+            - Stocks/Commodities/Currencies: 2 years (Polygon API limit)
+        For indices, start date is calculated as 1 year back from reference date.
+            - Indices: (now - 1 year) → now (1 year back from reference date)
+            - Stocks: 2024-01-01 → 2026-01-01 (2 years)
+            - Commodities: 2024-01-10 → 2026-01-10 (2 years)
+            - Currencies: 2024-01-10 → 2026-01-10 (2 years)
         """
-        now_eat = self._now_eat()
-        last_15_cutoff = (now_eat - timedelta(minutes=15)).astimezone(UTC)
+        now_utc = datetime.now(UTC)
         
         # Determine start date based on asset class
         asset_class = (self.asset_class or "").strip()
         if asset_class == "Indices":
-            start_date = datetime(2025, 1, 13, tzinfo=UTC)
-            label = "1-min bars (Jan 13, 2025 → now-15m)"
+            # Indices: 1 year back from now (Polygon free plan limit)
+            start_date = (now_utc - timedelta(days=365)).replace(hour=0, minute=0, second=0, microsecond=0)
+            end_date = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+            start_str = start_date.strftime("%b %d, %Y")
+            end_str = end_date.strftime("%b %d, %Y")
+            label = f"1-min bars ({start_str} → {end_str}, 1 year)"
         elif asset_class == "Stocks":
             start_date = datetime(2024, 1, 1, tzinfo=UTC)
-            label = "1-min bars (Jan 1, 2024 → now-15m)"
+            end_date = datetime(2026, 1, 1, tzinfo=UTC)
+            label = "1-min bars (Jan 1, 2024 → Jan 1, 2026, 2 years)"
         elif asset_class in ["Commodities", "Currencies"]:
             start_date = datetime(2024, 1, 10, tzinfo=UTC)
-            label = "1-min bars (Jan 10, 2024 → now-15m)"
+            end_date = datetime(2026, 1, 10, tzinfo=UTC)
+            label = "1-min bars (Jan 10, 2024 → Jan 10, 2026, 2 years)"
         else:
             # Default fallback
             start_date = datetime(2024, 1, 1, tzinfo=UTC)
-            label = "1-min bars (Jan 1, 2024 → now-15m)"
+            end_date = datetime(2026, 1, 1, tzinfo=UTC)
+            label = "1-min bars (Jan 1, 2024 → Jan 1, 2026, 2 years)"
 
         requirements = {
             "1min": CoverageRequirement(
                 interval="1min",
                 label=label,
                 start=start_date,
-                end=last_15_cutoff,
+                end=end_date,
                 chunk_days=3,
             ),
         }
