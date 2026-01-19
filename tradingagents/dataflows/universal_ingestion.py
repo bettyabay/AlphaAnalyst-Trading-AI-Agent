@@ -527,18 +527,53 @@ def ingest_from_polygon_api(api_symbol, asset_class, db_symbol=None, auto_resume
         # Same logic as gold ingestion: 1 day chunks, 12s throttle, 90s wait on 429
         import time
         
-        # Polygon throttle: 12 seconds between calls (free plan: 5 calls/min)
+        # Polygon throttle: adaptive interval based on rate limit detection
         _last_polygon_call = 0
         _polygon_min_interval = 12  # 12 seconds = 5 calls/min (safe for free plan)
+        _rate_limit_count = 0  # Track consecutive rate limit hits
         
         def _polygon_throttle():
-            """Ensure minimum interval between Polygon API calls"""
-            nonlocal _last_polygon_call
+            """Ensure minimum interval between Polygon API calls with adaptive throttling"""
+            nonlocal _last_polygon_call, _polygon_min_interval, _rate_limit_count
             elapsed = time.time() - _last_polygon_call
             if elapsed < _polygon_min_interval:
                 sleep_time = _polygon_min_interval - elapsed
                 print(f"⏳ Throttling Polygon call for {sleep_time:.2f}s...")
                 time.sleep(sleep_time)
+            _last_polygon_call = time.time()
+        
+        def _adjust_throttle_on_rate_limit():
+            """Increase throttle interval when rate limits are detected"""
+            nonlocal _polygon_min_interval, _rate_limit_count
+            _rate_limit_count += 1
+            # Gradually increase throttle: 12s -> 18s -> 24s -> 30s -> 60s (max)
+            if _rate_limit_count == 1:
+                _polygon_min_interval = 18
+                print("⚠️ Rate limit detected. Increasing throttle to 18s between calls...")
+            elif _rate_limit_count == 2:
+                _polygon_min_interval = 24
+                print("⚠️ Rate limit detected again. Increasing throttle to 24s between calls...")
+            elif _rate_limit_count == 3:
+                _polygon_min_interval = 30
+                print("⚠️ Rate limit detected again. Increasing throttle to 30s between calls...")
+            elif _rate_limit_count >= 4:
+                _polygon_min_interval = 60
+                if _rate_limit_count == 4:
+                    print("⚠️ Rate limit detected again. Increasing throttle to 60s between calls...")
+        
+        def _reset_rate_limit_tracking():
+            """Reset rate limit tracking after successful calls"""
+            nonlocal _rate_limit_count, _polygon_min_interval
+            if _rate_limit_count > 0:
+                # Reset after 5 successful consecutive calls
+                _rate_limit_count = max(0, _rate_limit_count - 1)
+                if _rate_limit_count == 0:
+                    _polygon_min_interval = 12
+                    print("✅ Rate limit resolved. Resetting throttle to 12s between calls...")
+        
+        def _update_throttle_timer():
+            """Update the throttle timer (helper to avoid scope issues)"""
+            nonlocal _last_polygon_call
             _last_polygon_call = time.time()
         
         # Helper function to process and insert a single chunk dataframe
@@ -703,10 +738,14 @@ def ingest_from_polygon_api(api_symbol, asset_class, db_symbol=None, auto_resume
                     _polygon_throttle()
                     
                     print(f"🔍 Calling Polygon API: get_intraday_data('{polygon_symbol_final}', '{chunk_s_str}', '{chunk_e_str}', multiplier=1, timespan='minute')")
-                    chunk_df = client.get_intraday_data(polygon_symbol_final, chunk_s_str, chunk_e_str, multiplier=1, timespan="minute")
+                    # Reduce internal retries to 2 - let outer loop handle retries with better cooldown
+                    chunk_df = client.get_intraday_data(polygon_symbol_final, chunk_s_str, chunk_e_str, multiplier=1, timespan="minute", max_retries=2)
                     
                     if not chunk_df.empty:
                         print(f"✅ Fetched {len(chunk_df)} records for {chunk_s_str} to {chunk_e_str}")
+                        
+                        # Reset rate limit tracking on successful call
+                        _reset_rate_limit_tracking()
                         
                         # Insert immediately after fetching
                         # Note: We don't filter by resume point anymore - upsert handles duplicates via primary key
@@ -791,10 +830,17 @@ def ingest_from_polygon_api(api_symbol, asset_class, db_symbol=None, auto_resume
                     error_str = str(e)
                     # Check if it's a rate limit error (429)
                     if "429" in error_str or "too many requests" in error_str.lower():
+                        # Adjust throttle for future calls
+                        _adjust_throttle_on_rate_limit()
+                        
                         attempt += 1
                         if attempt < max_retries:
-                            print(f"🛑 Polygon rate limit hit for {polygon_symbol_final}. Cooling down 90s before retry {attempt}/{max_retries}...")
-                            time.sleep(90)
+                            # Wait longer on rate limits: 120s for first retry, 180s for subsequent
+                            wait_time = 120 + (attempt - 1) * 60
+                            print(f"🛑 Polygon rate limit hit for {polygon_symbol_final}. Cooling down {wait_time}s before retry {attempt}/{max_retries}...")
+                            time.sleep(wait_time)
+                            # Update throttle timer after waiting
+                            _update_throttle_timer()
                             continue  # Retry after cooling down
                         else:
                             print(f"❌ Rate limit exceeded for {polygon_symbol_final} after {max_retries} attempts. Skipping chunk.")

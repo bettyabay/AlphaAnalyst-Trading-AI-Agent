@@ -223,6 +223,32 @@ class TelegramSignalService:
                 print("❌ Supabase not configured")
                 return False
             
+            # Validate signal has all required fields before saving
+            if not signal_data.get('symbol'):
+                print(f"⚠️ Skipping signal: Missing symbol")
+                return False
+            
+            if signal_data.get('action') not in ['buy', 'sell']:
+                print(f"⚠️ Skipping signal: Invalid action: {signal_data.get('action')}")
+                return False
+            
+            if signal_data.get('entry_price') is None:
+                print(f"⚠️ Skipping signal: Missing entry_price")
+                return False
+            
+            if signal_data.get('stop_loss') is None:
+                print(f"⚠️ Skipping signal: Missing stop_loss")
+                return False
+            
+            # Check for at least one target
+            has_target = any(
+                signal_data.get(f'target_{i}') is not None 
+                for i in range(1, 6)
+            )
+            if not has_target:
+                print(f"⚠️ Skipping signal: Missing at least one target")
+                return False
+            
             # Build provider_name with channel username if provided
             final_provider_name = provider_name
             if channel_username:

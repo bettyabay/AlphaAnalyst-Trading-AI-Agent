@@ -26,6 +26,54 @@ class TelegramSignalParser:
         self.gmt4_tz = pytz.timezone('Asia/Dubai')
         self.utc_tz = pytz.timezone('UTC')
     
+    def _validate_signal(self, signal_data: Dict) -> bool:
+        """
+        Validate that a signal has all required fields.
+        
+        Required fields:
+        - symbol: Must be present and valid
+        - action: Must be 'buy' or 'sell'
+        - entry_price: Must be a valid number
+        - stop_loss: Must be a valid number
+        - At least one target (target_1, target_2, etc.)
+        
+        Args:
+            signal_data: Dictionary with parsed signal data
+            
+        Returns:
+            True if signal is valid and complete, False otherwise
+        """
+        if not signal_data:
+            return False
+        
+        # Check required fields
+        if not signal_data.get('symbol'):
+            return False
+        
+        if signal_data.get('action') not in ['buy', 'sell']:
+            return False
+        
+        entry_price = signal_data.get('entry_price')
+        if entry_price is None or not isinstance(entry_price, (int, float)):
+            return False
+        
+        stop_loss = signal_data.get('stop_loss')
+        if stop_loss is None or not isinstance(stop_loss, (int, float)):
+            return False
+        
+        # Check for at least one target
+        has_target = False
+        for i in range(1, 6):
+            target = signal_data.get(f'target_{i}')
+            if target is not None and isinstance(target, (int, float)):
+                has_target = True
+                break
+        
+        if not has_target:
+            return False
+        
+        return True
+    
     def parse(self, message_text: str) -> Optional[Dict]:
         """
         Main parsing function. Tries multiple parsing strategies.
@@ -66,27 +114,27 @@ class TelegramSignalParser:
         
         # Try structured format parsing first (most common - PipXpert format)
         parsed = self._parse_structured_format(message_text)
-        if parsed:
+        if parsed and self._validate_signal(parsed):
             return parsed
         
         # Try inline format: SYMBOL ACTION ENTRY (Format 1 & 2)
         parsed = self._parse_inline_format(message_text)
-        if parsed:
+        if parsed and self._validate_signal(parsed):
             return parsed
         
         # Try range format: "at any price between X till Y" (Format 3)
         parsed = self._parse_range_format(message_text)
-        if parsed:
+        if parsed and self._validate_signal(parsed):
             return parsed
         
         # Try alternative formats
         parsed = self._parse_compact_format(message_text)
-        if parsed:
+        if parsed and self._validate_signal(parsed):
             return parsed
         
         # Try natural language parsing (basic)
         parsed = self._parse_natural_language(message_text)
-        if parsed:
+        if parsed and self._validate_signal(parsed):
             return parsed
         
         return None
@@ -148,7 +196,11 @@ class TelegramSignalParser:
             if not symbol:
                 return None
             
-            symbol = self.normalize_symbol(symbol)
+            try:
+                symbol = self.normalize_symbol(symbol)
+            except ValueError:
+                # Invalid symbol - skip this signal
+                return None
             
             # Extract direction (BUY/SELL) - more flexible
             action = None
@@ -269,7 +321,11 @@ class TelegramSignalParser:
                 return None
             
             action = match.group(1).strip().lower()
-            symbol = self.normalize_symbol(match.group(2).strip().upper())
+            try:
+                symbol = self.normalize_symbol(match.group(2).strip().upper())
+            except ValueError:
+                # Invalid symbol - skip this signal
+                return None
             entry_price = float(match.group(3).strip())
             stop_loss = float(match.group(4).strip())
             
@@ -327,7 +383,11 @@ class TelegramSignalParser:
             if not symbol_match:
                 return None
             
-            symbol = self.normalize_symbol(symbol_match.group(1).strip().upper())
+            try:
+                symbol = self.normalize_symbol(symbol_match.group(1).strip().upper())
+            except ValueError:
+                # Invalid symbol - skip this signal
+                return None
             
             # Look for price patterns (numbers with decimals or large integers)
             prices = re.findall(r'\b(\d+\.\d{2,6}|\d{4,})\b', text)
@@ -391,7 +451,11 @@ class TelegramSignalParser:
             if not self._is_valid_trading_symbol(potential_symbol):
                 return None
             
-            symbol = self.normalize_symbol(potential_symbol)
+            try:
+                symbol = self.normalize_symbol(potential_symbol)
+            except ValueError:
+                # Invalid symbol - skip this signal
+                return None
             
             # Extract entry price - can be single value, range (X/Y), or space-separated
             entry_price = None
@@ -553,7 +617,11 @@ class TelegramSignalParser:
             if not symbol_match:
                 return None
             
-            symbol = self.normalize_symbol(symbol_match.group(1).strip().upper())
+            try:
+                symbol = self.normalize_symbol(symbol_match.group(1).strip().upper())
+            except ValueError:
+                # Invalid symbol - skip this signal
+                return None
             
             # Calculate entry price (average of range)
             try:
@@ -613,12 +681,14 @@ class TelegramSignalParser:
         """
         symbol = symbol.upper().strip()
         
-        # Blacklist of common words
+        # Blacklist of common words and invalid symbols
         blacklist = {
             'SIGNAL', 'FOREX', 'CRYPTO', 'TRADING', 'ANALYSIS', 'TARGET', 'ENTRY', 
             'PRICE', 'STOP', 'LOSS', 'PROFIT', 'RISK', 'OPEN', 'CLOSE', 'BUY', 'SELL', 
             'DIRECTION', 'BETWEEN', 'TILL', 'ANY', 'FOLLOW', 'RULES', 'QUIZ', 'AFTER',
-            'REACH', 'PLACE', 'MOVE', 'HANDLE', 'BETTER', 'READ', 'HERE'
+            'REACH', 'PLACE', 'MOVE', 'HANDLE', 'BETTER', 'READ', 'HERE',
+            'SLOWLY', 'COMBUY', 'SUPPORT', 'INVERSE', 'COMBINE', 'COMBINED', 'COMBINING',
+            'SUPPORTS', 'SUPPORTED', 'INVERSED', 'INVERSING', 'SLOW', 'SLOWER'
         }
         if symbol in blacklist:
             return False
@@ -645,8 +715,12 @@ class TelegramSignalParser:
             currency_codes = {'EUR', 'GBP', 'USD', 'JPY', 'CHF', 'AUD', 'NZD', 'CAD', 'BTC', 'ETH', 'XAU', 'XAG'}
             if any(symbol.startswith(code) for code in currency_codes):
                 return True
-            # If it's 6-7 chars and not in blacklist, might be valid
-            return True
+            # Only accept 6-7 char symbols if they match known patterns (not just any word)
+            # Check if it ends with known currency codes (for pairs like EURUSD)
+            if any(symbol.endswith(code) for code in currency_codes):
+                return True
+            # Reject unknown 6-7 char symbols that don't match currency patterns
+            return False
         
         # 3-4 char symbols might be indices or single currencies
         if len(symbol) >= 3 and len(symbol) <= 4:
@@ -668,12 +742,19 @@ class TelegramSignalParser:
         # Remove spaces and special characters
         symbol = symbol.replace('/', '').replace('-', '').replace('_', '').strip().upper()
         
+        # Validate symbol before normalizing - reject invalid symbols
+        if not self._is_valid_trading_symbol(symbol):
+            # Return None or raise error - caller should handle this
+            raise ValueError(f"Invalid trading symbol: {symbol}")
+        
         # Check if it's a currency pair (typically 6-7 chars: EURUSD, GBPUSD, etc.)
         if len(symbol) >= 6 and len(symbol) <= 7:
             # Common currency pairs
             currency_pairs = [
                 'EURUSD', 'GBPUSD', 'USDJPY', 'USDCHF', 'AUDUSD', 'NZDUSD', 'USDCAD',
                 'EURGBP', 'EURJPY', 'GBPJPY', 'AUDJPY', 'EURCHF', 'AUDNZD', 'EURAUD',
+                'GBPAUD', 'GBPCAD', 'GBPCHF', 'GBPNZD', 'EURNZD', 'EURCAD', 'AUDCAD',
+                'AUDCHF', 'CADCHF', 'CADJPY', 'CHFJPY', 'NZDJPY', 'NZDCHF', 'NZDCAD',
                 'XAUUSD', 'XAGUSD', 'XPDUSD', 'XPTUSD'  # Precious metals
             ]
             
@@ -700,11 +781,15 @@ class TelegramSignalParser:
         if symbol in indices:
             return f"^{symbol}"
         
-        # Default: assume currency pair if 6-7 chars
+        # Only add C: prefix if it's a valid 6-7 char currency-like symbol
+        # (already validated by _is_valid_trading_symbol above)
         if len(symbol) >= 6 and len(symbol) <= 7:
-            return f"C:{symbol}"
+            # Check if it starts or ends with known currency codes
+            currency_codes = {'EUR', 'GBP', 'USD', 'JPY', 'CHF', 'AUD', 'NZD', 'CAD', 'BTC', 'ETH', 'XAU', 'XAG'}
+            if any(symbol.startswith(code) for code in currency_codes) or any(symbol.endswith(code) for code in currency_codes):
+                return f"C:{symbol}"
         
-        # Return as-is for stocks and other symbols
+        # Return as-is for stocks and other symbols (already validated)
         return symbol
 
 

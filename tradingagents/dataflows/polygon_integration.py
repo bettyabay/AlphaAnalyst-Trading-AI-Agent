@@ -20,6 +20,7 @@ class PolygonDataClient:
         self.headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         self.last_request_time = 0
         self.min_request_interval = 0.25  # Minimum 250ms between requests (4 requests/sec)
+        self.rate_limit_detected = False  # Track if we've hit rate limits recently
         
         # Warn if API key is missing
         if not self.api_key:
@@ -56,10 +57,24 @@ class PolygonDataClient:
                 
                 # Handle rate limiting (429 status code)
                 if response.status_code == 429:
-                    wait_time = min(2 ** attempt, 60)  # Exponential backoff, max 60s
+                    # Check for Retry-After header (Polygon may provide this)
+                    retry_after = response.headers.get('Retry-After')
+                    if retry_after:
+                        try:
+                            wait_time = int(retry_after) + 5  # Add buffer
+                        except (ValueError, TypeError):
+                            # Free plan needs longer waits: 90s, 180s, 270s
+                            wait_time = min(90 * (attempt + 1), 360)  # 90s, 180s, 270s, 360s max
+                    else:
+                        # No Retry-After header - use longer exponential backoff for free plan
+                        # Free plan needs longer waits: 90s, 180s, 270s
+                        wait_time = min(90 * (attempt + 1), 360)  # 90s, 180s, 270s, 360s max
+                    
                     if attempt < max_retries - 1:
                         print(f"Rate limited (429) for {symbol}. Waiting {wait_time}s before retry {attempt + 1}/{max_retries}...")
                         time.sleep(wait_time)
+                        # Update last_request_time after waiting to prevent immediate next call
+                        self.last_request_time = time.time()
                         continue
                     else:
                         print(f"Rate limit exceeded for {symbol} after {max_retries} attempts")
@@ -167,10 +182,23 @@ class PolygonDataClient:
                     
                     # Handle rate limiting (429 status code)
                     if response.status_code == 429:
-                        wait_time = 2 ** attempt  # Exponential backoff
+                        # Check for Retry-After header (Polygon may provide this)
+                        retry_after = response.headers.get('Retry-After')
+                        if retry_after:
+                            try:
+                                wait_time = int(retry_after) + 5  # Add buffer
+                            except (ValueError, TypeError):
+                                wait_time = min(60 * (attempt + 1), 300)  # 60s, 120s, 180s, 240s, 300s max
+                        else:
+                            # No Retry-After header - use longer exponential backoff for free plan
+                            # Free plan needs longer waits: 90s, 180s, 270s (increased from 60s)
+                            wait_time = min(90 * (attempt + 1), 360)  # 90s, 180s, 270s, 360s max
+                        
                         if attempt < max_retries - 1:
                             print(f"Rate limited (429) for {symbol}. Waiting {wait_time}s before retry {attempt + 1}/{max_retries}...")
                             time.sleep(wait_time)
+                            # Update last_request_time after waiting to prevent immediate next call
+                            self.last_request_time = time.time()
                             continue
                         else:
                             print(f"Rate limit exceeded for {symbol} after {max_retries} attempts")
