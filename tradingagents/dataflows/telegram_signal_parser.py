@@ -798,7 +798,8 @@ class TelegramSignalParser:
         try:
             # Pattern: SYMBOL ACTION_ ENTRY _ DECIMAL (optional)
             # Example: XAUUSD BUY_ 4595 _ 92
-            pattern = r'\b([A-Z]{3,8}|[a-z]{3,8})\s+(BUY|SELL)[_\s]+([\d.]+)(?:\s*[_\s]+\s*([\d.]+))?'
+            # Also handles: XAUUSD BUY_ 4403..4404 (range format)
+            pattern = r'\b([A-Z]{3,8}|[a-z]{3,8})\s+(BUY|SELL)[_\s]+([\d.]+(?:\.{2,}\d+)?)(?:\s*[_\s]+\s*([\d.]+))?'
             match = re.search(pattern, text, re.IGNORECASE)
             
             if not match:
@@ -818,14 +819,62 @@ class TelegramSignalParser:
             except ValueError:
                 return None
             
-            # Combine entry price: 4595 + 92 = 4595.92
-            if entry_decimal:
-                try:
-                    entry_price = float(f"{entry_main}.{entry_decimal}")
-                except ValueError:
-                    entry_price = float(entry_main)
-            else:
-                entry_price = float(entry_main)
+            # Parse entry price - handle ranges, multiple dots, and decimal parts
+            entry_price = None
+            
+            # Clean up entry_main - remove trailing dots
+            entry_main = entry_main.rstrip('.')
+            
+            # Check if entry_main contains a range (multiple dots like "4403..4404" or "4249...50")
+            if '..' in entry_main or '...' in entry_main:
+                # It's a range - extract the two numbers and calculate average
+                # Handle patterns like: "4403..4404", "4249...50", "4496..95"
+                range_match = re.search(r'(\d+)\.{2,}(\d+)', entry_main)
+                if range_match:
+                    try:
+                        val1 = float(range_match.group(1))
+                        val2_str = range_match.group(2)
+                        val2 = float(val2_str)
+                        
+                        # Determine if it's a range or decimal part
+                        # If val2 is much smaller than val1 (like 95 vs 4496), it's likely a decimal part
+                        # If val2 is similar in magnitude to val1 (like 4404 vs 4403), it's likely a range
+                        if len(val2_str) <= 2 and val1 > 1000 and val2 < 100:
+                            # Likely a decimal part: "4496..95" = 4496.95, "4249...50" = 4249.50
+                            entry_price = float(f"{val1}.{val2_str}")
+                        elif abs(val1 - val2) < val1 * 0.1:  # Values are within 10% of each other
+                            # Likely a range: "4403..4404" = average
+                            entry_price = (val1 + val2) / 2
+                        else:
+                            # Default: treat as decimal if val2 is small, otherwise range
+                            if val2 < 100:
+                                entry_price = float(f"{val1}.{val2_str}")
+                            else:
+                                entry_price = (val1 + val2) / 2
+                    except (ValueError, IndexError):
+                        pass
+            
+            # If not a range, try to parse as regular number
+            if entry_price is None:
+                if entry_decimal:
+                    # Combine: 4595 + 92 = 4595.92
+                    try:
+                        entry_price = float(f"{entry_main}.{entry_decimal}")
+                    except ValueError:
+                        # If that fails, try parsing entry_main alone
+                        try:
+                            entry_price = float(entry_main)
+                        except ValueError:
+                            pass
+                else:
+                    # Just parse entry_main
+                    try:
+                        entry_price = float(entry_main)
+                    except ValueError:
+                        pass
+            
+            if entry_price is None:
+                return None
             
             # Extract Stop Loss - look for "STOP LOSS" followed by dots and number
             stop_loss = None
@@ -838,8 +887,29 @@ class TelegramSignalParser:
                 sl_match = re.search(pattern, text, re.IGNORECASE)
                 if sl_match:
                     try:
-                        stop_loss = float(sl_match.group(1).strip())
-                        break
+                        sl_value = sl_match.group(1).strip().rstrip('.')  # Remove trailing dots
+                        
+                        # Handle ranges in stop loss (like "4590..4588")
+                        if '..' in sl_value or '...' in sl_value:
+                            range_match = re.search(r'(\d+)\.{2,}(\d+)', sl_value)
+                            if range_match:
+                                try:
+                                    val1 = float(range_match.group(1))
+                                    val2_str = range_match.group(2)
+                                    if len(val2_str) <= 2 and val1 > 1000:
+                                        # Likely decimal part
+                                        stop_loss = float(f"{val1}.{val2_str}")
+                                    else:
+                                        # Range - use average
+                                        val2 = float(val2_str)
+                                        stop_loss = (val1 + val2) / 2
+                                except (ValueError, IndexError):
+                                    pass
+                        else:
+                            stop_loss = float(sl_value)
+                        
+                        if stop_loss is not None:
+                            break
                     except ValueError:
                         continue
             

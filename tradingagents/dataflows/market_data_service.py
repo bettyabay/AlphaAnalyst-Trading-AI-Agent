@@ -139,10 +139,14 @@ def fetch_ohlcv(
         # 2. Fallback to symbol pattern matching
         elif "*" in symbol:
             table = "market_data_commodities_1min"
-        elif symbol.startswith("^"):
+        elif symbol.startswith("^") or symbol.startswith("I:"):
             table = "market_data_indices_1min"
-        elif "/" in symbol:
+        elif "/" in symbol or symbol.startswith("C:"):
+            # C: prefix indicates currency (e.g., C:EURUSD, C:GBPUSD)
             table = "market_data_currencies_1min"
+        elif "XAU" in symbol or "XAG" in symbol:
+            # Gold/Silver - route to commodities
+            table = "market_data_commodities_1min"
             
     time_field = config["time_field"]
     is_date = bool(config["is_date"])
@@ -160,14 +164,33 @@ def fetch_ohlcv(
 
     # Support multiple symbol formats for fallback
     symbols_to_try = [symbol]
+    
+    # Handle currency pairs - try with and without C: prefix
+    if symbol.startswith("C:"):
+        # If symbol has C: prefix, also try without it
+        symbol_without_prefix = symbol[2:]  # Remove "C:"
+        symbols_to_try = [symbol, symbol_without_prefix]
+    elif len(symbol) >= 6 and len(symbol) <= 7 and interval == "1min" and table == "market_data_currencies_1min":
+        # Likely a currency pair without prefix (EURUSD, GBPUSD, etc.)
+        # Try with C: prefix for currencies table
+        symbol_with_prefix = f"C:{symbol}"
+        symbols_to_try = [symbol, symbol_with_prefix]
+    
+    # Handle special cases
     if symbol == "GOLD":
-        symbols_to_try = ["GOLD", "^XAUUSD", "C:XAUUSD"]
+        symbols_to_try = ["GOLD", "^XAUUSD", "C:XAUUSD", "XAUUSD"]
     elif symbol == "^XAUUSD":
-        symbols_to_try = ["^XAUUSD", "GOLD", "C:XAUUSD"]
+        symbols_to_try = ["^XAUUSD", "GOLD", "C:XAUUSD", "XAUUSD"]
+    elif symbol == "C:XAUUSD" or symbol == "XAUUSD":
+        symbols_to_try = ["C:XAUUSD", "XAUUSD", "^XAUUSD", "GOLD"]
     elif symbol == "S&P 500":
         symbols_to_try = ["S&P 500", "^SPX", "I:SPX"]
     elif symbol == "^SPX":
         symbols_to_try = ["^SPX", "S&P 500", "I:SPX"]
+    elif symbol.startswith("I:"):
+        # Index with I: prefix, also try without
+        symbol_without_prefix = symbol[2:]
+        symbols_to_try = [symbol, symbol_without_prefix, f"^{symbol_without_prefix}"]
 
     for try_sym in symbols_to_try:
         try:

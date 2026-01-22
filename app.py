@@ -26,6 +26,17 @@ from tradingagents.dataflows.signal_provider_ingestion import ingest_signal_prov
 from tradingagents.dataflows.kpi_calculator import calculate_kpi
 from tradingagents.dataflows.kpi_calculator import calculate_kpi
 from tradingagents.dataflows.document_manager import DocumentManager
+from tradingagents.dataflows.signal_analyzer import SignalAnalyzer
+from tradingagents.dataflows.signal_backtester import SignalBacktester
+from tradingagents.dataflows.validation_engine import ValidationEngine
+from tradingagents.dataflows.daily_reporter import DailyReporter
+from tradingagents.dataflows.run_signal_analysis import (
+    run_analysis_for_all_signals,
+    run_backtest_for_all_signals,
+    calculate_provider_metrics,
+    get_available_instruments,
+    check_market_data_availability
+)
 from tradingagents.config.watchlist import WATCHLIST_STOCKS, get_watchlist_symbols
 from tradingagents.dataflows.polygon_integration import PolygonDataClient
 from tradingagents.dataflows.market_data_service import (
@@ -1732,7 +1743,129 @@ def phase1_foundation_data():
                     st.caption(f"Showing last {len(df_signals)} signals.")
                 else:
                     st.info(f"No stored signals found for {selected_provider}.")
-        
+    
+    # Signal Analysis Dashboard - Full Width Section
+    st.markdown("---")
+    st.markdown("### 📊 Signal Analysis Dashboard")
+    st.info("Run automated analysis for signal providers. Select an instrument to analyze its signals against market data.")
+    
+    st.markdown("#### Automated Signal Analysis")
+    st.write("Analyze signals to determine TP/SL hits and calculate performance metrics. Select an instrument to analyze its signals against market data.")
+    
+    # Get available instruments
+    available_instruments = get_available_instruments()
+    
+    col_a1, col_a2, col_a3 = st.columns(3)
+    with col_a1:
+        analysis_instrument = st.selectbox(
+            "Instrument (Required)",
+            options=["Select Instrument"] + (available_instruments or []),
+            key="analysis_instrument",
+            help="Select the instrument to analyze. The system will check for market data and signals for this instrument."
+        )
+    with col_a2:
+        analysis_provider = st.selectbox(
+            "Provider (Optional)",
+            options=["All Providers"] + (st.session_state.get("signal_providers", []) or []),
+            key="analysis_provider"
+        )
+    with col_a3:
+        analysis_date_range = st.selectbox(
+            "Date Range",
+            options=["All Time", "Last 30 Days", "Last 60 Days", "Last 90 Days", "Custom"],
+            key="analysis_date_range"
+        )
+    
+    if analysis_date_range == "Custom":
+        col_d1, col_d2 = st.columns(2)
+        with col_d1:
+            analysis_start_date = st.date_input("Start Date", key="analysis_start")
+        with col_d2:
+            analysis_end_date = st.date_input("End Date", key="analysis_end")
+    else:
+        analysis_start_date = None
+        analysis_end_date = None
+        if analysis_date_range != "All Time":
+            days = int(analysis_date_range.split()[1])
+            analysis_start_date = datetime.now().date() - timedelta(days=days)
+            analysis_end_date = datetime.now().date()
+    
+    # Check market data availability when instrument is selected
+    if analysis_instrument and analysis_instrument != "Select Instrument":
+        with st.spinner("Checking market data availability..."):
+            market_data_status = check_market_data_availability(analysis_instrument)
+            
+            if market_data_status.get("available"):
+                st.success(f"✅ Market data available for {analysis_instrument} (Table: {market_data_status.get('table', 'N/A')})")
+                if market_data_status.get("earliest_date") and market_data_status.get("latest_date"):
+                    st.info(f"📅 Data range: {market_data_status['earliest_date']} to {market_data_status['latest_date']}")
+            else:
+                st.warning(f"⚠️ {market_data_status.get('error', 'Market data not available for this instrument')}")
+                st.info("💡 Please ensure market data has been ingested for this instrument before running analysis.")
+    
+    if st.button("Run Analysis", key="run_analysis_btn", type="primary"):
+        if analysis_instrument == "Select Instrument":
+            st.error("Please select an instrument to analyze.")
+        else:
+            with st.spinner("Running automated analysis..."):
+                try:
+                    # Check market data availability first
+                    market_data_status = check_market_data_availability(analysis_instrument)
+                    if not market_data_status.get("available"):
+                        st.error(f"Cannot run analysis: {market_data_status.get('error', 'Market data not available')}")
+                        st.stop()
+                    
+                    provider_filter = None if analysis_provider == "All Providers" else analysis_provider
+                    start_dt = datetime.combine(analysis_start_date, datetime.min.time()) if analysis_start_date else None
+                    end_dt = datetime.combine(analysis_end_date, datetime.max.time()) if analysis_end_date else None
+                    
+                    result = run_analysis_for_all_signals(
+                        provider_name=provider_filter,
+                        symbol=analysis_instrument,
+                        start_date=start_dt,
+                        end_date=end_dt,
+                        save_results=True
+                    )
+                    
+                    if 'error' not in result:
+                        st.success(f"Analysis Complete!")
+                        col_r1, col_r2, col_r3, col_r4 = st.columns(4)
+                        with col_r1:
+                            st.metric("Total Signals", result.get('total_signals', 0))
+                        with col_r2:
+                            st.metric("Analyzed", result.get('analyzed', 0))
+                        with col_r3:
+                            st.metric("Errors", result.get('errors', 0))
+                        with col_r4:
+                            st.metric("Success Rate", f"{result.get('success_rate', 0):.1f}%")
+                    else:
+                        st.error(f"Error: {result.get('error')}")
+                except Exception as e:
+                    st.error(f"Analysis failed: {str(e)}")
+                    import traceback
+                    st.code(traceback.format_exc())
+    
+    # Show analysis results
+    st.markdown("#### Analysis Results")
+    try:
+        supabase = get_supabase()
+        if supabase:
+            query = supabase.table('analysis_results').select('*').order('analysis_date', desc=True).limit(50)
+            if analysis_provider != "All Providers":
+                query = query.eq('provider_name', analysis_provider)
+            if analysis_instrument and analysis_instrument != "Select Instrument":
+                query = query.eq('symbol', analysis_instrument.upper())
+            result = query.execute()
+            
+            if result.data:
+                df_results = pd.DataFrame(result.data)
+                display_cols = ['signal_date', 'symbol', 'provider_name', 'tp1_hit', 'tp2_hit', 'tp3_hit', 'sl_hit', 'final_status', 'max_profit', 'max_drawdown']
+                display_cols = [c for c in display_cols if c in df_results.columns]
+                st.dataframe(df_results[display_cols], use_container_width=True)
+            else:
+                st.info("No analysis results found. Run analysis first.")
+    except Exception as e:
+        st.warning(f"Could not load analysis results: {str(e)}")
 
     with col_c:
         kpi_options = ["ATR", "Volume", "VWAP", "EMA", "SMA", "RSI", "MACD", "Bollinger Bands", "Stochastic", "Momentum", "Add..."] + (st.session_state.get("kpi_indicators", []) or [])
