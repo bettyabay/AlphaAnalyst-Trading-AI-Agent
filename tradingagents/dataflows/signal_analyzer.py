@@ -14,6 +14,12 @@ from tradingagents.dataflows.market_data_service import fetch_ohlcv
 class SignalAnalyzer:
     """
     Analyzes signal provider signals and calculates performance metrics.
+    
+    TIMEZONE HANDLING:
+    - All signals are stored in GMT+4 (Asia/Dubai) in the database
+    - Market data timestamps are stored in GMT+4 (Asia/Dubai) in the database
+    - All internal processing uses GMT+4 to ensure consistency
+    - Timestamps are normalized to GMT+4 before any comparisons
     """
     
     def __init__(self, timezone: str = 'Asia/Dubai'):
@@ -30,7 +36,7 @@ class SignalAnalyzer:
     def analyze_signal(
         self,
         signal: Dict,
-        max_hold_days: int = 30,
+        max_hold_days: int = 30,  # Not used anymore, kept for backward compatibility
         price_tolerance: float = 0.0001
     ) -> Dict:
         """
@@ -38,11 +44,14 @@ class SignalAnalyzer:
         
         Args:
             signal: Signal dictionary
-            max_hold_days: Maximum days to analyze
+            max_hold_days: Deprecated - analysis is now limited to 72 hours
             price_tolerance: Price tolerance for hit detection (0.01% default)
             
         Returns:
             Dictionary with analysis results
+            
+        Note:
+            Market data is fetched for 72 hours from signal date (not 30 days)
         """
         try:
             symbol = signal.get('symbol', '').upper()
@@ -89,12 +98,16 @@ class SignalAnalyzer:
                 else:
                     asset_class = "Stocks"
             
-            end_date = signal_date + timedelta(days=max_hold_days)
+            # Limit to 72 hours from signal date (instead of 30 days)
+            end_date = signal_date + timedelta(hours=72)
+            
+            # CRITICAL: Query using GMT+4 (matching database storage format)
+            # Database stores timestamps in GMT+4, so query should use GMT+4
             market_data = fetch_ohlcv(
                 symbol=symbol,
                 interval='1min',
-                start=signal_date.astimezone(self.utc_tz),
-                end=end_date.astimezone(self.utc_tz),
+                start=signal_date,  # Already in GMT+4, use directly
+                end=end_date,       # Already in GMT+4, use directly (72 hours later)
                 asset_class=asset_class
             )
             
@@ -104,8 +117,8 @@ class SignalAnalyzer:
                 market_data = fetch_ohlcv(
                     symbol=symbol_with_prefix,
                     interval='1min',
-                    start=signal_date.astimezone(self.utc_tz),
-                    end=end_date.astimezone(self.utc_tz),
+                    start=signal_date,  # Already in GMT+4
+                    end=end_date,       # Already in GMT+4 (72 hours later)
                     asset_class="Currencies"
                 )
                 if market_data is not None and not market_data.empty:
@@ -119,11 +132,33 @@ class SignalAnalyzer:
                 market_data['timestamp'] = pd.to_datetime(market_data['timestamp'])
                 market_data = market_data.set_index('timestamp')
             
-            # Filter from signal_date onwards
+            # CRITICAL: Normalize timezones before comparison
+            # Ensure signal_date is in GMT+4 first (should already be, but double-check)
+            signal_date = signal_date.astimezone(self.tz)
+            
+            # Ensure both signal_date and market_data.index are in GMT+4
+            if market_data.index.tz is None:
+                # If timezone-naive, assume GMT+4 (based on database storage format)
+                market_data.index = market_data.index.tz_localize(self.tz)
+            elif market_data.index.tz != signal_date.tzinfo:
+                # If different timezone, convert to GMT+4 to match signal_date
+                # market_data.index.tz is pandas timezone, signal_date.tzinfo is datetime timezone
+                market_data.index = market_data.index.tz_convert(self.tz)
+            
+            # Debug logging for timezone validation
+            import os
+            if os.getenv("DEBUG_TIMEZONE", "false").lower() == "true":
+                print(f"🔍 [TZ] Signal date: {signal_date} (tz: {signal_date.tzinfo})")
+                if len(market_data) > 0:
+                    print(f"🔍 [TZ] Market data first: {market_data.index[0]} (tz: {market_data.index[0].tzinfo})")
+                    print(f"🔍 [TZ] Market data last: {market_data.index[-1]} (tz: {market_data.index[-1].tzinfo})")
+                    print(f"🔍 [TZ] Timezone match: {market_data.index[0].tzinfo == signal_date.tzinfo}")
+            
+            # Filter from signal_date onwards (now both are in same timezone)
             market_data = market_data[market_data.index >= signal_date]
             
             if market_data.empty:
-                return {"error": "No market data after signal date"}
+                return {"error": f"No market data after signal date {signal_date.isoformat()} (GMT+4). Check if market data exists for this time period."}
             
             # Analyze price movements
             result = self._analyze_price_movements(
@@ -137,12 +172,44 @@ class SignalAnalyzer:
                 price_tolerance=price_tolerance
             )
             
-            # Add metadata
+            # Add metadata and signal data for display
             result['signal_id'] = signal.get('id')
             result['provider_name'] = signal.get('provider_name')
             result['symbol'] = symbol
             result['signal_date'] = signal_date.isoformat()
             result['analysis_date'] = datetime.now(self.tz).isoformat()
+            
+            # Add signal data for table display
+            result['action'] = action.upper()  # BUY or SELL
+            result['entry_price'] = entry_price
+            result['target_1'] = target_1
+            result['target_2'] = target_2
+            result['target_3'] = target_3
+            result['stop_loss'] = stop_loss
+            
+            # Calculate "Pips Made" based on final_status
+            # For GOLD/XAUUSD, pips are typically price points (not forex pips)
+            pips_made = 0
+            is_buy = (action.lower() == 'buy')
+            
+            if result['final_status'] == 'TP1' and target_1:
+                pips_made = (target_1 - entry_price) if is_buy else (entry_price - target_1)
+            elif result['final_status'] == 'TP2' and target_2:
+                pips_made = (target_2 - entry_price) if is_buy else (entry_price - target_2)
+            elif result['final_status'] == 'TP3' and target_3:
+                pips_made = (target_3 - entry_price) if is_buy else (entry_price - target_3)
+            elif result['final_status'] == 'SL' and stop_loss:
+                pips_made = (stop_loss - entry_price) if is_buy else (entry_price - stop_loss)
+            elif result['final_status'] in ['EXPIRED', 'OPEN']:
+                # Use max_profit percentage converted to price points
+                # max_profit is in percentage (e.g., 0.43% = 0.0043)
+                if result.get('max_profit'):
+                    pips_made = (result['max_profit'] / 100) * entry_price
+                    if not is_buy:
+                        pips_made = -pips_made
+            
+            # Round to nearest integer (as shown in image)
+            result['pips_made'] = round(pips_made)
             
             return result
             
@@ -183,18 +250,101 @@ class SignalAnalyzer:
         
         # Track if entry was reached
         entry_reached = False
+        entry_datetime = None
+        
+        # Debug logging - always enabled for signal analysis
+        import os
+        debug_mode = True  # Always show detailed logging for signal analysis
+        
+        if debug_mode:
+            print(f"\n{'='*80}")
+            print(f"🔍 [SIGNAL ANALYSIS] Starting analysis")
+            print(f"{'='*80}")
+            print(f"   Entry: {entry_price:.2f}")
+            tp1_str = f"{target_1:.2f}" if target_1 else "N/A"
+            tp2_str = f"{target_2:.2f}" if target_2 else "N/A"
+            tp3_str = f"{target_3:.2f}" if target_3 else "N/A"
+            sl_str = f"{stop_loss:.2f}" if stop_loss else "N/A"
+            print(f"   TP1: {tp1_str}, TP2: {tp2_str}, TP3: {tp3_str}")
+            print(f"   SL: {sl_str}")
+            print(f"   Action: {action.upper()}")
+            print(f"   Total candles available: {len(market_data)}")
+            if len(market_data) > 0:
+                first_candle = market_data.iloc[0]
+                last_candle = market_data.iloc[-1]
+                print(f"   📅 First candle: {market_data.index[0]} | H:{first_candle['High']:.2f}, L:{first_candle['Low']:.2f}, C:{first_candle['Close']:.2f}")
+                print(f"   📅 Last candle: {market_data.index[-1]} | H:{last_candle['High']:.2f}, L:{last_candle['Low']:.2f}, C:{last_candle['Close']:.2f}")
+                hours_covered = (market_data.index[-1] - market_data.index[0]).total_seconds() / 3600.0
+                print(f"   ⏱️  Time coverage: {hours_covered:.2f} hours")
+            print(f"{'='*80}")
+        
+        # Check if we have any market data
+        if market_data.empty:
+            return {
+                'tp1_hit': False,
+                'tp2_hit': False,
+                'tp3_hit': False,
+                'sl_hit': False,
+                'max_profit': 0.0,
+                'max_drawdown': 0.0,
+                'final_status': 'NO_DATA',
+                'hold_time_hours': 0.0
+            }
+        
+        # More lenient entry detection: If first candle is close to entry, assume entry reached
+        first_candle = market_data.iloc[0]
+        first_high = float(first_candle.get('High', 0))
+        first_low = float(first_candle.get('Low', 0))
+        first_close = float(first_candle.get('Close', 0))
+        
+        # If price is very close to entry in first candle, assume entry reached
+        entry_tolerance = 0.01  # 0.01% tolerance
+        price_diff_pct = abs(first_close - entry_price) / entry_price if entry_price > 0 else 1.0
+        
+        if price_diff_pct <= entry_tolerance:
+            entry_reached = True
+            entry_datetime = market_data.index[0]
+            if debug_mode:
+                print(f"✅ [DEBUG] Entry assumed reached (first candle close {first_close:.2f} close to entry {entry_price:.2f})")
         
         for timestamp, row in market_data.iterrows():
             high = float(row.get('High', 0))
             low = float(row.get('Low', 0))
             close = float(row.get('Close', 0))
             
-            # Check entry
+            # Check entry (if not already reached)
             if not entry_reached:
                 if is_buy and low <= entry_price <= high:
                     entry_reached = True
+                    entry_datetime = timestamp
+                    if debug_mode:
+                        print(f"\n🎯 [ENTRY] Entry reached at {timestamp}")
+                        print(f"   Candle: H={high:.2f}, L={low:.2f}, C={close:.2f}")
+                        print(f"   Condition: Low ({low:.2f}) <= Entry ({entry_price:.2f}) <= High ({high:.2f})")
                 elif not is_buy and low <= entry_price <= high:
                     entry_reached = True
+                    entry_datetime = timestamp
+                    if debug_mode:
+                        print(f"\n🎯 [ENTRY] Entry reached at {timestamp}")
+                        print(f"   Candle: H={high:.2f}, L={low:.2f}, C={close:.2f}")
+                        print(f"   Condition: Low ({low:.2f}) <= Entry ({entry_price:.2f}) <= High ({high:.2f})")
+                # If price moved past entry without touching it, assume entry at first opportunity
+                elif is_buy and low > entry_price:
+                    # Price already above entry - assume we entered at entry price
+                    entry_reached = True
+                    entry_datetime = timestamp
+                    if debug_mode:
+                        print(f"\n🎯 [ENTRY] Entry assumed at {timestamp}")
+                        print(f"   Candle: H={high:.2f}, L={low:.2f}, C={close:.2f}")
+                        print(f"   Reason: Price ({low:.2f}) already above entry ({entry_price:.2f})")
+                elif not is_buy and high < entry_price:
+                    # Price already below entry - assume we entered at entry price
+                    entry_reached = True
+                    entry_datetime = timestamp
+                    if debug_mode:
+                        print(f"\n🎯 [ENTRY] Entry assumed at {timestamp}")
+                        print(f"   Candle: H={high:.2f}, L={low:.2f}, C={close:.2f}")
+                        print(f"   Reason: Price ({high:.2f}) already below entry ({entry_price:.2f})")
             
             if not entry_reached:
                 continue
@@ -211,34 +361,105 @@ class SignalAnalyzer:
             if current_profit < max_drawdown:
                 max_drawdown = current_profit
             
-            # Check TP1
-            if target_1 and not tp1_hit:
-                if (is_buy and high >= target_1) or (not is_buy and low <= target_1):
-                    tp1_hit = True
-                    tp1_hit_datetime = timestamp
-                    final_status = 'TP1'
+            # CORE PRINCIPLE: Whichever price is touched FIRST in time wins - TP or SL
+            # Use worst-case assumption: Check SL first in each candle (risk management)
+            # However, if TP1/TP2 are already hit, continue tracking but SL can still override
             
-            # Check TP2 (only if TP1 hit)
-            if target_2 and tp1_hit and not tp2_hit:
-                if (is_buy and high >= target_2) or (not is_buy and low <= target_2):
-                    tp2_hit = True
-                    tp2_hit_datetime = timestamp
-                    final_status = 'TP2'
-            
-            # Check TP3 (only if TP2 hit)
-            if target_3 and tp2_hit and not tp3_hit:
-                if (is_buy and high >= target_3) or (not is_buy and low <= target_3):
-                    tp3_hit = True
-                    tp3_hit_datetime = timestamp
-                    final_status = 'TP3'
-            
-            # Check Stop Loss (takes priority)
-            if stop_loss:
-                if (is_buy and low <= stop_loss) or (not is_buy and high >= stop_loss):
+            if is_buy:
+                # BUY trade: SL is below entry, TPs are above entry
+                # Check if SL (low) is hit in this candle
+                if stop_loss and low <= stop_loss:
                     sl_hit = True
                     sl_hit_datetime = timestamp
                     final_status = 'SL'
-                    break  # SL closes position immediately
+                    if debug_mode:
+                        print(f"\n🛑 [HIT] SL HIT at {timestamp}")
+                        print(f"   Candle: H={high:.2f}, L={low:.2f}, C={close:.2f}")
+                        print(f"   Condition: Low ({low:.2f}) <= SL ({stop_loss:.2f})")
+                        print(f"   Previous TPs: TP1={tp1_hit}, TP2={tp2_hit}, TP3={tp3_hit}")
+                        print(f"   Final Status: SL")
+                    break  # SL closes entire position immediately (even if TPs were hit before)
+                
+                # Then check TPs (high) - price moving up
+                # Track TPs sequentially, but SL can override later
+                if target_1 and not tp1_hit and high >= target_1:
+                    tp1_hit = True
+                    tp1_hit_datetime = timestamp
+                    final_status = 'TP1'  # Update status, but continue (SL can override)
+                    if debug_mode:
+                        print(f"\n✅ [HIT] TP1 HIT at {timestamp}")
+                        print(f"   Candle: H={high:.2f}, L={low:.2f}, C={close:.2f}")
+                        print(f"   Condition: High ({high:.2f}) >= TP1 ({target_1:.2f})")
+                        print(f"   Status: TP1 (continuing to check TP2/TP3/SL)")
+                
+                if target_2 and tp1_hit and not tp2_hit and high >= target_2:
+                    tp2_hit = True
+                    tp2_hit_datetime = timestamp
+                    final_status = 'TP2'  # Update status, but continue (SL can override)
+                    if debug_mode:
+                        print(f"\n✅ [HIT] TP2 HIT at {timestamp}")
+                        print(f"   Candle: H={high:.2f}, L={low:.2f}, C={close:.2f}")
+                        print(f"   Condition: High ({high:.2f}) >= TP2 ({target_2:.2f})")
+                        print(f"   Status: TP2 (continuing to check TP3/SL)")
+                
+                if target_3 and tp2_hit and not tp3_hit and high >= target_3:
+                    tp3_hit = True
+                    tp3_hit_datetime = timestamp
+                    final_status = 'TP3'
+                    if debug_mode:
+                        print(f"\n✅ [HIT] TP3 HIT at {timestamp}")
+                        print(f"   Candle: H={high:.2f}, L={low:.2f}, C={close:.2f}")
+                        print(f"   Condition: High ({high:.2f}) >= TP3 ({target_3:.2f})")
+                        print(f"   Status: TP3 (position closed, all profit taken)")
+                    break  # TP3 closes position - all profit taken, no SL possible after
+                    
+            else:
+                # SELL trade: SL is above entry, TPs are below entry
+                # Check if SL (high) is hit in this candle
+                if stop_loss and high >= stop_loss:
+                    sl_hit = True
+                    sl_hit_datetime = timestamp
+                    final_status = 'SL'
+                    if debug_mode:
+                        print(f"\n🛑 [HIT] SL HIT at {timestamp}")
+                        print(f"   Candle: H={high:.2f}, L={low:.2f}, C={close:.2f}")
+                        print(f"   Condition: High ({high:.2f}) >= SL ({stop_loss:.2f})")
+                        print(f"   Previous TPs: TP1={tp1_hit}, TP2={tp2_hit}, TP3={tp3_hit}")
+                        print(f"   Final Status: SL")
+                    break  # SL closes entire position immediately (even if TPs were hit before)
+                
+                # Then check TPs (low) - price moving down
+                # Track TPs sequentially, but SL can override later
+                if target_1 and not tp1_hit and low <= target_1:
+                    tp1_hit = True
+                    tp1_hit_datetime = timestamp
+                    final_status = 'TP1'  # Update status, but continue (SL can override)
+                    if debug_mode:
+                        print(f"\n✅ [HIT] TP1 HIT at {timestamp}")
+                        print(f"   Candle: H={high:.2f}, L={low:.2f}, C={close:.2f}")
+                        print(f"   Condition: Low ({low:.2f}) <= TP1 ({target_1:.2f})")
+                        print(f"   Status: TP1 (continuing to check TP2/TP3/SL)")
+                
+                if target_2 and tp1_hit and not tp2_hit and low <= target_2:
+                    tp2_hit = True
+                    tp2_hit_datetime = timestamp
+                    final_status = 'TP2'  # Update status, but continue (SL can override)
+                    if debug_mode:
+                        print(f"\n✅ [HIT] TP2 HIT at {timestamp}")
+                        print(f"   Candle: H={high:.2f}, L={low:.2f}, C={close:.2f}")
+                        print(f"   Condition: Low ({low:.2f}) <= TP2 ({target_2:.2f})")
+                        print(f"   Status: TP2 (continuing to check TP3/SL)")
+                
+                if target_3 and tp2_hit and not tp3_hit and low <= target_3:
+                    tp3_hit = True
+                    tp3_hit_datetime = timestamp
+                    final_status = 'TP3'
+                    if debug_mode:
+                        print(f"\n✅ [HIT] TP3 HIT at {timestamp}")
+                        print(f"   Candle: H={high:.2f}, L={low:.2f}, C={close:.2f}")
+                        print(f"   Condition: Low ({low:.2f}) <= TP3 ({target_3:.2f})")
+                        print(f"   Status: TP3 (position closed, all profit taken)")
+                    break  # TP3 closes position - all profit taken, no SL possible after
         
         # Determine final status if still open
         if not sl_hit and not tp3_hit:
@@ -247,11 +468,25 @@ class SignalAnalyzer:
             elif tp1_hit:
                 final_status = 'TP1'
             else:
-                # Check if expired (beyond max hold period)
-                if market_data.index[-1] - market_data.index[0] >= timedelta(days=30):
+                # Check if expired (beyond 72 hour hold period)
+                if market_data.index[-1] - market_data.index[0] >= timedelta(hours=72):
                     final_status = 'EXPIRED'
                 else:
                     final_status = 'OPEN'
+        
+        # Final summary logging
+        if debug_mode:
+            print(f"\n{'='*80}")
+            print(f"📊 [ANALYSIS SUMMARY]")
+            print(f"{'='*80}")
+            print(f"   Entry Reached: {entry_reached} ({entry_datetime})")
+            print(f"   TP1 Hit: {tp1_hit} ({tp1_hit_datetime})")
+            print(f"   TP2 Hit: {tp2_hit} ({tp2_hit_datetime})")
+            print(f"   TP3 Hit: {tp3_hit} ({tp3_hit_datetime})")
+            print(f"   SL Hit: {sl_hit} ({sl_hit_datetime})")
+            print(f"   Final Status: {final_status}")
+            print(f"   Max Profit: {max_profit*100:.4f}%, Max Drawdown: {max_drawdown*100:.4f}%")
+            print(f"{'='*80}\n")
         
         # Calculate hold time
         if tp1_hit_datetime:

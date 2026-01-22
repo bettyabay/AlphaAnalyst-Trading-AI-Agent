@@ -35,6 +35,7 @@ from tradingagents.dataflows.run_signal_analysis import (
     run_backtest_for_all_signals,
     calculate_provider_metrics,
     get_available_instruments,
+    get_available_providers,
     check_market_data_availability
 )
 from tradingagents.config.watchlist import WATCHLIST_STOCKS, get_watchlist_symbols
@@ -1752,8 +1753,9 @@ def phase1_foundation_data():
     st.markdown("#### Automated Signal Analysis")
     st.write("Analyze signals to determine TP/SL hits and calculate performance metrics. Select an instrument to analyze its signals against market data.")
     
-    # Get available instruments
+    # Get available instruments and providers from database
     available_instruments = get_available_instruments()
+    available_providers = get_available_providers()
     
     col_a1, col_a2, col_a3 = st.columns(3)
     with col_a1:
@@ -1766,8 +1768,9 @@ def phase1_foundation_data():
     with col_a2:
         analysis_provider = st.selectbox(
             "Provider (Optional)",
-            options=["All Providers"] + (st.session_state.get("signal_providers", []) or []),
-            key="analysis_provider"
+            options=["All Providers"] + (available_providers or []),
+            key="analysis_provider",
+            help="Select a specific provider to filter signals. 'All Providers' will analyze signals from all providers."
         )
     with col_a3:
         analysis_date_range = st.selectbox(
@@ -1796,9 +1799,7 @@ def phase1_foundation_data():
             market_data_status = check_market_data_availability(analysis_instrument)
             
             if market_data_status.get("available"):
-                st.success(f"✅ Market data available for {analysis_instrument} (Table: {market_data_status.get('table', 'N/A')})")
-                if market_data_status.get("earliest_date") and market_data_status.get("latest_date"):
-                    st.info(f"📅 Data range: {market_data_status['earliest_date']} to {market_data_status['latest_date']}")
+                st.success(f"✅ Market data available for {analysis_instrument}")
             else:
                 st.warning(f"⚠️ {market_data_status.get('error', 'Market data not available for this instrument')}")
                 st.info("💡 Please ensure market data has been ingested for this instrument before running analysis.")
@@ -1824,7 +1825,7 @@ def phase1_foundation_data():
                         symbol=analysis_instrument,
                         start_date=start_dt,
                         end_date=end_dt,
-                        save_results=True
+                        save_results=False  # Don't save to DB during testing
                     )
                     
                     if 'error' not in result:
@@ -1838,34 +1839,154 @@ def phase1_foundation_data():
                             st.metric("Errors", result.get('errors', 0))
                         with col_r4:
                             st.metric("Success Rate", f"{result.get('success_rate', 0):.1f}%")
+                        
+                        # Store results in session state for display (without saving to DB)
+                        st.session_state['latest_analysis_results'] = result.get('analysis_results', [])
                     else:
                         st.error(f"Error: {result.get('error')}")
+                        if 'latest_analysis_results' in st.session_state:
+                            del st.session_state['latest_analysis_results']
                 except Exception as e:
                     st.error(f"Analysis failed: {str(e)}")
                     import traceback
                     st.code(traceback.format_exc())
     
-    # Show analysis results
+    # Show analysis results (from session state during testing, not from DB)
     st.markdown("#### Analysis Results")
-    try:
-        supabase = get_supabase()
-        if supabase:
-            query = supabase.table('analysis_results').select('*').order('analysis_date', desc=True).limit(50)
-            if analysis_provider != "All Providers":
-                query = query.eq('provider_name', analysis_provider)
-            if analysis_instrument and analysis_instrument != "Select Instrument":
-                query = query.eq('symbol', analysis_instrument.upper())
-            result = query.execute()
-            
-            if result.data:
-                df_results = pd.DataFrame(result.data)
-                display_cols = ['signal_date', 'symbol', 'provider_name', 'tp1_hit', 'tp2_hit', 'tp3_hit', 'sl_hit', 'final_status', 'max_profit', 'max_drawdown']
-                display_cols = [c for c in display_cols if c in df_results.columns]
-                st.dataframe(df_results[display_cols], use_container_width=True)
+    
+    # Check if we have results in session state (testing mode - not saved to DB)
+    if 'latest_analysis_results' in st.session_state and st.session_state['latest_analysis_results']:
+        try:
+            results_list = st.session_state['latest_analysis_results']
+            if results_list:
+                df_results = pd.DataFrame(results_list)
+                
+                # Format table to match the image format
+                # Columns: Date, Time, Asset, Direction, Entry, TP1, TP2, TP3, SL, Pips Made
+                formatted_data = []
+                
+                for _, row in df_results.iterrows():
+                    # Parse signal_date
+                    signal_date_str = row.get('signal_date', '')
+                    if signal_date_str:
+                        try:
+                            # datetime is already imported at module level
+                            if 'T' in signal_date_str:
+                                dt = datetime.fromisoformat(signal_date_str.replace('Z', '+00:00'))
+                            else:
+                                dt = datetime.fromisoformat(signal_date_str)
+                            date_str = dt.strftime('%d/%m/%Y')
+                            time_str = dt.strftime('%H:%M')
+                        except:
+                            date_str = signal_date_str[:10] if len(signal_date_str) >= 10 else signal_date_str
+                            time_str = signal_date_str[11:16] if len(signal_date_str) >= 16 else ''
+                    else:
+                        date_str = 'N/A'
+                        time_str = 'N/A'
+                    
+                    # Format TP/SL with checkmarks if hit
+                    tp1_value = row.get('target_1', 'N/A')
+                    tp1_hit = row.get('tp1_hit', False)
+                    if tp1_value != 'N/A' and tp1_hit:
+                        tp1_value = f"{tp1_value} ✓"
+                    
+                    tp2_value = row.get('target_2', 'N/A')
+                    tp2_hit = row.get('tp2_hit', False)
+                    if tp2_value != 'N/A' and tp2_hit:
+                        tp2_value = f"{tp2_value} ✓"
+                    
+                    tp3_value = row.get('target_3', 'N/A')
+                    tp3_hit = row.get('tp3_hit', False)
+                    if tp3_value != 'N/A' and tp3_hit:
+                        tp3_value = f"{tp3_value} ✓"
+                    
+                    sl_value = row.get('stop_loss', 'N/A')
+                    sl_hit = row.get('sl_hit', False)
+                    if sl_value != 'N/A' and sl_hit:
+                        sl_value = f"{sl_value} ✓"
+                    
+                    formatted_data.append({
+                        'Date': date_str,
+                        'Time': time_str,
+                        'Asset': row.get('symbol', 'N/A'),
+                        'Direction': row.get('action', 'N/A'),
+                        'Entry': row.get('entry_price', 'N/A'),
+                        'TP1': tp1_value,
+                        'TP2': tp2_value,
+                        'TP3': tp3_value,
+                        'SL': sl_value,
+                        'Pips Made': row.get('pips_made', 0)
+                    })
+                
+                if formatted_data:
+                    df_display = pd.DataFrame(formatted_data)
+                    # Format numeric columns
+                    # Entry should be decimal
+                    if 'Entry' in df_display.columns:
+                        def format_entry(x):
+                            if x == 'N/A' or x is None:
+                                return 'N/A'
+                            try:
+                                if isinstance(x, (int, float)) and not pd.isna(x):
+                                    return float(x)
+                                return x
+                            except:
+                                return x
+                        df_display['Entry'] = df_display['Entry'].apply(format_entry)
+                    
+                    # TP1, TP2, TP3, SL may have checkmarks, so format carefully
+                    tp_cols = ['TP1', 'TP2', 'TP3', 'SL']
+                    for col in tp_cols:
+                        if col in df_display.columns:
+                            def format_tp_sl(x):
+                                if x == 'N/A' or x is None:
+                                    return 'N/A'
+                                # Check if it already has a checkmark (string format)
+                                if isinstance(x, str) and '✓' in x:
+                                    # Extract the number part and format it
+                                    try:
+                                        num_part = float(x.split('✓')[0].strip())
+                                        return f"{num_part} ✓"
+                                    except:
+                                        return x
+                                # Otherwise, format as number
+                                try:
+                                    if isinstance(x, (int, float)) and not pd.isna(x):
+                                        return float(x)
+                                    return x
+                                except:
+                                    return x
+                            df_display[col] = df_display[col].apply(format_tp_sl)
+                    
+                    # Pips Made should be integer (can be negative)
+                    if 'Pips Made' in df_display.columns:
+                        def format_pips(x):
+                            if x is None:
+                                return 0
+                            try:
+                                if isinstance(x, (int, float)) and not pd.isna(x):
+                                    return int(x)
+                                return 0
+                            except:
+                                return 0
+                        df_display['Pips Made'] = df_display['Pips Made'].apply(format_pips)
+                    
+                    # Only display the columns we want (exclude max_profit, max_drawdown, etc.)
+                    display_columns = ['Date', 'Time', 'Asset', 'Direction', 'Entry', 'TP1', 'TP2', 'TP3', 'SL', 'Pips Made']
+                    df_display = df_display[[col for col in display_columns if col in df_display.columns]]
+                    
+                    st.dataframe(df_display, use_container_width=True)
+                    st.caption(f"📊 Showing {len(df_display)} analysis results (Testing Mode - Not saved to database)")
+                else:
+                    st.info("No analysis results to display. Run analysis first.")
             else:
-                st.info("No analysis results found. Run analysis first.")
-    except Exception as e:
-        st.warning(f"Could not load analysis results: {str(e)}")
+                st.info("No analysis results to display. Run analysis first.")
+        except Exception as e:
+            st.warning(f"Could not display analysis results: {str(e)}")
+            import traceback
+            st.code(traceback.format_exc())
+    else:
+        st.info("No analysis results found. Run analysis first. (Testing Mode - Results are not saved to database)")
 
     with col_c:
         kpi_options = ["ATR", "Volume", "VWAP", "EMA", "SMA", "RSI", "MACD", "Bollinger Bands", "Stochastic", "Momentum", "Add..."] + (st.session_state.get("kpi_indicators", []) or [])
