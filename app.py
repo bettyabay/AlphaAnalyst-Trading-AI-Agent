@@ -1423,15 +1423,8 @@ def phase1_foundation_data():
                     with col_date2:
                         end_date = st.date_input("End Date (optional)", value=None, key="pipxpert_end_date")
                     
-                    # Timezone Selection (source timezone of the file)
-                    source_timezone_options = ["America/New_York", "UTC", "Asia/Dubai", "Europe/London", "Asia/Kolkata", "America/Chicago", "America/Los_Angeles"]
-                    source_timezone = st.selectbox(
-                        "Source Timezone (of the Excel file)",
-                        options=source_timezone_options,
-                        index=1,  # Default to UTC
-                        key="pipxpert_timezone",
-                        help="Timezone of the dates in the Excel file. Data will be converted to GMT+4 (Asia/Dubai) automatically."
-                    )
+                    # All signals from Excel are assumed to be in UTC
+                    source_timezone = "UTC"
                     
                     signal_file = st.file_uploader("Upload Signal Data (Excel)", type=["xls", "xlsx", "csv"], key="pipxpert_upload")
                     
@@ -1905,6 +1898,15 @@ def phase1_foundation_data():
                     if sl_value != 'N/A' and sl_hit:
                         sl_value = f"{sl_value} ✓"
                     
+                    # Get status - show final_status, don't show error messages
+                    status = row.get('final_status', 'N/A')
+                    
+                    # If status is NO_DATA or ERROR, show a user-friendly message instead
+                    if status in ['NO_DATA', 'ERROR']:
+                        status = 'NO_DATA'
+                    elif not status or status == 'N/A':
+                        status = 'N/A'
+                    
                     formatted_data.append({
                         'Date': date_str,
                         'Time': time_str,
@@ -1915,7 +1917,8 @@ def phase1_foundation_data():
                         'TP2': tp2_value,
                         'TP3': tp3_value,
                         'SL': sl_value,
-                        'Pips Made': row.get('pips_made', 0)
+                        'Pips Made': row.get('pips_made', 0),
+                        'Status': status
                     })
                 
                 if formatted_data:
@@ -1972,7 +1975,7 @@ def phase1_foundation_data():
                         df_display['Pips Made'] = df_display['Pips Made'].apply(format_pips)
                     
                     # Only display the columns we want (exclude max_profit, max_drawdown, etc.)
-                    display_columns = ['Date', 'Time', 'Asset', 'Direction', 'Entry', 'TP1', 'TP2', 'TP3', 'SL', 'Pips Made']
+                    display_columns = ['Date', 'Time', 'Asset', 'Direction', 'Entry', 'TP1', 'TP2', 'TP3', 'SL', 'Pips Made', 'Status']
                     df_display = df_display[[col for col in display_columns if col in df_display.columns]]
                     
                     st.dataframe(df_display, use_container_width=True)

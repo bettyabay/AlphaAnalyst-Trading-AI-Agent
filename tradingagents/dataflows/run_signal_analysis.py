@@ -289,6 +289,58 @@ def run_analysis_for_all_signals(
         # Debug: print what variants we're trying
         print(f"DEBUG: Trying {len(variants_to_try)} symbol variants: {variants_to_try}")
         
+        # Diagnostic: Check total signals for this provider (without filters)
+        total_signals = 0  # Initialize for later use
+        try:
+            diagnostic_query = supabase.table('signal_provider_signals').select('id, symbol, signal_date, provider_name')
+            if provider_name:
+                diagnostic_query = diagnostic_query.eq('provider_name', provider_name)
+            diagnostic_result = diagnostic_query.execute()
+            
+            if diagnostic_result.data:
+                total_signals = len(diagnostic_result.data)
+                print(f"🔍 DIAGNOSTIC: Total signals for provider '{provider_name}': {total_signals}")
+                
+                # Count by symbol
+                symbol_counts = {}
+                for sig in diagnostic_result.data:
+                    sym = sig.get('symbol', 'N/A')
+                    symbol_counts[sym] = symbol_counts.get(sym, 0) + 1
+                print(f"🔍 DIAGNOSTIC: Signals by symbol: {symbol_counts}")
+                
+                # Show date range
+                if diagnostic_result.data:
+                    dates = [sig.get('signal_date') for sig in diagnostic_result.data if sig.get('signal_date')]
+                    if dates:
+                        try:
+                            parsed_dates = [datetime.fromisoformat(d.replace('Z', '+00:00')) if isinstance(d, str) else d for d in dates]
+                            min_date = min(parsed_dates)
+                            max_date = max(parsed_dates)
+                            print(f"🔍 DIAGNOSTIC: Date range in DB: {min_date.date()} to {max_date.date()}")
+                        except Exception as e:
+                            print(f"🔍 DIAGNOSTIC: Date range parsing failed: {e}")
+                
+                # If date filters are provided, show how many are excluded
+                if start_date or end_date:
+                    filtered_count = 0
+                    for sig in diagnostic_result.data:
+                        sig_date_str = sig.get('signal_date')
+                        if sig_date_str:
+                            try:
+                                sig_date = datetime.fromisoformat(sig_date_str.replace('Z', '+00:00')) if isinstance(sig_date_str, str) else sig_date_str
+                                if start_date and sig_date < start_date:
+                                    continue
+                                if end_date and sig_date > end_date:
+                                    continue
+                                filtered_count += 1
+                            except:
+                                pass
+                    excluded = total_signals - filtered_count
+                    if excluded > 0:
+                        print(f"⚠️ DIAGNOSTIC: {excluded} signals excluded by date filter (outside range {start_date.date() if start_date else 'N/A'} to {end_date.date() if end_date else 'N/A'})")
+        except Exception as e:
+            print(f"DEBUG: Could not run diagnostic query: {e}")
+        
         # Also try a test query to see what symbols actually exist in the database
         try:
             # Test query without any filters to see what's actually there
@@ -370,6 +422,34 @@ def run_analysis_for_all_signals(
                 seen_ids.add(sig_id)
                 signals.append(sig)
         
+        # Final diagnostic: If we found fewer signals than expected, show what we're missing
+        if provider_name:
+            try:
+                # Query all signals for this provider with same filters (no symbol filter) to see what we're missing
+                all_provider_query = supabase.table('signal_provider_signals').select('id, symbol, signal_date, action')
+                all_provider_query = all_provider_query.eq('provider_name', provider_name)
+                if start_date:
+                    all_provider_query = all_provider_query.gte('signal_date', start_date.isoformat())
+                if end_date:
+                    all_provider_query = all_provider_query.lte('signal_date', end_date.isoformat())
+                all_provider_result = all_provider_query.execute()
+                
+                if all_provider_result.data:
+                    expected_count = len(all_provider_result.data)
+                    found_ids = {sig.get('id') for sig in signals if sig.get('id')}
+                    missing_signals = [sig for sig in all_provider_result.data if sig.get('id') not in found_ids]
+                    
+                    if missing_signals:
+                        print(f"⚠️ DIAGNOSTIC: Found {len(signals)} signals with symbol variants, but {expected_count} signals exist for provider '{provider_name}' (with date filters). {len(missing_signals)} signals weren't matched:")
+                        for missing in missing_signals[:10]:  # Show first 10 missing
+                            print(f"  - ID: {missing.get('id')}, Symbol: '{missing.get('symbol')}', Date: {missing.get('signal_date')}, Action: {missing.get('action')}")
+                        if len(missing_signals) > 10:
+                            print(f"  ... and {len(missing_signals) - 10} more")
+                    elif len(signals) < expected_count:
+                        print(f"ℹ️ DIAGNOSTIC: Found {len(signals)} unique signals after deduplication, {expected_count} total signals match filters")
+            except Exception as e:
+                print(f"DEBUG: Could not check for missing signals: {e}")
+        
         # If date filters were provided and no signals found, return error
         if not signals and (start_date or end_date):
             date_range_info = ""
@@ -429,10 +509,64 @@ def run_analysis_for_all_signals(
                     print(f"  Error: {error_msg}")
                     error_count += 1
                     
+                    # Include error results in display so users can see signals that couldn't be analyzed
+                    error_result = {
+                        'signal_id': signal.get('id'),
+                        'provider_name': signal.get('provider_name'),
+                        'symbol': signal_symbol,
+                        'signal_date': signal_date,
+                        'action': signal.get('action', '').upper(),
+                        'entry_price': signal.get('entry_price'),
+                        'target_1': signal.get('target_1'),
+                        'target_2': signal.get('target_2'),
+                        'target_3': signal.get('target_3'),
+                        'stop_loss': signal.get('stop_loss'),
+                        'final_status': 'NO_DATA',
+                        'error': error_msg,
+                        'tp1_hit': False,
+                        'tp2_hit': False,
+                        'tp3_hit': False,
+                        'sl_hit': False,
+                        'max_profit': 0.0,
+                        'max_drawdown': 0.0,
+                        'hold_time_hours': 0.0,
+                        'pips_made': 0
+                    }
+                    if not save_results:
+                        # Store error result in list for display (testing mode)
+                        analysis_results_list.append(error_result)
+                    
             except Exception as e:
                 error_msg = str(e).encode('ascii', 'ignore').decode('ascii')
                 print(f"  Exception: {error_msg}")
                 error_count += 1
+                
+                # Include exception results in display
+                error_result = {
+                    'signal_id': signal.get('id'),
+                    'provider_name': signal.get('provider_name'),
+                    'symbol': signal.get('symbol', 'N/A'),
+                    'signal_date': signal.get('signal_date', 'N/A'),
+                    'action': signal.get('action', '').upper(),
+                    'entry_price': signal.get('entry_price'),
+                    'target_1': signal.get('target_1'),
+                    'target_2': signal.get('target_2'),
+                    'target_3': signal.get('target_3'),
+                    'stop_loss': signal.get('stop_loss'),
+                    'final_status': 'ERROR',
+                    'error': error_msg,
+                    'tp1_hit': False,
+                    'tp2_hit': False,
+                    'tp3_hit': False,
+                    'sl_hit': False,
+                    'max_profit': 0.0,
+                    'max_drawdown': 0.0,
+                    'hold_time_hours': 0.0,
+                    'pips_made': 0
+                }
+                if not save_results:
+                    # Store error result in list for display (testing mode)
+                    analysis_results_list.append(error_result)
         
         return {
             'total_signals': len(signals),
@@ -501,10 +635,64 @@ def run_analysis_for_all_signals(
                 print(f"  Error: {error_msg}")
                 error_count += 1
                 
+                # Include error results in display so users can see signals that couldn't be analyzed
+                error_result = {
+                    'signal_id': signal.get('id'),
+                    'provider_name': signal.get('provider_name'),
+                    'symbol': symbol,
+                    'signal_date': signal_date,
+                    'action': signal.get('action', '').upper(),
+                    'entry_price': signal.get('entry_price'),
+                    'target_1': signal.get('target_1'),
+                    'target_2': signal.get('target_2'),
+                    'target_3': signal.get('target_3'),
+                    'stop_loss': signal.get('stop_loss'),
+                    'final_status': 'NO_DATA',
+                    'error': error_msg,
+                    'tp1_hit': False,
+                    'tp2_hit': False,
+                    'tp3_hit': False,
+                    'sl_hit': False,
+                    'max_profit': 0.0,
+                    'max_drawdown': 0.0,
+                    'hold_time_hours': 0.0,
+                    'pips_made': 0
+                }
+                if not save_results:
+                    # Store error result in list for display (testing mode)
+                    analysis_results_list.append(error_result)
+                
         except Exception as e:
             error_msg = str(e).encode('ascii', 'ignore').decode('ascii')
             print(f"  Exception: {error_msg}")
             error_count += 1
+            
+            # Include exception results in display
+            error_result = {
+                'signal_id': signal.get('id'),
+                'provider_name': signal.get('provider_name'),
+                'symbol': symbol,
+                'signal_date': signal_date,
+                'action': signal.get('action', '').upper(),
+                'entry_price': signal.get('entry_price'),
+                'target_1': signal.get('target_1'),
+                'target_2': signal.get('target_2'),
+                'target_3': signal.get('target_3'),
+                'stop_loss': signal.get('stop_loss'),
+                'final_status': 'ERROR',
+                'error': error_msg,
+                'tp1_hit': False,
+                'tp2_hit': False,
+                'tp3_hit': False,
+                'sl_hit': False,
+                'max_profit': 0.0,
+                'max_drawdown': 0.0,
+                'hold_time_hours': 0.0,
+                'pips_made': 0
+            }
+            if not save_results:
+                # Store error result in list for display (testing mode)
+                analysis_results_list.append(error_result)
     
     return {
         'total_signals': len(signals),

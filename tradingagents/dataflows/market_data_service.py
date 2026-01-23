@@ -143,16 +143,17 @@ def fetch_ohlcv(
         elif asset_class == "Stocks":
             table = "market_data_stocks_1min"  # Default stock table
         # 2. Fallback to symbol pattern matching
-        elif "*" in symbol:
+        # IMPORTANT: Check for Gold/Silver (XAU/XAG) BEFORE C: prefix check
+        # because C:XAUUSD should go to commodities, not currencies
+        elif "XAU" in symbol or "XAG" in symbol or "*" in symbol:
+            # Gold/Silver - route to commodities
             table = "market_data_commodities_1min"
         elif symbol.startswith("^") or symbol.startswith("I:"):
             table = "market_data_indices_1min"
         elif "/" in symbol or symbol.startswith("C:"):
             # C: prefix indicates currency (e.g., C:EURUSD, C:GBPUSD)
+            # BUT NOT C:XAUUSD which is handled above
             table = "market_data_currencies_1min"
-        elif "XAU" in symbol or "XAG" in symbol:
-            # Gold/Silver - route to commodities
-            table = "market_data_commodities_1min"
             
     time_field = config["time_field"]
     is_date = bool(config["is_date"])

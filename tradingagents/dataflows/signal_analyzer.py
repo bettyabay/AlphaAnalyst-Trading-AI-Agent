@@ -82,13 +82,16 @@ class SignalAnalyzer:
             
             # Fetch market data
             # Determine asset_class based on symbol prefix
+            # IMPORTANT: Check for Gold/Silver (XAU/XAG) FIRST, even if it has C: prefix
+            # because Gold data is stored in commodities table, not currencies table
             asset_class = None
-            if symbol.startswith("C:"):
+            if "XAU" in symbol or "XAG" in symbol or "*" in symbol:
+                # Gold/Silver - always route to commodities table
+                asset_class = "Commodities"
+            elif symbol.startswith("C:"):
                 asset_class = "Currencies"
             elif symbol.startswith("I:") or symbol.startswith("^"):
                 asset_class = "Indices"
-            elif "XAU" in symbol or "XAG" in symbol or "*" in symbol:
-                asset_class = "Commodities"
             else:
                 # Try to infer from symbol length/pattern
                 if len(symbol) >= 6 and len(symbol) <= 7 and not symbol.startswith("C:"):
@@ -111,18 +114,46 @@ class SignalAnalyzer:
                 asset_class=asset_class
             )
             
-            # If no data found and symbol doesn't have C: prefix, try with C: prefix
-            if (market_data is None or market_data.empty) and not symbol.startswith("C:") and len(symbol) >= 6 and len(symbol) <= 7:
-                symbol_with_prefix = f"C:{symbol}"
-                market_data = fetch_ohlcv(
-                    symbol=symbol_with_prefix,
-                    interval='1min',
-                    start=signal_date,  # Already in GMT+4
-                    end=end_date,       # Already in GMT+4 (72 hours later)
-                    asset_class="Currencies"
-                )
-                if market_data is not None and not market_data.empty:
-                    symbol = symbol_with_prefix  # Update symbol for consistency
+            # If no data found, try alternative symbol formats and tables
+            if (market_data is None or market_data.empty):
+                # For XAUUSD variants, try commodities table with different symbol formats
+                if "XAU" in symbol or "XAG" in symbol:
+                    # Try C:XAUUSD in commodities table
+                    if not symbol.startswith("C:"):
+                        symbol_with_prefix = f"C:{symbol}"
+                        market_data = fetch_ohlcv(
+                            symbol=symbol_with_prefix,
+                            interval='1min',
+                            start=signal_date,
+                            end=end_date,
+                            asset_class="Commodities"
+                        )
+                        if market_data is not None and not market_data.empty:
+                            symbol = symbol_with_prefix
+                    # Try without C: prefix in commodities table
+                    if (market_data is None or market_data.empty) and symbol.startswith("C:"):
+                        symbol_without_prefix = symbol[2:]
+                        market_data = fetch_ohlcv(
+                            symbol=symbol_without_prefix,
+                            interval='1min',
+                            start=signal_date,
+                            end=end_date,
+                            asset_class="Commodities"
+                        )
+                        if market_data is not None and not market_data.empty:
+                            symbol = symbol_without_prefix
+                # For regular currency pairs, try with C: prefix in currencies table
+                elif not symbol.startswith("C:") and len(symbol) >= 6 and len(symbol) <= 7:
+                    symbol_with_prefix = f"C:{symbol}"
+                    market_data = fetch_ohlcv(
+                        symbol=symbol_with_prefix,
+                        interval='1min',
+                        start=signal_date,  # Already in GMT+4
+                        end=end_date,       # Already in GMT+4 (72 hours later)
+                        asset_class="Currencies"
+                    )
+                    if market_data is not None and not market_data.empty:
+                        symbol = symbol_with_prefix  # Update symbol for consistency
             
             if market_data is None or market_data.empty:
                 return {"error": f"No market data available for {symbol}"}
