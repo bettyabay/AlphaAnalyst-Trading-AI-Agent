@@ -331,18 +331,32 @@ def run_analysis_for_all_signals(
                     all_signals.extend(variant_result.data)
                     print(f"✅ Found {len(variant_result.data)} signals for symbol variant: '{variant}'")
                 else:
-                    # If no results with filters, try without date filters to see if date range is the issue
+                    # If no results with filters, check if date filters were provided
                     print(f"⚠️ No signals found for variant '{variant}' with current filters")
-                    test_query = supabase.table('signal_provider_signals').select('*')
-                    if provider_name:
-                        test_query = test_query.eq('provider_name', provider_name)
-                    test_query = test_query.eq('symbol', variant)
-                    test_result = test_query.execute()
-                    if test_result.data:
-                        print(f"  ℹ️ But found {len(test_result.data)} signals without date filters - date range might be excluding signals")
-                        # Use the unfiltered results if date filters are too restrictive
-                        all_signals.extend(test_result.data)
-                        print(f"✅ Using {len(test_result.data)} signals without date filters for variant: '{variant}'")
+                    
+                    # Only use fallback if date filters were NOT explicitly provided
+                    # If date filters were provided and no signals found, respect that (don't fallback)
+                    if start_date or end_date:
+                        # Date filters were provided - don't fallback, just log the issue
+                        date_range_info = ""
+                        if start_date and end_date:
+                            date_range_info = f" in date range {start_date.date()} to {end_date.date()}"
+                        elif start_date:
+                            date_range_info = f" from {start_date.date()}"
+                        elif end_date:
+                            date_range_info = f" until {end_date.date()}"
+                        print(f"  ℹ️ No signals found for variant '{variant}'{date_range_info} - date filters are respected, no fallback")
+                    else:
+                        # No date filters provided - try without any filters to see if signals exist
+                        test_query = supabase.table('signal_provider_signals').select('*')
+                        if provider_name:
+                            test_query = test_query.eq('provider_name', provider_name)
+                        test_query = test_query.eq('symbol', variant)
+                        test_result = test_query.execute()
+                        if test_result.data:
+                            print(f"  ℹ️ But found {len(test_result.data)} signals without date filters - using all available signals")
+                            all_signals.extend(test_result.data)
+                            print(f"✅ Using {len(test_result.data)} signals without date filters for variant: '{variant}'")
             except Exception as e:
                 print(f"⚠️ Error querying variant '{variant}': {e}")
                 continue
@@ -355,6 +369,23 @@ def run_analysis_for_all_signals(
             if sig_id and sig_id not in seen_ids:
                 seen_ids.add(sig_id)
                 signals.append(sig)
+        
+        # If date filters were provided and no signals found, return error
+        if not signals and (start_date or end_date):
+            date_range_info = ""
+            if start_date and end_date:
+                date_range_info = f" for date range {start_date.date()} to {end_date.date()}"
+            elif start_date:
+                date_range_info = f" from {start_date.date()}"
+            elif end_date:
+                date_range_info = f" until {end_date.date()}"
+            
+            symbol_info = f" for symbol '{symbol}'" if symbol else ""
+            provider_info = f" from provider '{provider_name}'" if provider_name else ""
+            
+            return {
+                "error": f"No signals found{symbol_info}{provider_info}{date_range_info}. Please select a different date range or check if signals exist for the selected criteria."
+            }
         
         if signals:
             # Found signals, continue with analysis
