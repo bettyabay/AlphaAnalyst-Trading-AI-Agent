@@ -32,6 +32,7 @@ from tradingagents.dataflows.validation_engine import ValidationEngine
 from tradingagents.dataflows.daily_reporter import DailyReporter
 from tradingagents.dataflows.run_signal_analysis import (
     run_analysis_for_all_signals,
+    run_analysis_for_all_providers_and_instruments,
     run_backtest_for_all_signals,
     calculate_provider_metrics,
     get_available_instruments,

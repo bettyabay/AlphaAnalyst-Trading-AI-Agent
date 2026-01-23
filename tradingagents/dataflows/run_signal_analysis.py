@@ -104,7 +104,7 @@ def get_available_instruments() -> List[str]:
 def check_market_data_availability(symbol: str) -> Dict:
     """
     Check if market data exists for the given instrument.
-    Tries multiple symbol format variants to handle different storage formats.
+    Tries multiple symbol format variants and multiple tables to handle different storage formats.
     
     Args:
         symbol: Instrument symbol to check
@@ -112,89 +112,102 @@ def check_market_data_availability(symbol: str) -> Dict:
     Returns:
         Dictionary with availability status and details
     """
-    from tradingagents.dataflows.ingestion_pipeline import get_1min_table_name_for_symbol
-    
     supabase = get_supabase()
     if not supabase:
         return {"available": False, "error": "Database not available"}
     
     try:
-        # Determine which table to check
-        table_name = get_1min_table_name_for_symbol(symbol)
         symbol_upper = symbol.upper()
         
         # Build list of symbol variants to try (similar to market_data_service.py)
         symbols_to_try = [symbol_upper]
         
-        # Handle Gold/XAUUSD variants
-        if symbol_upper == "XAUUSD" or "XAU" in symbol_upper:
-            symbols_to_try = ["C:XAUUSD", "XAUUSD", "^XAUUSD", "GOLD"]
-        elif symbol_upper == "C:XAUUSD":
-            symbols_to_try = ["C:XAUUSD", "XAUUSD", "^XAUUSD", "GOLD"]
-        elif symbol_upper == "^XAUUSD":
-            symbols_to_try = ["^XAUUSD", "C:XAUUSD", "XAUUSD", "GOLD"]
-        elif symbol_upper == "GOLD":
-            symbols_to_try = ["GOLD", "C:XAUUSD", "^XAUUSD", "XAUUSD"]
-        # Handle currency pairs - try with and without C: prefix
-        elif symbol_upper.startswith("C:") and len(symbol_upper) >= 8:
-            # Has C: prefix, also try without
+        # Determine which tables to try based on symbol pattern
+        # IMPORTANT: Check for Gold/Silver FIRST, even if it has C: prefix
+        tables_to_try = []
+        if "XAU" in symbol_upper or "XAG" in symbol_upper or "*" in symbol_upper or symbol_upper == "GOLD":
+            # Gold/Silver - try commodities table first
+            tables_to_try = ["market_data_commodities_1min"]
+            if symbol_upper == "XAUUSD" or "XAU" in symbol_upper:
+                symbols_to_try = ["C:XAUUSD", "XAUUSD", "^XAUUSD", "GOLD"]
+            elif symbol_upper == "C:XAUUSD":
+                symbols_to_try = ["C:XAUUSD", "XAUUSD", "^XAUUSD", "GOLD"]
+            elif symbol_upper == "^XAUUSD":
+                symbols_to_try = ["^XAUUSD", "C:XAUUSD", "XAUUSD", "GOLD"]
+            elif symbol_upper == "GOLD":
+                symbols_to_try = ["GOLD", "C:XAUUSD", "^XAUUSD", "XAUUSD"]
+        elif symbol_upper.startswith("I:") or symbol_upper.startswith("^"):
+            # Indices
+            tables_to_try = ["market_data_indices_1min"]
+        elif symbol_upper.startswith("C:"):
+            # Currency with C: prefix
+            tables_to_try = ["market_data_currencies_1min"]
             base_symbol = symbol_upper[2:]  # Remove "C:" prefix
             symbols_to_try = [symbol_upper, base_symbol]
-        elif len(symbol_upper) >= 6 and len(symbol_upper) <= 7 and not symbol_upper.startswith("C:") and not symbol_upper.startswith("^") and not symbol_upper.startswith("I:"):
-            # Likely a currency pair without prefix
+        elif len(symbol_upper) >= 6 and len(symbol_upper) <= 7 and not symbol_upper.startswith("^") and not symbol_upper.startswith("I:"):
+            # Likely a currency pair without prefix (EURUSD, GBPUSD, etc.)
+            # Try currencies table first, then stocks as fallback
+            tables_to_try = ["market_data_currencies_1min", "market_data_stocks_1min"]
             symbols_to_try = [symbol_upper, f"C:{symbol_upper}"]
-        # Handle single character or very short symbols (edge case)
-        elif len(symbol_upper) < 3:
-            # Don't try variants for very short symbols
-            symbols_to_try = [symbol_upper]
+        else:
+            # Default to stocks, but also try currencies if it's a 6-7 char symbol
+            if len(symbol_upper) >= 6 and len(symbol_upper) <= 7:
+                tables_to_try = ["market_data_stocks_1min", "market_data_currencies_1min"]
+                symbols_to_try = [symbol_upper, f"C:{symbol_upper}"]
+            else:
+                tables_to_try = ["market_data_stocks_1min"]
         
-        # Try each symbol variant
+        # Try each table and symbol combination
         found_symbol = None
-        for try_symbol in symbols_to_try:
-            try:
-                result = supabase.table(table_name).select('timestamp').eq('symbol', try_symbol).limit(1).execute()
-                if result.data and len(result.data) > 0:
-                    found_symbol = try_symbol
-                    break
-            except Exception:
-                continue
+        found_table = None
+        for table_name in tables_to_try:
+            for try_symbol in symbols_to_try:
+                try:
+                    result = supabase.table(table_name).select('timestamp').eq('symbol', try_symbol).limit(1).execute()
+                    if result.data and len(result.data) > 0:
+                        found_symbol = try_symbol
+                        found_table = table_name
+                        break
+                except Exception:
+                    continue
+            if found_symbol:
+                break
         
-        if found_symbol:
+        if found_symbol and found_table:
             # Get date range using the found symbol
-            date_result = supabase.table(table_name).select('timestamp').eq('symbol', found_symbol).order('timestamp', desc=False).limit(1).execute()
-            latest_result = supabase.table(table_name).select('timestamp').eq('symbol', found_symbol).order('timestamp', desc=True).limit(1).execute()
+            date_result = supabase.table(found_table).select('timestamp').eq('symbol', found_symbol).order('timestamp', desc=False).limit(1).execute()
+            latest_result = supabase.table(found_table).select('timestamp').eq('symbol', found_symbol).order('timestamp', desc=True).limit(1).execute()
             
             earliest = date_result.data[0]['timestamp'] if date_result.data and len(date_result.data) > 0 else None
             latest = latest_result.data[0]['timestamp'] if latest_result.data and len(latest_result.data) > 0 else None
             
             return {
                 "available": True,
-                "table": table_name,
+                "table": found_table,
                 "symbol_found": found_symbol,
                 "earliest_date": earliest,
                 "latest_date": latest
             }
         else:
-            # Try to get distinct symbols from the table to help with debugging
-            try:
-                distinct_result = supabase.table(table_name).select('symbol').limit(100).execute()
-                distinct_symbols = list(set([row.get('symbol', '') for row in (distinct_result.data or [])]))
-                distinct_symbols.sort()
-                sample_symbols = distinct_symbols[:10]  # Show first 10
-                return {
-                    "available": False,
-                    "table": table_name,
-                    "symbols_tried": symbols_to_try,
-                    "sample_symbols_in_table": sample_symbols,
-                    "error": f"No market data found for {symbol} (tried: {', '.join(symbols_to_try)}) in {table_name}. Sample symbols in table: {', '.join(sample_symbols) if sample_symbols else 'none'}"
-                }
-            except Exception:
-                return {
-                    "available": False,
-                    "table": table_name,
-                    "symbols_tried": symbols_to_try,
-                    "error": f"No market data found for {symbol} (tried: {', '.join(symbols_to_try)}) in {table_name}"
-                }
+            # Try to get distinct symbols from the tables to help with debugging
+            all_sample_symbols = []
+            for table_name in tables_to_try:
+                try:
+                    distinct_result = supabase.table(table_name).select('symbol').limit(100).execute()
+                    distinct_symbols = list(set([row.get('symbol', '') for row in (distinct_result.data or [])]))
+                    all_sample_symbols.extend(distinct_symbols)
+                except Exception:
+                    continue
+            
+            all_sample_symbols = sorted(list(set(all_sample_symbols)))[:10]  # Show first 10 unique
+            tables_tried_str = ", ".join(tables_to_try)
+            return {
+                "available": False,
+                "tables_tried": tables_to_try,
+                "symbols_tried": symbols_to_try,
+                "sample_symbols_in_tables": all_sample_symbols,
+                "error": f"No market data found for {symbol} (tried: {', '.join(symbols_to_try)}) in tables: {tables_tried_str}. Sample symbols in tables: {', '.join(all_sample_symbols) if all_sample_symbols else 'none'}"
+            }
     except Exception as e:
         return {
             "available": False,
@@ -832,6 +845,127 @@ def calculate_provider_metrics(provider_name: str) -> Dict:
             print(f"Error saving metrics: {e}")
     
     return metrics
+
+
+def run_analysis_for_all_providers_and_instruments(
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+    save_results: bool = True
+) -> Dict:
+    """
+    Run analysis for ALL signal providers and ALL instruments in the database.
+    This applies the same logic that works for XAUUSD and pipxpert to every instrument and provider.
+    
+    Args:
+        start_date: Optional start date filter
+        end_date: Optional end date filter
+        save_results: Whether to save results to database
+        
+    Returns:
+        Dictionary with analysis summary across all providers and instruments
+    """
+    supabase = get_supabase()
+    if not supabase:
+        return {"error": "Database not available"}
+    
+    # Get all unique providers
+    providers = get_available_providers()
+    if not providers:
+        return {"error": "No signal providers found in database"}
+    
+    # Get all unique instruments
+    instruments = get_available_instruments()
+    if not instruments:
+        return {"error": "No instruments found in database"}
+    
+    print(f"=" * 80)
+    print(f"Running analysis for ALL providers and ALL instruments")
+    print(f"=" * 80)
+    print(f"Providers: {len(providers)}")
+    print(f"Instruments: {len(instruments)}")
+    print(f"Date range: {start_date.date() if start_date else 'All'} to {end_date.date() if end_date else 'All'}")
+    print(f"=" * 80)
+    
+    total_analyzed = 0
+    total_errors = 0
+    provider_summaries = {}
+    
+    # Run analysis for each provider-instrument combination
+    for provider_idx, provider_name in enumerate(providers, 1):
+        print(f"\n[{provider_idx}/{len(providers)}] Processing provider: {provider_name}")
+        print(f"-" * 80)
+        
+        provider_analyzed = 0
+        provider_errors = 0
+        
+        for inst_idx, instrument in enumerate(instruments, 1):
+            print(f"  [{inst_idx}/{len(instruments)}] Analyzing {instrument} for {provider_name}...")
+            
+            try:
+                # Check market data availability first
+                market_data_status = check_market_data_availability(instrument)
+                if not market_data_status.get("available"):
+                    error_msg = market_data_status.get('error', 'Market data not available')
+                    print(f"    ⚠️  Skipping {instrument}: {error_msg}")
+                    provider_errors += 1
+                    total_errors += 1
+                    continue
+                
+                # Run analysis for this provider-instrument combination
+                result = run_analysis_for_all_signals(
+                    provider_name=provider_name,
+                    symbol=instrument,
+                    start_date=start_date,
+                    end_date=end_date,
+                    save_results=save_results
+                )
+                
+                if 'error' in result:
+                    print(f"    ❌ Error: {result['error']}")
+                    provider_errors += 1
+                    total_errors += 1
+                else:
+                    analyzed = result.get('analyzed', 0)
+                    errors = result.get('errors', 0)
+                    provider_analyzed += analyzed
+                    provider_errors += errors
+                    total_analyzed += analyzed
+                    total_errors += errors
+                    
+                    if analyzed > 0:
+                        print(f"    ✅ Analyzed {analyzed} signals (errors: {errors})")
+                    else:
+                        print(f"    ℹ️  No signals found for this combination")
+                
+            except Exception as e:
+                error_msg = str(e).encode('ascii', 'ignore').decode('ascii')
+                print(f"    ❌ Exception: {error_msg}")
+                provider_errors += 1
+                total_errors += 1
+        
+        provider_summaries[provider_name] = {
+            'analyzed': provider_analyzed,
+            'errors': provider_errors
+        }
+        
+        print(f"  Provider summary: {provider_analyzed} analyzed, {provider_errors} errors")
+    
+    print(f"\n{'=' * 80}")
+    print(f"FINAL SUMMARY")
+    print(f"{'=' * 80}")
+    print(f"Total signals analyzed: {total_analyzed}")
+    print(f"Total errors: {total_errors}")
+    print(f"Success rate: {(total_analyzed / (total_analyzed + total_errors) * 100) if (total_analyzed + total_errors) > 0 else 0:.2f}%")
+    print(f"{'=' * 80}")
+    
+    return {
+        'total_providers': len(providers),
+        'total_instruments': len(instruments),
+        'total_analyzed': total_analyzed,
+        'total_errors': total_errors,
+        'success_rate': (total_analyzed / (total_analyzed + total_errors) * 100) if (total_analyzed + total_errors) > 0 else 0,
+        'provider_summaries': provider_summaries
+    }
 
 
 if __name__ == "__main__":

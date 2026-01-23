@@ -55,6 +55,7 @@ class SignalAnalyzer:
         """
         try:
             symbol = signal.get('symbol', '').upper()
+            original_symbol = symbol  # Store original for forex detection (symbol may be modified during analysis)
             signal_date = signal.get('signal_date')
             action = signal.get('action', '').lower()
             entry_price = signal.get('entry_price')
@@ -66,6 +67,15 @@ class SignalAnalyzer:
             # Validate required fields
             if not all([symbol, signal_date, action, entry_price]):
                 return {"error": "Missing required signal fields"}
+            
+            # Detect if this is a forex pair for proper pips calculation and decimal formatting
+            # Forex pairs typically have 4 decimal places and are 6-7 characters
+            # Use original_symbol to avoid issues if symbol is modified during market data lookup
+            is_forex_pair = (
+                (len(original_symbol) >= 6 and len(original_symbol) <= 7) and
+                (original_symbol.startswith("C:") or (not original_symbol.startswith("^") and not original_symbol.startswith("I:"))) and
+                ("XAU" not in original_symbol and "XAG" not in original_symbol)  # Exclude commodities
+            )
             
             # Parse signal_date
             if isinstance(signal_date, str):
@@ -200,7 +210,9 @@ class SignalAnalyzer:
                 target_2=target_2,
                 target_3=target_3,
                 stop_loss=stop_loss,
-                price_tolerance=price_tolerance
+                price_tolerance=price_tolerance,
+                symbol=original_symbol,  # Pass original symbol for forex detection
+                is_forex_pair=is_forex_pair  # Pass forex detection result
             )
             
             # Add metadata and signal data for display
@@ -219,25 +231,38 @@ class SignalAnalyzer:
             result['stop_loss'] = stop_loss
             
             # Calculate "Pips Made" based on final_status
-            # For GOLD/XAUUSD, pips are typically price points (not forex pips)
+            # For forex pairs (EURUSD, GBPUSD, etc.), pips = price_diff * 10000 (1 pip = 0.0001)
+            # For commodities (XAUUSD, etc.), pips are price points (not forex pips)
+            # For indices/stocks, pips are price points
+            # is_forex_pair is already detected above using original_symbol
             pips_made = 0
             is_buy = (action.lower() == 'buy')
             
+            # Calculate price difference
+            price_diff = 0
             if result['final_status'] == 'TP1' and target_1:
-                pips_made = (target_1 - entry_price) if is_buy else (entry_price - target_1)
+                price_diff = (target_1 - entry_price) if is_buy else (entry_price - target_1)
             elif result['final_status'] == 'TP2' and target_2:
-                pips_made = (target_2 - entry_price) if is_buy else (entry_price - target_2)
+                price_diff = (target_2 - entry_price) if is_buy else (entry_price - target_2)
             elif result['final_status'] == 'TP3' and target_3:
-                pips_made = (target_3 - entry_price) if is_buy else (entry_price - target_3)
+                price_diff = (target_3 - entry_price) if is_buy else (entry_price - target_3)
             elif result['final_status'] == 'SL' and stop_loss:
-                pips_made = (stop_loss - entry_price) if is_buy else (entry_price - stop_loss)
+                price_diff = (stop_loss - entry_price) if is_buy else (entry_price - stop_loss)
             elif result['final_status'] in ['EXPIRED', 'OPEN']:
                 # Use max_profit percentage converted to price points
                 # max_profit is in percentage (e.g., 0.43% = 0.0043)
                 if result.get('max_profit'):
-                    pips_made = (result['max_profit'] / 100) * entry_price
+                    price_diff = (result['max_profit'] / 100) * entry_price
                     if not is_buy:
-                        pips_made = -pips_made
+                        price_diff = -price_diff
+            
+            # Convert to pips based on instrument type
+            if is_forex_pair:
+                # For forex pairs, 1 pip = 0.0001, so multiply by 10000
+                pips_made = price_diff * 10000
+            else:
+                # For commodities, indices, stocks - use price points directly
+                pips_made = price_diff
             
             # Round to nearest integer (as shown in image)
             result['pips_made'] = round(pips_made)
@@ -256,7 +281,9 @@ class SignalAnalyzer:
         target_2: Optional[float],
         target_3: Optional[float],
         stop_loss: Optional[float],
-        price_tolerance: float
+        price_tolerance: float,
+        symbol: str = "",
+        is_forex_pair: bool = False
     ) -> Dict:
         """
         Analyze price movements to detect TP/SL hits.
@@ -287,15 +314,19 @@ class SignalAnalyzer:
         import os
         debug_mode = True  # Always show detailed logging for signal analysis
         
+        # Use 4 decimal places for forex pairs, 2 for others
+        # is_forex_pair is already detected above using original_symbol
+        price_format = ".4f" if is_forex_pair else ".2f"
+        
         if debug_mode:
             print(f"\n{'='*80}")
             print(f"🔍 [SIGNAL ANALYSIS] Starting analysis")
             print(f"{'='*80}")
-            print(f"   Entry: {entry_price:.2f}")
-            tp1_str = f"{target_1:.2f}" if target_1 else "N/A"
-            tp2_str = f"{target_2:.2f}" if target_2 else "N/A"
-            tp3_str = f"{target_3:.2f}" if target_3 else "N/A"
-            sl_str = f"{stop_loss:.2f}" if stop_loss else "N/A"
+            print(f"   Entry: {entry_price:{price_format}}")
+            tp1_str = f"{target_1:{price_format}}" if target_1 else "N/A"
+            tp2_str = f"{target_2:{price_format}}" if target_2 else "N/A"
+            tp3_str = f"{target_3:{price_format}}" if target_3 else "N/A"
+            sl_str = f"{stop_loss:{price_format}}" if stop_loss else "N/A"
             print(f"   TP1: {tp1_str}, TP2: {tp2_str}, TP3: {tp3_str}")
             print(f"   SL: {sl_str}")
             print(f"   Action: {action.upper()}")
@@ -303,8 +334,8 @@ class SignalAnalyzer:
             if len(market_data) > 0:
                 first_candle = market_data.iloc[0]
                 last_candle = market_data.iloc[-1]
-                print(f"   📅 First candle: {market_data.index[0]} | H:{first_candle['High']:.2f}, L:{first_candle['Low']:.2f}, C:{first_candle['Close']:.2f}")
-                print(f"   📅 Last candle: {market_data.index[-1]} | H:{last_candle['High']:.2f}, L:{last_candle['Low']:.2f}, C:{last_candle['Close']:.2f}")
+                print(f"   📅 First candle: {market_data.index[0]} | H:{first_candle['High']:{price_format}}, L:{first_candle['Low']:{price_format}}, C:{first_candle['Close']:{price_format}}")
+                print(f"   📅 Last candle: {market_data.index[-1]} | H:{last_candle['High']:{price_format}}, L:{last_candle['Low']:{price_format}}, C:{last_candle['Close']:{price_format}}")
                 hours_covered = (market_data.index[-1] - market_data.index[0]).total_seconds() / 3600.0
                 print(f"   ⏱️  Time coverage: {hours_covered:.2f} hours")
             print(f"{'='*80}")
