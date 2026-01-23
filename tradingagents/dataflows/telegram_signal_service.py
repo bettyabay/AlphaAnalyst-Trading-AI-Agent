@@ -417,9 +417,10 @@ class TelegramSignalService:
                     return
                 
                 # Quick check: Skip if message doesn't contain BUY/SELL or currency pair indicators
+                # Updated to include indices with numbers (NAS100, US30, etc.)
                 has_trading_keywords = (
                     re.search(r'\b(BUY|SELL|buy|sell)\b', message_text, re.IGNORECASE) or
-                    re.search(r'[A-Z]{3,4}/[A-Z]{3,4}|[A-Z]{6,7}', message_text) or
+                    re.search(r'[A-Z]{3,4}/[A-Z]{3,4}|[A-Z0-9]{6,8}|[A-Z]{6,7}', message_text) or
                     re.search(r'📣', message_text) or
                     re.search(r'Direction', message_text, re.IGNORECASE) or
                     re.search(r'Entry', message_text, re.IGNORECASE)
@@ -574,9 +575,10 @@ class TelegramSignalService:
                         continue
                     
                     # Check for trading keywords
+                    # Updated to include indices with numbers (NAS100, US30, etc.)
                     has_trading_keywords = (
                         re.search(r'\b(BUY|SELL|buy|sell)\b', message_text, re.IGNORECASE) or
-                        re.search(r'[A-Z]{3,4}/[A-Z]{3,4}|[A-Z]{6,7}', message_text) or
+                        re.search(r'[A-Z]{3,4}/[A-Z]{3,4}|[A-Z0-9]{6,8}|[A-Z]{6,7}', message_text) or
                         re.search(r'📣', message_text) or
                         re.search(r'Direction', message_text, re.IGNORECASE) or
                         re.search(r'Entry', message_text, re.IGNORECASE)

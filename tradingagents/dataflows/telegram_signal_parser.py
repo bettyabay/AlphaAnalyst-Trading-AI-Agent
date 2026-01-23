@@ -113,11 +113,13 @@ class TelegramSignalParser:
             'DIRECTION' in text_upper
         )
         
-        # Must have a currency pair or symbol
+        # Must have a currency pair or symbol (including indices with numbers like NAS100, US30)
         has_symbol = (
             re.search(r'[A-Z]{3,4}/[A-Z]{3,4}', text_upper) or  # EUR/USD format
-            re.search(r'[A-Z]{6,8}', text_upper) or  # EURUSD, BTCUSD format
-            re.search(r'[a-z]{6,8}', message_text.lower()) or  # xauusd format (lowercase)
+            re.search(r'[A-Z0-9]{6,8}', text_upper) or  # EURUSD, BTCUSD, NAS100, US30 format
+            re.search(r'[A-Z]{6,8}', text_upper) or  # EURUSD, BTCUSD format (fallback)
+            re.search(r'[a-z0-9]{6,8}', message_text.lower()) or  # xauusd, nas100 format (lowercase)
+            re.search(r'[a-z]{6,8}', message_text.lower()) or  # xauusd format (lowercase, fallback)
             '📣' in message_text  # Signal emoji
         )
         
@@ -154,6 +156,11 @@ class TelegramSignalParser:
             parsed = self._parse_structured_format(message_text)
             if parsed and self._validate_signal(parsed):
                 return parsed
+        
+        # Try simple format: SYMBOL ACTION ENTRY_PRICE with SL: and TP: (Format for NAS100, US30, etc.)
+        parsed = self._parse_simple_format(message_text)
+        if parsed and self._validate_signal(parsed):
+            return parsed
         
         # Try inline format: SYMBOL ACTION ENTRY (Format 1 & 2)
         parsed = self._parse_inline_format(message_text)
@@ -213,14 +220,24 @@ class TelegramSignalParser:
                     if self._is_valid_trading_symbol(potential.replace('/', '')):
                         symbol = potential
                 
-                # If not found, look for 6-7 char symbols (currency pairs without slash)
+                # If not found, look for symbols with numbers (indices like NAS100, US30) or 6-7 char currency pairs
                 if not symbol:
-                    symbol_matches = re.findall(r'\b([A-Z]{6,7})\b', text, re.IGNORECASE)
+                    # First try symbols with numbers (indices like NAS100, US30)
+                    symbol_matches = re.findall(r'\b([A-Z0-9]{3,8})\b', text, re.IGNORECASE)
                     for potential in symbol_matches:
                         potential = potential.strip().upper()
                         if self._is_valid_trading_symbol(potential):
                             symbol = potential
                             break
+                    
+                    # If not found, try 6-7 char currency pairs (letters only)
+                    if not symbol:
+                        symbol_matches = re.findall(r'\b([A-Z]{6,7})\b', text, re.IGNORECASE)
+                        for potential in symbol_matches:
+                            potential = potential.strip().upper()
+                            if self._is_valid_trading_symbol(potential):
+                                symbol = potential
+                                break
                 
                 # Last resort: 8 char symbols (some crypto pairs)
                 if not symbol:
@@ -456,15 +473,28 @@ class TelegramSignalParser:
             # Pattern 1: Currency pairs with slash (EUR/USD, GBP/AUD)
             symbol_match = re.search(r'\b([A-Z]{3}/[A-Z]{3})\b', text)
             
-            # Pattern 2: Currency pairs without slash (EURUSD, GBPAUD, BTCUSD)
+            # Pattern 2: Currency pairs without slash (EURUSD, GBPAUD, BTCUSD) or indices with numbers (NAS100, US30)
             if not symbol_match:
-                symbol_match = re.search(r'\b([A-Z]{6,7})\b', text)
+                # Try symbols with numbers first (indices like NAS100, US30)
+                symbol_match = re.search(r'\b([A-Z0-9]{3,8})\b', text)
                 if symbol_match:
                     potential = symbol_match.group(1).strip().upper()
                     # Check against blacklist
                     blacklist = {'SIGNAL', 'FOREX', 'CRYPTO', 'TRADING', 'ANALYSIS', 'TARGET', 'ENTRY', 'PRICE', 'STOP', 'LOSS', 'PROFIT', 'RISK', 'OPEN', 'CLOSE', 'BUY', 'SELL', 'DIRECTION'}
                     if potential in blacklist:
                         symbol_match = None
+                    elif not self._is_valid_trading_symbol(potential):
+                        symbol_match = None
+                
+                # Fallback to 6-7 char currency pairs (letters only)
+                if not symbol_match:
+                    symbol_match = re.search(r'\b([A-Z]{6,7})\b', text)
+                    if symbol_match:
+                        potential = symbol_match.group(1).strip().upper()
+                        # Check against blacklist
+                        blacklist = {'SIGNAL', 'FOREX', 'CRYPTO', 'TRADING', 'ANALYSIS', 'TARGET', 'ENTRY', 'PRICE', 'STOP', 'LOSS', 'PROFIT', 'RISK', 'OPEN', 'CLOSE', 'BUY', 'SELL', 'DIRECTION'}
+                        if potential in blacklist:
+                            symbol_match = None
             
             if not symbol_match:
                 return None
@@ -527,6 +557,124 @@ class TelegramSignalParser:
             print(f"Error parsing natural language: {e}")
             return None
     
+    def _parse_simple_format(self, text: str) -> Optional[Dict]:
+        """
+        Parse simple format like:
+        NAS100 SELL  25482.60
+        
+        SL: 25592.60
+        TP: 25182.60
+        --Trade by Alex
+        
+        US30 SELL  48467.00
+        
+        SL: 48577.00
+        TP: 48167.00
+        --Trade by William
+        
+        Format: SYMBOL ACTION ENTRY_PRICE
+        SL: STOP_LOSS
+        TP: TARGET_PRICE
+        """
+        try:
+            # Pattern: SYMBOL (can contain letters and numbers) followed by BUY/SELL followed by entry price
+            # Match symbols like NAS100, US30, EURUSD, etc.
+            # Entry price is the number immediately after BUY/SELL
+            pattern = r'\b([A-Z0-9]{3,8})\s+(BUY|SELL)\s+([\d.]+)'
+            match = re.search(pattern, text, re.IGNORECASE)
+            
+            if not match:
+                return None
+            
+            potential_symbol = match.group(1).strip().upper()
+            action = match.group(2).strip().lower()
+            entry_price_str = match.group(3).strip()
+            
+            # Validate it's a trading symbol (not a common word)
+            if not self._is_valid_trading_symbol(potential_symbol):
+                return None
+            
+            try:
+                symbol = self.normalize_symbol(potential_symbol)
+            except ValueError:
+                # Invalid symbol - skip this signal
+                return None
+            
+            # Extract entry price
+            try:
+                entry_price = float(entry_price_str)
+            except ValueError:
+                return None
+            
+            # Extract Stop Loss - look for "SL:" or "SL " followed by number
+            stop_loss = None
+            sl_patterns = [
+                r'SL[:\s]+([\d.]+)',
+                r'Stop\s*Loss[:\s]+([\d.]+)',
+            ]
+            for pattern in sl_patterns:
+                sl_match = re.search(pattern, text, re.IGNORECASE)
+                if sl_match:
+                    try:
+                        stop_loss = float(sl_match.group(1).strip())
+                        break
+                    except ValueError:
+                        continue
+            
+            # Extract Take Profit - look for "TP:" or "TP " followed by number
+            # This format typically has a single TP, not TP1, TP2, etc.
+            target_1 = None
+            tp_patterns = [
+                r'TP[:\s]+([\d.]+)',
+                r'Take\s*Profit[:\s]+([\d.]+)',
+            ]
+            for pattern in tp_patterns:
+                tp_match = re.search(pattern, text, re.IGNORECASE)
+                if tp_match:
+                    try:
+                        target_1 = float(tp_match.group(1).strip())
+                        break
+                    except ValueError:
+                        continue
+            
+            # Also check for TP1, TP2, etc. (in case there are multiple targets)
+            targets = {}
+            tp_matches = re.findall(r'TP(\d+)[:\s]+([\d.]+)', text, re.IGNORECASE)
+            for tp_num, tp_value in tp_matches:
+                try:
+                    targets[f'target_{tp_num}'] = float(tp_value.strip())
+                except ValueError:
+                    continue
+            
+            # If we found TP: (without number), use it as target_1
+            if target_1 and 'target_1' not in targets:
+                targets['target_1'] = target_1
+            
+            # Sort targets by number
+            sorted_targets = {}
+            for i in range(1, 6):
+                key = f'target_{i}'
+                if key in targets:
+                    sorted_targets[key] = targets[key]
+            
+            result = {
+                "symbol": symbol,
+                "action": action,
+                "entry_price": entry_price,
+                "stop_loss": stop_loss,
+                "signal_date": datetime.now(self.gmt4_tz).isoformat(),
+            }
+            
+            # Add targets
+            for i, (key, value) in enumerate(sorted_targets.items(), 1):
+                result[f"target_{i}"] = value
+            
+            return result
+            
+        except Exception as e:
+            print(f"Error parsing simple format: {e}")
+            return None
+    
     def _parse_inline_format(self, text: str) -> Optional[Dict]:
         """
         Parse inline format like:
@@ -547,8 +695,9 @@ class TelegramSignalParser:
         """
         try:
             # Pattern: SYMBOL ACTION ENTRY (where entry can be range X/Y or space-separated)
-            # Match: XAUUSD BUY 4595 or xauusd sell 4593/4596
-            pattern = r'\b([A-Z]{3,8}|[a-z]{3,8})\s+(BUY|SELL)\s+([\d./\s]+)'
+            # Match: XAUUSD BUY 4595 or xauusd sell 4593/4596 or NAS100 SELL 25482.60
+            # Updated to allow numbers in symbols (for indices like NAS100, US30)
+            pattern = r'\b([A-Z0-9]{3,8}|[a-z0-9]{3,8})\s+(BUY|SELL)\s+([\d./\s]+)'
             match = re.search(pattern, text, re.IGNORECASE)
             
             if not match:
@@ -707,13 +856,15 @@ class TelegramSignalParser:
             # Look for known trading symbol patterns (currency pairs, crypto)
             symbol_match = None
             
-            # Try currency/crypto pair pattern first (6-7 chars like EURUSD, BTCUSD)
-            symbol_match = re.search(r'\b([A-Z]{6,7})\b', text[:range_match.start()], re.IGNORECASE)
+            # Try currency/crypto pair pattern first (6-7 chars like EURUSD, BTCUSD) or indices with numbers (NAS100, US30)
+            symbol_match = re.search(r'\b([A-Z0-9]{3,8})\b', text[:range_match.start()], re.IGNORECASE)
             if symbol_match:
                 potential = symbol_match.group(1).strip().upper()
                 # Check against blacklist
                 blacklist = {'SIGNAL', 'FOREX', 'CRYPTO', 'TRADING', 'ANALYSIS', 'TARGET', 'ENTRY', 'PRICE', 'STOP', 'LOSS', 'PROFIT', 'RISK', 'OPEN', 'CLOSE', 'BUY', 'SELL', 'DIRECTION', 'BETWEEN', 'TILL', 'ANY', 'FOLLOW', 'RULES'}
                 if potential in blacklist:
+                    symbol_match = None
+                elif not self._is_valid_trading_symbol(potential):
                     symbol_match = None
             
             # If not found, try 3-8 char pattern but validate
@@ -797,9 +948,10 @@ class TelegramSignalParser:
         """
         try:
             # Pattern: SYMBOL ACTION_ ENTRY _ DECIMAL (optional)
-            # Example: XAUUSD BUY_ 4595 _ 92
+            # Example: XAUUSD BUY_ 4595 _ 92 or NAS100 SELL_ 25482.60
             # Also handles: XAUUSD BUY_ 4403..4404 (range format)
-            pattern = r'\b([A-Z]{3,8}|[a-z]{3,8})\s+(BUY|SELL)[_\s]+([\d.]+(?:\.{2,}\d+)?)(?:\s*[_\s]+\s*([\d.]+))?'
+            # Updated to allow numbers in symbols (for indices like NAS100, US30)
+            pattern = r'\b([A-Z0-9]{3,8}|[a-z0-9]{3,8})\s+(BUY|SELL)[_\s]+([\d.]+(?:\.{2,}\d+)?)(?:\s*[_\s]+\s*([\d.]+))?'
             match = re.search(pattern, text, re.IGNORECASE)
             
             if not match:
@@ -1006,13 +1158,15 @@ class TelegramSignalParser:
             # Extract symbol - should be before "at any price" or "between"
             symbol_match = None
             
-            # Try currency/crypto pair pattern first (6-7 chars like EURUSD, BTCUSD)
-            symbol_match = re.search(r'\b([A-Z]{6,7})\b', text[:range_match.start()], re.IGNORECASE)
+            # Try currency/crypto pair pattern first (6-7 chars like EURUSD, BTCUSD) or indices with numbers (NAS100, US30)
+            symbol_match = re.search(r'\b([A-Z0-9]{3,8})\b', text[:range_match.start()], re.IGNORECASE)
             if symbol_match:
                 potential = symbol_match.group(1).strip().upper()
                 # Check against blacklist
                 blacklist = {'SIGNAL', 'FOREX', 'CRYPTO', 'TRADING', 'ANALYSIS', 'TARGET', 'ENTRY', 'PRICE', 'STOP', 'LOSS', 'PROFIT', 'RISK', 'OPEN', 'CLOSE', 'BUY', 'SELL', 'DIRECTION', 'BETWEEN', 'TILL', 'ANY', 'FOLLOW', 'RULES', 'CRYPTO', 'FOREX', 'PLACE', 'TRADES'}
                 if potential in blacklist:
+                    symbol_match = None
+                elif not self._is_valid_trading_symbol(potential):
                     symbol_match = None
             
             if not symbol_match:
@@ -1109,6 +1263,21 @@ class TelegramSignalParser:
         if symbol in known_crypto:
             return True
         
+        # Known indices (including those with numbers)
+        known_indices = {
+            'SPX', 'DJI', 'NDX', 'RUT',  # Standard indices
+            'NAS100', 'US30', 'US100', 'US500',  # Common index symbols
+            'NAS', 'DOW', 'SP500', 'SPX500'  # Alternative names
+        }
+        if symbol in known_indices:
+            return True
+        
+        # Pattern validation for indices with numbers (NAS100, US30, etc.)
+        # Match patterns like: NAS100, US30, US100, etc. (3-6 chars, mix of letters and numbers)
+        if re.match(r'^[A-Z]{2,4}\d{2,4}$', symbol):
+            # Pattern like NAS100, US30, US100, etc.
+            return True
+        
         # Pattern validation: 6-7 chars, typically starts with currency codes
         if len(symbol) >= 6 and len(symbol) <= 7:
             # Check if it starts with known currency codes
@@ -1176,10 +1345,42 @@ class TelegramSignalParser:
             elif symbol in ['OIL', 'WTI', 'BRENT']:
                 return f"C:{symbol}"
         
-        # Check if it's an index
-        indices = ['SPX', 'DJI', 'NDX', 'RUT']
+        # Check if it's an index (including those with numbers)
+        indices = {
+            'SPX', 'DJI', 'NDX', 'RUT',  # Standard indices
+            'NAS100', 'US30', 'US100', 'US500',  # Common index symbols
+            'NAS', 'DOW', 'SP500', 'SPX500'  # Alternative names
+        }
         if symbol in indices:
-            return f"^{symbol}"
+            # Normalize common index names
+            if symbol == 'NAS100' or symbol == 'NAS':
+                return "^NAS100"
+            elif symbol == 'US30' or symbol == 'DOW':
+                return "^US30"
+            elif symbol == 'US100':
+                return "^US100"
+            elif symbol == 'US500' or symbol == 'SP500' or symbol == 'SPX500':
+                return "^SPX"
+            else:
+                return f"^{symbol}"
+        
+        # Check if it's an index pattern (letters followed by numbers like NAS100, US30)
+        if re.match(r'^[A-Z]{2,4}\d{2,4}$', symbol):
+            # Pattern like NAS100, US30, US100, etc.
+            # Normalize common patterns
+            if symbol.startswith('NAS'):
+                return "^NAS100"
+            elif symbol.startswith('US'):
+                if '30' in symbol or symbol == 'US30':
+                    return "^US30"
+                elif '100' in symbol or symbol == 'US100':
+                    return "^US100"
+                elif '500' in symbol or symbol == 'US500':
+                    return "^SPX"
+                else:
+                    return f"^{symbol}"
+            else:
+                return f"^{symbol}"
         
         # Only add C: prefix if it's a valid 6-7 char currency-like symbol
         # (already validated by _is_valid_trading_symbol above)
