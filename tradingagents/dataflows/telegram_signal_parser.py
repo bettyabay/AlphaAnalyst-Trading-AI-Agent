@@ -114,11 +114,12 @@ class TelegramSignalParser:
         )
         
         # Must have a currency pair or symbol (including indices with numbers like NAS100, US30)
+        # US30 is 4 chars, NAS100 is 6 chars, so we need to support 3-8 char symbols
         has_symbol = (
             re.search(r'[A-Z]{3,4}/[A-Z]{3,4}', text_upper) or  # EUR/USD format
-            re.search(r'[A-Z0-9]{6,8}', text_upper) or  # EURUSD, BTCUSD, NAS100, US30 format
-            re.search(r'[A-Z]{6,8}', text_upper) or  # EURUSD, BTCUSD format (fallback)
-            re.search(r'[a-z0-9]{6,8}', message_text.lower()) or  # xauusd, nas100 format (lowercase)
+            re.search(r'[A-Z0-9]{3,8}', text_upper) or  # EURUSD, BTCUSD, NAS100, US30 format (3-8 chars)
+            re.search(r'[A-Z]{6,8}', text_upper) or  # EURUSD, BTCUSD format (fallback, letters only)
+            re.search(r'[a-z0-9]{3,8}', message_text.lower()) or  # xauusd, nas100, us30 format (lowercase)
             re.search(r'[a-z]{6,8}', message_text.lower()) or  # xauusd format (lowercase, fallback)
             '📣' in message_text  # Signal emoji
         )
@@ -577,18 +578,48 @@ class TelegramSignalParser:
         TP: TARGET_PRICE
         """
         try:
-            # Pattern: SYMBOL (can contain letters and numbers) followed by BUY/SELL followed by entry price
-            # Match symbols like NAS100, US30, EURUSD, etc.
+            # Pattern: SYMBOL (can contain letters and numbers, optionally with space) followed by BUY/SELL followed by entry price
+            # Match symbols like NAS100, US30, US 30, EURUSD, etc.
             # Entry price is the number immediately after BUY/SELL
-            pattern = r'\b([A-Z0-9]{3,8})\s+(BUY|SELL)\s+([\d.]+)'
+            # First try with space in symbol (e.g., "US 30")
+            pattern = r'\b([A-Z]{2,4})\s+(\d{1,4})\s+(BUY|SELL)\s+([\d.]+)'
             match = re.search(pattern, text, re.IGNORECASE)
             
-            if not match:
-                return None
-            
-            potential_symbol = match.group(1).strip().upper()
-            action = match.group(2).strip().lower()
-            entry_price_str = match.group(3).strip()
+            if match:
+                # Symbol with space: "US 30" -> "US30"
+                potential_symbol = (match.group(1) + match.group(2)).strip().upper()
+                action = match.group(3).strip().lower()
+                entry_price_str = match.group(4).strip()
+            else:
+                # Try without space: "US30" or "NAS100"
+                pattern = r'\b([A-Z0-9]{3,8})\s+(BUY|SELL)\s+([\d.]+)'
+                match = re.search(pattern, text, re.IGNORECASE)
+                
+                if not match:
+                    # Fallback: Try to find US30 or other known indices anywhere, then find BUY/SELL and price nearby
+                    # This handles cases where symbol might be on a different line or position
+                    known_indices_pattern = r'\b(US30|NAS100|US100|US500|SPX|DJI)\b'
+                    symbol_match = re.search(known_indices_pattern, text, re.IGNORECASE)
+                    if symbol_match:
+                        potential_symbol = symbol_match.group(1).strip().upper()
+                        # Find BUY/SELL after the symbol
+                        action_match = re.search(r'\b(BUY|SELL)\b', text[symbol_match.end():], re.IGNORECASE)
+                        if action_match:
+                            action = action_match.group(1).strip().lower()
+                            # Find price after BUY/SELL
+                            price_match = re.search(r'\b(\d{4,}\.?\d*)\b', text[symbol_match.end() + action_match.end():], re.IGNORECASE)
+                            if price_match:
+                                entry_price_str = price_match.group(1).strip()
+                            else:
+                                return None
+                        else:
+                            return None
+                    else:
+                        return None
+                else:
+                    potential_symbol = match.group(1).strip().upper()
+                    action = match.group(2).strip().lower()
+                    entry_price_str = match.group(3).strip()
             
             # Validate it's a trading symbol (not a common word)
             if not self._is_valid_trading_symbol(potential_symbol):
@@ -1293,8 +1324,11 @@ class TelegramSignalParser:
         
         # 3-4 char symbols might be indices or single currencies
         if len(symbol) >= 3 and len(symbol) <= 4:
-            indices = {'SPX', 'DJI', 'NDX', 'RUT'}
+            indices = {'SPX', 'DJI', 'NDX', 'RUT', 'US30', 'US100', 'US500'}  # Include indices with numbers
             if symbol in indices:
+                return True
+            # Also check if it matches the pattern for indices with numbers (e.g., US30)
+            if re.match(r'^[A-Z]{2,3}\d{1,2}$', symbol):
                 return True
         
         return False

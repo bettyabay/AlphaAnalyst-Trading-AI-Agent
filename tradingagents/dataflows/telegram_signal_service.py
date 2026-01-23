@@ -411,16 +411,18 @@ class TelegramSignalService:
                     return
                 
                 # Quick check: Skip if message doesn't contain any price-like numbers
-                # Signals should have at least one decimal number (price)
-                if not re.search(r'\d+\.\d+', message_text):
+                # Signals should have at least one price (decimal or large integer for indices like US30)
+                # Allow both decimals (48467.00) and large integers (48467) for indices
+                if not re.search(r'\d+\.\d+|\d{4,}', message_text):
                     print(f"   ⏭️  No price numbers found - skipping")
                     return
                 
                 # Quick check: Skip if message doesn't contain BUY/SELL or currency pair indicators
                 # Updated to include indices with numbers (NAS100, US30, etc.)
+                # US30 is 4 chars, NAS100 is 6 chars, so we need to support 3-8 char symbols
                 has_trading_keywords = (
                     re.search(r'\b(BUY|SELL|buy|sell)\b', message_text, re.IGNORECASE) or
-                    re.search(r'[A-Z]{3,4}/[A-Z]{3,4}|[A-Z0-9]{6,8}|[A-Z]{6,7}', message_text) or
+                    re.search(r'[A-Z]{3,4}/[A-Z]{3,4}|[A-Z0-9]{3,8}|[A-Z]{6,7}', message_text) or
                     re.search(r'📣', message_text) or
                     re.search(r'Direction', message_text, re.IGNORECASE) or
                     re.search(r'Entry', message_text, re.IGNORECASE)
@@ -570,8 +572,8 @@ class TelegramSignalService:
                     if len(message_text.strip()) < 20:
                         continue
                     
-                    # Check for price-like numbers
-                    if not re.search(r'\d+\.\d+', message_text):
+                    # Check for price-like numbers (allow both decimals and large integers for indices)
+                    if not re.search(r'\d+\.\d+|\d{4,}', message_text):
                         continue
                     
                     # Check for trading keywords
