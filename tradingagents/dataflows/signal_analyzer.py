@@ -11,13 +11,7 @@ import numpy as np
 from tradingagents.database.config import get_supabase
 from tradingagents.dataflows.market_data_service import fetch_ohlcv
 
-# Try to import pandas_ta, fallback to manual calculations if not available
-try:
-    import pandas_ta as ta
-    HAS_PANDAS_TA = True
-except ImportError:
-    HAS_PANDAS_TA = False
-    print("WARNING: pandas_ta not installed. Using manual indicator calculations.")
+# Using manual indicator calculations (pandas-ta removed due to Python 3.12+ requirement)
 
 
 class SignalAnalyzer:
@@ -814,35 +808,20 @@ class SignalAnalyzer:
         if not all(col in df.columns for col in required_cols):
             raise ValueError(f"market_df must contain columns: {required_cols}")
         
-        # Calculate indicators
-        if HAS_PANDAS_TA:
-            # Use pandas_ta library
-            df.ta.adx(length=adx_period, append=True)
-            df.ta.sma(length=sma_short, append=True)
-            df.ta.sma(length=sma_long, append=True)
-            df.ta.atr(length=atr_period, append=True)
-            
-            # Rename columns to match our naming convention
-            df.rename(columns={
-                f'ADX_{adx_period}': 'ADX',
-                f'SMA_{sma_short}': 'SMA_50',
-                f'SMA_{sma_long}': 'SMA_200',
-                f'ATR_{atr_period}': 'ATR'
-            }, inplace=True)
-        else:
-            # Manual calculation fallback
-            df['SMA_50'] = df['Close'].rolling(window=sma_short).mean()
-            df['SMA_200'] = df['Close'].rolling(window=sma_long).mean()
-            
-            # ATR calculation
-            high_low = df['High'] - df['Low']
-            high_close = np.abs(df['High'] - df['Close'].shift())
-            low_close = np.abs(df['Low'] - df['Close'].shift())
-            true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-            df['ATR'] = true_range.rolling(window=atr_period).mean()
-            
-            # ADX calculation (simplified)
-            df['ADX'] = self._calculate_adx_manual(df, period=adx_period)
+        # Calculate indicators using manual calculations
+        # (pandas-ta removed due to Python 3.12+ requirement)
+        df['SMA_50'] = df['Close'].rolling(window=sma_short).mean()
+        df['SMA_200'] = df['Close'].rolling(window=sma_long).mean()
+        
+        # ATR calculation
+        high_low = df['High'] - df['Low']
+        high_close = np.abs(df['High'] - df['Close'].shift())
+        low_close = np.abs(df['Low'] - df['Close'].shift())
+        true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+        df['ATR'] = true_range.rolling(window=atr_period).mean()
+        
+        # ADX calculation
+        df['ADX'] = self._calculate_adx_manual(df, period=adx_period)
         
         # Calculate ATR moving average for volatility comparison
         df['ATR_MA'] = df['ATR'].rolling(window=atr_ma_period).mean()
@@ -968,22 +947,60 @@ class SignalAnalyzer:
         # CRITICAL: Convert both timestamps to specified timezone
         target_tz = pytz.timezone(timezone)
         
-        # Convert signal entry times to target timezone
-        if pd.api.types.is_datetime64_any_dtype(signals[entry_time_col]):
-            signals[entry_time_col] = pd.to_datetime(signals[entry_time_col])
-            if signals[entry_time_col].dt.tz is None:
-                # If naive, assume it's already in target timezone
-                signals[entry_time_col] = signals[entry_time_col].dt.tz_localize(target_tz)
+        # Convert signal entry times to datetime first (handles strings, timestamps, etc.)
+        # The column may contain timezone-aware datetime strings like "2025-12-26 07:03:21+04:00"
+        # or datetime objects stored in object Series. We need to handle both cases.
+        
+        # Strategy: Convert to string first, then parse as datetime with UTC handling
+        # This ensures consistent conversion regardless of input type
+        
+        # Convert to string representation (handles both strings and datetime objects)
+        signals[entry_time_col] = signals[entry_time_col].astype(str)
+        
+        # Replace 'NaT' strings with empty string for proper handling
+        signals[entry_time_col] = signals[entry_time_col].replace('NaT', '')
+        signals[entry_time_col] = signals[entry_time_col].replace('nan', '')
+        signals[entry_time_col] = signals[entry_time_col].replace('None', '')
+        
+        # Now parse as datetime with UTC handling (handles timezone-aware strings)
+        signals[entry_time_col] = pd.to_datetime(
+            signals[entry_time_col], 
+            errors='coerce', 
+            utc=True
+        )
+        
+        # Check if conversion was successful
+        if signals[entry_time_col].isna().any():
+            failed_count = signals[entry_time_col].isna().sum()
+            raise ValueError(f"Failed to convert {failed_count} values in '{entry_time_col}' column to datetime. Check for invalid date formats.")
+        
+        # Final verification - ensure datetime type
+        if not pd.api.types.is_datetime64_any_dtype(signals[entry_time_col]):
+            raise ValueError(
+                f"Column '{entry_time_col}' could not be converted to datetime type. "
+                f"Type: {signals[entry_time_col].dtype}. "
+                f"Sample values: {signals[entry_time_col].head(3).tolist()}"
+            )
+        
+        # Now handle timezone conversion
+        # Check if the datetime series is timezone-aware by checking the first non-null value
+        if len(signals) > 0:
+            # Get first non-null datetime value to check timezone
+            first_valid_idx = signals[entry_time_col].first_valid_index()
+            if first_valid_idx is not None:
+                first_dt = signals[entry_time_col].loc[first_valid_idx]
+                is_tz_aware = first_dt.tzinfo is not None
             else:
-                # Convert to target timezone
-                signals[entry_time_col] = signals[entry_time_col].dt.tz_convert(target_tz)
+                is_tz_aware = False
         else:
-            # Convert string to datetime
-            signals[entry_time_col] = pd.to_datetime(signals[entry_time_col])
-            if signals[entry_time_col].dt.tz is None:
-                signals[entry_time_col] = signals[entry_time_col].dt.tz_localize(target_tz)
-            else:
-                signals[entry_time_col] = signals[entry_time_col].dt.tz_convert(target_tz)
+            is_tz_aware = False
+        
+        if is_tz_aware:
+            # If timezone-aware, convert to target timezone
+            signals[entry_time_col] = signals[entry_time_col].dt.tz_convert(target_tz)
+        else:
+            # If naive (no timezone), localize to target timezone
+            signals[entry_time_col] = signals[entry_time_col].dt.tz_localize(target_tz)
         
         # Convert market data index to target timezone
         if market.index.tz is None:

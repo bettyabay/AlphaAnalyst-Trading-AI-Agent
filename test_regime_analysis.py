@@ -334,10 +334,10 @@ def run_all_tests():
         print("="*80)
         print("\n[OK] Market Regime Segmentation Module is ready for production use")
         print("\nNext steps:")
-        print("1. Install pandas-ta: pip install pandas-ta")
-        print("2. Run the Streamlit app: streamlit run app.py")
-        print("3. Navigate to Signal Analysis Dashboard")
-        print("4. Run signal analysis first, then run regime analysis")
+        print("1. Run the Streamlit app: streamlit run app.py")
+        print("2. Navigate to Signal Analysis Dashboard")
+        print("3. Run signal analysis first, then run regime analysis")
+        print("4. All indicators use manual calculations (no pandas-ta dependency)")
         
         return True
         

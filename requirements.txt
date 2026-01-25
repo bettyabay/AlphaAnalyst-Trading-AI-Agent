@@ -10,7 +10,7 @@ yfinance==0.2.66
 # Finance & stats
 stockstats==0.6.5
 polygon-api-client==1.16.1
-pandas-ta>=0.3.14b0
+# pandas-ta removed - requires Python 3.12+, using manual indicator calculations instead
 
 # AI / LLM (NO TORCH)
 openai>=1.27.0

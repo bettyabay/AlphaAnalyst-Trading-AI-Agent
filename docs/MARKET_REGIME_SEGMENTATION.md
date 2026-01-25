@@ -61,7 +61,7 @@ Calculates technical indicators:
 - **ATR_MA**: Moving average of ATR for volatility comparison
 
 **Implementation Notes**:
-- Uses `pandas_ta` library if available, falls back to manual calculations
+- Uses manual indicator calculations (pandas-ta removed due to Python 3.12+ requirement)
 - Normalizes ATR as percentage of price for cross-instrument comparison
 - Handles missing data gracefully
 
@@ -177,15 +177,9 @@ if st.button("🚀 Run Regime Analysis"):
 
 ### Requirements
 
-Add to `requirements.txt`:
-```
-pandas-ta>=0.3.14b0
-```
+**Note**: pandas-ta has been removed due to Python 3.12+ requirement. All indicators use manual calculations.
 
-Install:
-```bash
-pip install pandas-ta
-```
+No additional installation needed - all indicator calculations are built-in.
 
 ### Verification
 
@@ -284,9 +278,8 @@ Ranging - Low Vol         | 10           | 40.0       | 1.05          | 5.3
 - **Cause**: Signals couldn't be matched to market data
 - **Solution**: Check timezone alignment, ensure market data covers signal period
 
-**Issue**: "pandas_ta import error"
-- **Cause**: Library not installed
-- **Solution**: Run `pip install pandas-ta`
+**Issue**: "pandas_ta import error" (No longer applicable)
+- **Note**: pandas-ta has been removed. All indicators use manual calculations.
 
 **Issue**: "All regimes show 'Unknown'"
 - **Cause**: Insufficient data for indicator calculation

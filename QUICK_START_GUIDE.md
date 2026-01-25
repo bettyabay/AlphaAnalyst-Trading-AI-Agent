@@ -2,12 +2,7 @@
 
 ## 🚀 Get Started in 5 Minutes
 
-### Step 1: Install Dependencies (30 seconds)
-```bash
-pip install pandas-ta
-```
-
-### Step 2: Verify Installation (1 minute)
+### Step 1: Verify Installation (1 minute)
 ```bash
 python test_regime_analysis.py
 ```
@@ -124,7 +119,7 @@ Ranging - Low Vol         | 10           | 40.0       | 1.05          | 5.3
 **Solution**:
 ```bash
 # Reinstall dependencies
-pip install --upgrade pandas numpy pandas-ta
+pip install --upgrade pandas numpy
 
 # Run tests again
 python test_regime_analysis.py
@@ -152,7 +147,6 @@ python test_regime_analysis.py
 
 ## ✅ Success Checklist
 
-- [ ] Installed pandas-ta
 - [ ] Ran test suite (all tests passed)
 - [ ] Started Streamlit app
 - [ ] Ran signal analysis
