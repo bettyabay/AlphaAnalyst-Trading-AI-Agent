@@ -131,7 +131,8 @@ def ingest_signal_provider_data(
     uploaded_file,
     provider_name: str,
     timezone_offset: str = "+04:00",
-    source_timezone: str = "UTC"
+    source_timezone: str = "UTC",
+    progress_callback=None
 ) -> Dict[str, str]:
     """
     Ingest signal provider data from Excel file into signal_provider_signals table.
@@ -164,9 +165,11 @@ def ingest_signal_provider_data(
             if name.endswith('.csv'):
                 df = pd.read_csv(uploaded_file)
             else:
-                # Try Excel
+                # Try Excel - read all columns as strings to prevent truncation
                 try:
-                    df = pd.read_excel(uploaded_file)
+                    # Use dtype=str and keep_default_na=False to preserve full cell values
+                    # This prevents pandas from truncating or converting values
+                    df = pd.read_excel(uploaded_file, engine='openpyxl', dtype=str, keep_default_na=False)
                 except Exception as e_xls:
                      # Fallback to CSV
                      uploaded_file.seek(0)
@@ -213,17 +216,85 @@ def ingest_signal_provider_data(
         
         # Prepare data for Supabase
         db_rows = []
-        for _, row in df.iterrows():
+        skipped_count = 0
+        skip_reasons = {}  # Track why rows are skipped
+        
+        # Progress callback for UI updates
+        def log_progress(message, level="info"):
+            if progress_callback:
+                progress_callback(message, level)
+            else:
+                print(message)
+        
+        log_progress(f"Processing {len(df)} rows from Excel file...", "info")
+        
+        for row_idx, row in df.iterrows():
             try:
                 # Normalize action to lowercase
                 action = str(row.get("Action", "")).strip().lower()
                 if action not in ["buy", "sell"]:
+                    skip_reasons['Invalid action'] = skip_reasons.get('Invalid action', 0) + 1
                     continue  # Skip invalid actions
                 
                 # Get currency pair (use provided symbol or from data)
-                currency_pair = str(row.get("Currency Pair", "")).upper().strip()
-                if not currency_pair:
+                currency_pair_raw = row.get("Currency Pair", "")
+                
+                # Debug: Log the raw value to see what we're getting
+                if currency_pair_raw and len(str(currency_pair_raw).strip()) <= 3:
+                    print(f"DEBUG: Row {len(db_rows)+1} - Raw Currency Pair value: {repr(currency_pair_raw)} (type: {type(currency_pair_raw)})")
+                
+                currency_pair_raw = str(currency_pair_raw).strip()
+                if not currency_pair_raw:
+                    skip_reasons['Empty Currency Pair'] = skip_reasons.get('Empty Currency Pair', 0) + 1
                     continue
+                
+                # Convert to uppercase and validate
+                currency_pair = currency_pair_raw.upper().strip()
+                
+                # Remove any newlines or special characters that might cause issues
+                currency_pair = currency_pair.replace('\n', '').replace('\r', '').replace('\t', '')
+                
+                # Validate symbol length - reject symbols that are too short (likely truncated)
+                # Minimum valid symbol is 3 chars (e.g., "SPX"), but most are 6-8 chars
+                if len(currency_pair) < 3:
+                    skipped_count += 1
+                    skip_reasons['Symbol too short'] = skip_reasons.get('Symbol too short', 0) + 1
+                    if skipped_count <= 5:  # Only print first 5 to avoid spam
+                        print(f"WARNING: Row {row_idx+2} - Skipping invalid symbol '{repr(currency_pair)}' (length: {len(currency_pair)})")
+                    continue
+                
+                # Reject common invalid symbols
+                invalid_symbols = {'C', 'I', 'X', 'TP1', 'TP2', 'TP3', 'TP4', 'TP5', 'TP', 'SL', 'TARGET', 'ENTRY'}
+                if currency_pair in invalid_symbols:
+                    skipped_count += 1
+                    skip_reasons['Invalid symbol pattern'] = skip_reasons.get('Invalid symbol pattern', 0) + 1
+                    if skipped_count <= 5:
+                        print(f"WARNING: Row {row_idx+2} - Skipping invalid symbol '{repr(currency_pair)}'")
+                    continue
+                
+                # If symbol starts with "C:" but is only 2-3 chars, it's likely truncated
+                if currency_pair.startswith('C:') and len(currency_pair) <= 3:
+                    skipped_count += 1
+                    skip_reasons['Truncated C: symbol'] = skip_reasons.get('Truncated C: symbol', 0) + 1
+                    if skipped_count <= 5:
+                        print(f"WARNING: Row {row_idx+2} - Skipping truncated symbol '{repr(currency_pair)}'")
+                    continue
+                
+                # Normalize symbol format: add C: prefix for currency pairs if not present
+                # This ensures consistency with database format
+                if len(currency_pair) >= 6 and len(currency_pair) <= 7:
+                    # Common currency pairs (6-7 chars)
+                    if not currency_pair.startswith('C:') and not currency_pair.startswith('I:') and not currency_pair.startswith('^'):
+                        # Check if it's a known currency pair
+                        known_pairs = [
+                            'EURUSD', 'GBPUSD', 'USDJPY', 'USDCHF', 'AUDUSD', 'NZDUSD', 'USDCAD',
+                            'EURGBP', 'EURJPY', 'GBPJPY', 'AUDJPY', 'EURCHF', 'AUDNZD', 'EURAUD',
+                            'GBPAUD', 'GBPCAD', 'GBPCHF', 'GBPNZD', 'EURNZD', 'EURCAD', 'AUDCAD',
+                            'AUDCHF', 'CADCHF', 'CADJPY', 'CHFJPY', 'NZDJPY', 'NZDCHF', 'NZDCAD',
+                            'XAUUSD', 'XAGUSD', 'XPDUSD', 'XPTUSD'  # Precious metals
+                        ]
+                        if currency_pair in known_pairs or currency_pair.startswith('XAU') or currency_pair.startswith('XAG'):
+                            currency_pair = f"C:{currency_pair}"
                 
                 # Convert Date from source timezone to GMT+4
                 # Example: Excel date "2023-10-05 10:53:30" (UTC) -> "2023-10-05 14:53:30+04:00" (GMT+4)
@@ -245,24 +316,68 @@ def ingest_signal_provider_data(
                         dt_localized = dt_val.astimezone(src_tz)
                     # Convert to GMT+4 (Asia/Dubai) - this is the target timezone for all signals
                     signal_date = dt_localized.astimezone(dst_tz)
+                else:
+                    # Date is missing or invalid
+                    skip_reasons['Missing/Invalid Date'] = skip_reasons.get('Missing/Invalid Date', 0) + 1
+                    if skipped_count <= 5:
+                        print(f"WARNING: Row {row_idx+2} - Missing or invalid date")
+                    continue
                 
-                # Build record
-                record = {
-                    "provider_name": provider_name.strip(),
-                    "symbol": currency_pair,
-                    "signal_date": signal_date.isoformat() if signal_date else None,
-                    "action": action,
-                    "entry_price": float(row["Entry Price"]) if pd.notnull(row.get("Entry Price")) else None,
-                    "entry_price_max": float(row["Entry Price Max"]) if pd.notnull(row.get("Entry Price Max")) else None,
-                    "target_1": float(row["Target 1"]) if pd.notnull(row.get("Target 1")) else None,
-                    "target_2": float(row["Target 2"]) if pd.notnull(row.get("Target 2")) else None,
-                    "target_3": float(row["Target 3"]) if pd.notnull(row.get("Target 3")) else None,
-                    "target_4": float(row["Target 4"]) if pd.notnull(row.get("Target 4")) else None,
-                    "target_5": float(row["Target 5"]) if pd.notnull(row.get("Target 5")) else None,
-                    "stop_loss": float(row["Stop Loss"]) if pd.notnull(row.get("Stop Loss")) else None,
-                    "timezone_offset": timezone_offset,
-                    "created_at": datetime.now().isoformat()
-                }
+                # Validate that we have a valid signal_date
+                if signal_date is None:
+                    skip_reasons['Date conversion failed'] = skip_reasons.get('Date conversion failed', 0) + 1
+                    if skipped_count <= 5:
+                        print(f"WARNING: Row {row_idx+2} - Date conversion failed")
+                    continue
+                
+                # Final validation check - ensure symbol is valid before creating record
+                if len(currency_pair) < 3 or currency_pair in {'C', 'I', 'X', 'TP1', 'TP2', 'TP3', 'TP4', 'TP5', 'TP', 'SL'}:
+                    skipped_count += 1
+                    skip_reasons['Final validation failed'] = skip_reasons.get('Final validation failed', 0) + 1
+                    if skipped_count <= 5:
+                        print(f"ERROR: Row {row_idx+2} - Invalid symbol '{repr(currency_pair)}' detected. Skipping.")
+                    continue
+                
+                # Helper function to safely convert to float (handles empty strings from dtype=str)
+                def safe_float(value):
+                    """Convert value to float, handling empty strings and NaN"""
+                    if value is None:
+                        return None
+                    if isinstance(value, str):
+                        value = value.strip()
+                        if value == '' or value.lower() in ['nan', 'none', 'null', '']:
+                            return None
+                    try:
+                        if pd.notnull(value) and value != '':
+                            return float(value)
+                    except (ValueError, TypeError):
+                        pass
+                    return None
+                
+                # Build record - handle potential conversion errors
+                try:
+                    record = {
+                        "provider_name": provider_name.strip(),
+                        "symbol": currency_pair,
+                        "signal_date": signal_date.isoformat(),
+                        "action": action,
+                        "entry_price": safe_float(row.get("Entry Price")),
+                        "entry_price_max": safe_float(row.get("Entry Price Max")),
+                        "target_1": safe_float(row.get("Target 1")),
+                        "target_2": safe_float(row.get("Target 2")),
+                        "target_3": safe_float(row.get("Target 3")),
+                        "target_4": safe_float(row.get("Target 4")),
+                        "target_5": safe_float(row.get("Target 5")),
+                        "stop_loss": safe_float(row.get("Stop Loss")),
+                        "timezone_offset": timezone_offset,
+                        "created_at": datetime.now().isoformat()
+                    }
+                except (ValueError, TypeError) as conv_error:
+                    skip_reasons['Value conversion error'] = skip_reasons.get('Value conversion error', 0) + 1
+                    skipped_count += 1
+                    if skipped_count <= 5:
+                        print(f"WARNING: Row {row_idx+2} - Error converting values: {str(conv_error)}")
+                    continue
                 
                 # Handle datetime columns properly
                 datetime_fields = {
@@ -300,59 +415,106 @@ def ingest_signal_provider_data(
                 db_rows.append(record)
             except (ValueError, TypeError) as e:
                 # Skip rows with data type errors but continue processing
+                skipped_count += 1
+                skip_reasons['Data type error'] = skip_reasons.get('Data type error', 0) + 1
+                if skipped_count <= 5:
+                    print(f"ERROR: Row {row_idx+2} - Data type error: {str(e)}")
+                continue
+            except Exception as e:
+                # Catch any other unexpected errors
+                skipped_count += 1
+                skip_reasons['Unexpected error'] = skip_reasons.get('Unexpected error', 0) + 1
+                if skipped_count <= 5:
+                    print(f"ERROR: Row {row_idx+2} - Unexpected error: {str(e)}")
                 continue
         
+        # Print summary of skipped rows
+        if skipped_count > 0:
+            print(f"\n{'='*80}")
+            print(f"SKIP SUMMARY: {skipped_count} row(s) were skipped:")
+            for reason, count in skip_reasons.items():
+                print(f"  - {reason}: {count} row(s)")
+            print(f"{'='*80}\n")
+        
         if not db_rows:
-            return {"success": False, "message": "No valid records to insert after processing"}
+            return {
+                "success": False, 
+                "message": f"No valid records to insert after processing. {skipped_count} row(s) were skipped due to validation errors (e.g., invalid symbols like 'C', missing required fields). Please check your Excel file and ensure the 'Currency Pair' column contains valid trading symbols (e.g., EURUSD, XAUUSD, GBPUSD)."
+            }
         
         # Batch insert
         supabase = get_supabase()
         if not supabase:
             return {"success": False, "message": "Supabase not configured (check .env)"}
         
-        # Upsert in chunks
-        chunk_size = 1000
+        # Insert records one by one to handle duplicates properly
+        # This allows us to insert new signals even if some in the batch are duplicates
         total_inserted = 0
+        total_skipped = 0
         warning_msg = ""
         
-        for i in range(0, len(db_rows), chunk_size):
-            chunk = db_rows[i:i+chunk_size]
+        log_progress(f"Inserting {len(db_rows)} records into database...", "info")
+        
+        # Progress tracking
+        progress_messages = []
+        
+        for idx, record in enumerate(db_rows):
+            # Update progress every 50 records or at milestones
+            if (idx + 1) % 50 == 0 or idx == 0 or idx == len(db_rows) - 1:
+                progress_pct = ((idx + 1) / len(db_rows)) * 100
+                progress_msg = f"Processing: {idx + 1}/{len(db_rows)} records ({progress_pct:.1f}%)"
+                log_progress(progress_msg, "info")
+                progress_messages.append(progress_msg)
             try:
-                # Upsert into signal_provider_signals
-                result = supabase.table("signal_provider_signals").upsert(chunk).execute()
-                total_inserted += len(chunk)
+                # Insert one record at a time
+                result = supabase.table("signal_provider_signals").insert(record).execute()
+                if result.data:
+                    total_inserted += 1
+                else:
+                    # If no data returned but no error, assume it was inserted
+                    total_inserted += 1
             except Exception as e:
                 error_msg = str(e)
-                # Check for column mismatch errors (PGRST204)
-                if "column" in error_msg.lower() and "does not exist" in error_msg.lower():
-                    # Retry without the new columns that might be missing
-                    # Identify likely culprits
-                    new_cols = ["entry_price_max", "target_4", "target_5"]
-                    
-                    # Create a clean chunk without these columns
-                    clean_chunk = []
-                    for row in chunk:
-                        clean_row = {k: v for k, v in row.items() if k not in new_cols}
-                        clean_chunk.append(clean_row)
-                        
-                    try:
-                        # Retry insert
-                        result = supabase.table("signal_provider_signals").upsert(clean_chunk).execute()
-                        total_inserted += len(clean_chunk)
-                        if not warning_msg:
-                            warning_msg = " (Note: New columns 'entry_price_max', 'target_4', 'target_5' were skipped because they don't exist in the database. Please update your schema.)"
-                    except Exception as retry_e:
-                        return {"success": False, "message": f"Database error (retry failed): {str(retry_e)}"}
                 
-                # Provide more detailed error information for other errors
-                elif "relation" in error_msg.lower() and "does not exist" in error_msg.lower():
-                    return {"success": False, "message": f"Table 'signal_provider_signals' does not exist. Please create it first. Error: {error_msg}"}
+                # Check for duplicate key errors
+                if "duplicate key" in error_msg.lower() or "23505" in error_msg:
+                    # This signal already exists - skip it
+                    total_skipped += 1
+                    if total_skipped <= 5:  # Only log first 5 duplicates
+                        dup_msg = f"Skipped duplicate: {record.get('symbol')} {record.get('action')} on {record.get('signal_date')}"
+                        log_progress(dup_msg, "warning")
+                        progress_messages.append(dup_msg)
                 else:
-                    return {"success": False, "message": f"Database error at chunk starting at row {i}: {error_msg}"}
+                    # Some other error - log it but continue
+                    print(f"  Error inserting {record.get('symbol')} on {record.get('signal_date')}: {error_msg[:200]}")
+                    total_skipped += 1
+        
+        # Final summary
+        summary_msg = f"Insertion complete: {total_inserted} inserted, {total_skipped} skipped"
+        log_progress(summary_msg, "success")
+        progress_messages.append(summary_msg)
+        
+        # Build success message with details
+        message_parts = [f"Successfully ingested {total_inserted} record(s) for provider '{provider_name}'"]
+        if skipped_count > 0:
+            message_parts.append(f"{skipped_count} row(s) were skipped due to validation errors")
+        if total_skipped > 0:
+            message_parts.append(f"{total_skipped} duplicate signal(s) were skipped (already exist in database)")
+        if warning_msg:
+            message_parts.append(warning_msg.strip())
         
         return {
             "success": True,
-            "message": f"Successfully ingested {total_inserted} records for provider '{provider_name}' into signal_provider_signals.{warning_msg}"
+            "message": ". ".join(message_parts) + ".",
+            "details": {
+                "total_processed": len(df),
+                "valid_records": len(db_rows),
+                "inserted": total_inserted,
+                "skipped_validation": skipped_count,
+                "skipped_duplicates": total_skipped,
+                "skip_reasons": skip_reasons,
+                "progress_messages": progress_messages[-10:] if len(progress_messages) > 10 else progress_messages  # Last 10 messages
+            }
         }
         
     except Exception as e:

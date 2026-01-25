@@ -6,9 +6,18 @@ import pandas as pd
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import pytz
+import numpy as np
 
 from tradingagents.database.config import get_supabase
 from tradingagents.dataflows.market_data_service import fetch_ohlcv
+
+# Try to import pandas_ta, fallback to manual calculations if not available
+try:
+    import pandas_ta as ta
+    HAS_PANDAS_TA = True
+except ImportError:
+    HAS_PANDAS_TA = False
+    print("WARNING: pandas_ta not installed. Using manual indicator calculations.")
 
 
 class SignalAnalyzer:
@@ -763,4 +772,329 @@ class SignalAnalyzer:
         except Exception as e:
             print(f"Error saving analysis result: {e}")
             return False
+    
+    # =============================================================================
+    # MARKET REGIME SEGMENTATION MODULE
+    # =============================================================================
+    
+    def calculate_regimes(
+        self,
+        market_df: pd.DataFrame,
+        adx_period: int = 14,
+        sma_short: int = 50,
+        sma_long: int = 200,
+        atr_period: int = 14,
+        atr_ma_period: int = 50
+    ) -> pd.DataFrame:
+        """
+        Step 1: Feature Engineering - Calculate indicators for regime classification.
+        
+        Adds the following columns to market_df:
+        - ADX: Average Directional Index (trend strength)
+        - SMA_50, SMA_200: Simple Moving Averages (trend direction)
+        - ATR: Average True Range (volatility)
+        - ATR_MA: Moving average of ATR (for volatility comparison)
+        - Regime: Market regime classification
+        
+        Args:
+            market_df: DataFrame with OHLCV data (must have 'Open', 'High', 'Low', 'Close', 'Volume')
+            adx_period: Period for ADX calculation (default: 14)
+            sma_short: Period for short SMA (default: 50)
+            sma_long: Period for long SMA (default: 200)
+            atr_period: Period for ATR calculation (default: 14)
+            atr_ma_period: Period for ATR moving average (default: 50)
+            
+        Returns:
+            DataFrame with added indicator columns
+        """
+        df = market_df.copy()
+        
+        # Ensure we have required columns
+        required_cols = ['Open', 'High', 'Low', 'Close']
+        if not all(col in df.columns for col in required_cols):
+            raise ValueError(f"market_df must contain columns: {required_cols}")
+        
+        # Calculate indicators
+        if HAS_PANDAS_TA:
+            # Use pandas_ta library
+            df.ta.adx(length=adx_period, append=True)
+            df.ta.sma(length=sma_short, append=True)
+            df.ta.sma(length=sma_long, append=True)
+            df.ta.atr(length=atr_period, append=True)
+            
+            # Rename columns to match our naming convention
+            df.rename(columns={
+                f'ADX_{adx_period}': 'ADX',
+                f'SMA_{sma_short}': 'SMA_50',
+                f'SMA_{sma_long}': 'SMA_200',
+                f'ATR_{atr_period}': 'ATR'
+            }, inplace=True)
+        else:
+            # Manual calculation fallback
+            df['SMA_50'] = df['Close'].rolling(window=sma_short).mean()
+            df['SMA_200'] = df['Close'].rolling(window=sma_long).mean()
+            
+            # ATR calculation
+            high_low = df['High'] - df['Low']
+            high_close = np.abs(df['High'] - df['Close'].shift())
+            low_close = np.abs(df['Low'] - df['Close'].shift())
+            true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+            df['ATR'] = true_range.rolling(window=atr_period).mean()
+            
+            # ADX calculation (simplified)
+            df['ADX'] = self._calculate_adx_manual(df, period=adx_period)
+        
+        # Calculate ATR moving average for volatility comparison
+        df['ATR_MA'] = df['ATR'].rolling(window=atr_ma_period).mean()
+        
+        # Normalize ATR as percentage of price
+        df['ATR_pct'] = (df['ATR'] / df['Close']) * 100
+        
+        return df
+    
+    def _calculate_adx_manual(self, df: pd.DataFrame, period: int = 14) -> pd.Series:
+        """
+        Manual ADX calculation (simplified version).
+        
+        Args:
+            df: DataFrame with OHLC data
+            period: ADX period
+            
+        Returns:
+            Series with ADX values
+        """
+        # Calculate +DM and -DM
+        high_diff = df['High'].diff()
+        low_diff = -df['Low'].diff()
+        
+        plus_dm = high_diff.where((high_diff > low_diff) & (high_diff > 0), 0)
+        minus_dm = low_diff.where((low_diff > high_diff) & (low_diff > 0), 0)
+        
+        # Calculate True Range
+        high_low = df['High'] - df['Low']
+        high_close = np.abs(df['High'] - df['Close'].shift())
+        low_close = np.abs(df['Low'] - df['Close'].shift())
+        true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+        
+        # Smooth with Wilder's method (EMA)
+        alpha = 1 / period
+        atr = true_range.ewm(alpha=alpha, adjust=False).mean()
+        plus_di = 100 * (plus_dm.ewm(alpha=alpha, adjust=False).mean() / atr)
+        minus_di = 100 * (minus_dm.ewm(alpha=alpha, adjust=False).mean() / atr)
+        
+        # Calculate DX and ADX
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+        adx = dx.ewm(alpha=alpha, adjust=False).mean()
+        
+        return adx
+    
+    def define_regime(
+        self,
+        market_df: pd.DataFrame,
+        adx_threshold: float = 25
+    ) -> pd.DataFrame:
+        """
+        Step 2: Regime Classification - Tag each row with a market regime.
+        
+        Classifies market conditions as:
+        - Trending vs Ranging (based on ADX)
+        - High Vol vs Low Vol (based on ATR vs ATR_MA)
+        
+        Args:
+            market_df: DataFrame with calculated indicators (from calculate_regimes)
+            adx_threshold: Threshold for trending vs ranging (default: 25)
+            
+        Returns:
+            DataFrame with 'Regime' column added
+        """
+        df = market_df.copy()
+        
+        # Ensure required columns exist
+        if 'ADX' not in df.columns or 'ATR' not in df.columns or 'ATR_MA' not in df.columns:
+            raise ValueError("market_df must have ADX, ATR, and ATR_MA columns. Run calculate_regimes() first.")
+        
+        def classify_row(row):
+            # Trend Filter
+            if pd.isna(row['ADX']) or pd.isna(row['ATR']) or pd.isna(row['ATR_MA']):
+                return "Unknown"
+            
+            trend_status = "Trending" if row['ADX'] > adx_threshold else "Ranging"
+            
+            # Volatility Filter
+            vol_status = "High Vol" if row['ATR'] > row['ATR_MA'] else "Low Vol"
+            
+            return f"{trend_status} - {vol_status}"
+        
+        df['Regime'] = df.apply(classify_row, axis=1)
+        
+        return df
+    
+    def merge_signals_with_regimes(
+        self,
+        signals_df: pd.DataFrame,
+        market_df: pd.DataFrame,
+        entry_time_col: str = 'signal_date',
+        timezone: str = 'UTC'
+    ) -> pd.DataFrame:
+        """
+        Step 3: Data Merging - Map market regime to each signal entry time.
+        
+        CRITICAL: Handles timezone conversions to avoid look-ahead bias.
+        Both signals_df and market_df are converted to the specified timezone
+        before merging.
+        
+        Args:
+            signals_df: DataFrame with signal data (must have entry_time_col)
+            market_df: DataFrame with regime data (must have 'Regime' column)
+            entry_time_col: Column name for signal entry time (default: 'signal_date')
+            timezone: Target timezone for merging (default: 'UTC')
+            
+        Returns:
+            DataFrame with signals merged with market regimes
+        """
+        signals = signals_df.copy()
+        market = market_df.copy()
+        
+        # Validate inputs
+        if entry_time_col not in signals.columns:
+            raise ValueError(f"signals_df must have '{entry_time_col}' column")
+        if 'Regime' not in market.columns:
+            raise ValueError("market_df must have 'Regime' column. Run define_regime() first.")
+        
+        # Ensure market_df has datetime index
+        if not isinstance(market.index, pd.DatetimeIndex):
+            raise ValueError("market_df must have DatetimeIndex")
+        
+        # CRITICAL: Convert both timestamps to specified timezone
+        target_tz = pytz.timezone(timezone)
+        
+        # Convert signal entry times to target timezone
+        if pd.api.types.is_datetime64_any_dtype(signals[entry_time_col]):
+            signals[entry_time_col] = pd.to_datetime(signals[entry_time_col])
+            if signals[entry_time_col].dt.tz is None:
+                # If naive, assume it's already in target timezone
+                signals[entry_time_col] = signals[entry_time_col].dt.tz_localize(target_tz)
+            else:
+                # Convert to target timezone
+                signals[entry_time_col] = signals[entry_time_col].dt.tz_convert(target_tz)
+        else:
+            # Convert string to datetime
+            signals[entry_time_col] = pd.to_datetime(signals[entry_time_col])
+            if signals[entry_time_col].dt.tz is None:
+                signals[entry_time_col] = signals[entry_time_col].dt.tz_localize(target_tz)
+            else:
+                signals[entry_time_col] = signals[entry_time_col].dt.tz_convert(target_tz)
+        
+        # Convert market data index to target timezone
+        if market.index.tz is None:
+            market.index = market.index.tz_localize(target_tz)
+        else:
+            market.index = market.index.tz_convert(target_tz)
+        
+        # Sort both DataFrames by time
+        signals = signals.sort_values(entry_time_col)
+        market = market.sort_index()
+        
+        # Use merge_asof to match signals with nearest backward market data
+        # This avoids look-ahead bias by matching to market conditions AT OR BEFORE entry
+        # Select only columns that exist in market DataFrame
+        merge_cols = ['Regime']
+        optional_cols = ['ADX', 'ATR', 'ATR_pct', 'SMA_50', 'SMA_200']
+        for col in optional_cols:
+            if col in market.columns:
+                merge_cols.append(col)
+        
+        signals_with_regime = pd.merge_asof(
+            signals,
+            market[merge_cols],
+            left_on=entry_time_col,
+            right_index=True,
+            direction='backward',
+            tolerance=pd.Timedelta('1 hour')  # Max 1 hour lookback
+        )
+        
+        print(f"[OK] [MERGE] Successfully merged {len(signals_with_regime)} signals with market regimes")
+        print(f"   Timezone: {timezone}")
+        print(f"   Signals with regime: {signals_with_regime['Regime'].notna().sum()}")
+        print(f"   Signals without regime: {signals_with_regime['Regime'].isna().sum()}")
+        
+        return signals_with_regime
+    
+    def calculate_metrics_by_regime(
+        self,
+        signals_df: pd.DataFrame,
+        pnl_col: str = 'pips_made',
+        final_status_col: str = 'final_status'
+    ) -> pd.DataFrame:
+        """
+        Step 4: Aggregation & Metrics - Calculate performance metrics by regime.
+        
+        Groups signals by Market_Regime and calculates:
+        - Total Trade Count
+        - Win Rate (%)
+        - Profit Factor (Gross Win / Gross Loss)
+        - Average PnL per trade
+        
+        Args:
+            signals_df: DataFrame with signals and regime data (from merge_signals_with_regimes)
+            pnl_col: Column name for PnL values (default: 'pips_made')
+            final_status_col: Column name for final status (default: 'final_status')
+            
+        Returns:
+            DataFrame with metrics grouped by regime
+        """
+        if 'Regime' not in signals_df.columns:
+            raise ValueError("signals_df must have 'Regime' column. Run merge_signals_with_regimes() first.")
+        
+        # Filter out signals without regime data
+        df = signals_df[signals_df['Regime'].notna()].copy()
+        
+        if len(df) == 0:
+            return pd.DataFrame()
+        
+        # Determine winning trades
+        # A trade is a win if final_status is TP1, TP2, or TP3
+        if final_status_col in df.columns:
+            df['is_win'] = df[final_status_col].isin(['TP1', 'TP2', 'TP3'])
+        else:
+            # Fallback: use PnL > 0
+            df['is_win'] = df[pnl_col] > 0
+        
+        # Ensure PnL column is numeric
+        if pnl_col in df.columns:
+            df[pnl_col] = pd.to_numeric(df[pnl_col], errors='coerce')
+        else:
+            df[pnl_col] = 0
+        
+        # Group by regime
+        grouped = df.groupby('Regime')
+        
+        metrics = []
+        for regime, group in grouped:
+            total_trades = len(group)
+            winning_trades = group['is_win'].sum()
+            losing_trades = total_trades - winning_trades
+            win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
+            
+            # Calculate Profit Factor
+            gross_wins = group[group[pnl_col] > 0][pnl_col].sum()
+            gross_losses = abs(group[group[pnl_col] < 0][pnl_col].sum())
+            profit_factor = (gross_wins / gross_losses) if gross_losses > 0 else (gross_wins if gross_wins > 0 else 0)
+            
+            # Average PnL
+            avg_pnl = group[pnl_col].mean()
+            
+            metrics.append({
+                'Regime': regime,
+                'Total_Trades': total_trades,
+                'Winning_Trades': winning_trades,
+                'Losing_Trades': losing_trades,
+                'Win_Rate_%': round(win_rate, 2),
+                'Profit_Factor': round(profit_factor, 2),
+                'Avg_PnL': round(avg_pnl, 2),
+                'Gross_Wins': round(gross_wins, 2),
+                'Gross_Losses': round(gross_losses, 2)
+            })
+        
+        return pd.DataFrame(metrics)
 

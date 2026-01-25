@@ -10,6 +10,7 @@ yfinance==0.2.66
 # Finance & stats
 stockstats==0.6.5
 polygon-api-client==1.16.1
+pandas-ta>=0.3.14b0
 
 # AI / LLM (NO TORCH)
 openai>=1.27.0

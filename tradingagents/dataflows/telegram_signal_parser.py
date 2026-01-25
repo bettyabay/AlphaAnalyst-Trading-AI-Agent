@@ -131,7 +131,14 @@ class TelegramSignalParser:
         if not (has_direction and has_symbol and has_price):
             return None
         
-        # Try range format with explanation text FIRST (very specific pattern)
+        # Try SIGNAL ALERT format with emojis FIRST (very specific patterns)
+        # This handles "SIGNAL ALERT\nBUY XAUUSD..." and "Gold Sell Now Scalping @ ..." formats
+        if 'SIGNAL ALERT' in message_text.upper() or 'SCALPING' in message_text.upper() or ('GOLD' in message_text.upper() and '@' in message_text):
+            parsed = self._parse_signal_alert_format(message_text)
+            if parsed and self._validate_signal(parsed):
+                return parsed
+        
+        # Try range format with explanation text (very specific pattern)
         # This handles "at any price between X until Y" format
         # If this pattern is detected, ONLY try this parser to avoid incorrect matches
         if 'at any price between' in message_text.lower() or ('between' in message_text.lower() and 'until' in message_text.lower()):
@@ -481,7 +488,7 @@ class TelegramSignalParser:
                 if symbol_match:
                     potential = symbol_match.group(1).strip().upper()
                     # Check against blacklist
-                    blacklist = {'SIGNAL', 'FOREX', 'CRYPTO', 'TRADING', 'ANALYSIS', 'TARGET', 'ENTRY', 'PRICE', 'STOP', 'LOSS', 'PROFIT', 'RISK', 'OPEN', 'CLOSE', 'BUY', 'SELL', 'DIRECTION'}
+                    blacklist = {'SIGNAL', 'FOREX', 'CRYPTO', 'TRADING', 'ANALYSIS', 'TARGET', 'ENTRY', 'PRICE', 'STOP', 'LOSS', 'PROFIT', 'RISK', 'OPEN', 'CLOSE', 'BUY', 'SELL', 'DIRECTION', 'TP1', 'TP2', 'TP3', 'TP4', 'TP5', 'TP', 'SL'}
                     if potential in blacklist:
                         symbol_match = None
                     elif not self._is_valid_trading_symbol(potential):
@@ -706,6 +713,165 @@ class TelegramSignalParser:
             print(f"Error parsing simple format: {e}")
             return None
     
+    def _parse_signal_alert_format(self, text: str) -> Optional[Dict]:
+        """
+        Parse SIGNAL ALERT format with emojis like:
+        
+        Format 1:
+        SIGNAL ALERT
+        BUY XAUUSD 3345.1
+        • 🤑 TP1: 3346.6
+        • 🤑 TP2: 3348.1
+        • 🤑 TP3: 3357.1
+        • 🔴 SL: 3333.1
+        
+        Format 2:
+        Gold Sell Now Scalping @ 3350-3352 🥷
+        SL : 3355 🔴
+        TP1 : 3348 💥
+        TP2 : 3345 💥
+        
+        Format 3:
+        Gold Buy Now @ 3340
+        SL: 3330
+        TP1: 3350
+        TP2: 3360
+        """
+        try:
+            # Clean emojis and bullets for easier parsing (but keep the text)
+            text_clean = re.sub(r'[•●○▪▫]', '', text)
+            text_clean = re.sub(r'[\U0001F600-\U0001F64F\U0001F300-\U0001F5FF\U0001F680-\U0001F6FF\U0001F1E0-\U0001F1FF\U0001F900-\U0001F9FF\U0001FA00-\U0001FA6F\U0001FA70-\U0001FAFF\U00002702-\U000027B0\U000024C2-\U0001F251]+', '', text_clean)
+            
+            # Extract action (BUY/SELL) - handle "Buy Now", "Sell Now", etc.
+            action = None
+            action_match = re.search(r'\b(BUY|SELL)\b', text_clean, re.IGNORECASE)
+            if action_match:
+                action = action_match.group(1).strip().lower()
+            
+            if not action:
+                return None
+            
+            # Extract symbol
+            symbol = None
+            text_upper = text_clean.upper()
+            
+            # Check for metal names FIRST (Gold -> XAUUSD, Silver -> XAGUSD)
+            # This takes priority over pattern matching to avoid false matches
+            if 'GOLD' in text_upper:
+                symbol = 'C:XAUUSD'
+            elif 'SILVER' in text_upper:
+                symbol = 'C:XAGUSD'
+            
+            # If no metal name found, try explicit symbols (XAUUSD, EURUSD, etc.)
+            if not symbol:
+                symbol_match = re.search(r'\b([A-Z0-9]{6,8})\b', text_clean)
+                if symbol_match:
+                    potential_symbol = symbol_match.group(1).strip().upper()
+                    if self._is_valid_trading_symbol(potential_symbol):
+                        try:
+                            symbol = self.normalize_symbol(potential_symbol)
+                        except ValueError:
+                            pass
+            
+            if not symbol:
+                return None
+            
+            # Extract entry price
+            entry_price = None
+            
+            # Pattern 1: "BUY XAUUSD 3345.1" - action symbol price
+            entry_pattern1 = rf'\b{action.upper()}\s+[A-Z0-9]+\s+([\d.]+)'
+            match1 = re.search(entry_pattern1, text_clean, re.IGNORECASE)
+            if match1:
+                try:
+                    entry_price = float(match1.group(1).strip())
+                except ValueError:
+                    pass
+            
+            # Pattern 2: "@ 3350-3352" - range format
+            if not entry_price:
+                range_pattern = r'@\s*([\d.]+)\s*[-–]\s*([\d.]+)'
+                match2 = re.search(range_pattern, text_clean)
+                if match2:
+                    try:
+                        val1 = float(match2.group(1).strip())
+                        val2 = float(match2.group(2).strip())
+                        entry_price = (val1 + val2) / 2  # Average of range
+                    except ValueError:
+                        pass
+            
+            # Pattern 3: "@ 3340" - single price after @
+            if not entry_price:
+                at_pattern = r'@\s*([\d.]+)'
+                match3 = re.search(at_pattern, text_clean)
+                if match3:
+                    try:
+                        entry_price = float(match3.group(1).strip())
+                    except ValueError:
+                        pass
+            
+            if not entry_price:
+                return None
+            
+            # Extract Stop Loss
+            stop_loss = None
+            sl_patterns = [
+                r'SL\s*[:\s]+\s*([\d.]+)',
+                r'Stop\s*Loss\s*[:\s]+\s*([\d.]+)',
+            ]
+            for pattern in sl_patterns:
+                sl_match = re.search(pattern, text_clean, re.IGNORECASE)
+                if sl_match:
+                    try:
+                        stop_loss = float(sl_match.group(1).strip())
+                        break
+                    except ValueError:
+                        continue
+            
+            if not stop_loss:
+                return None
+            
+            # Extract Take Profit targets
+            tp_matches = re.findall(r'TP\s*(\d+)\s*[:\s]+\s*([\d.]+)', text_clean, re.IGNORECASE)
+            if not tp_matches:
+                # Try without number: "TP: 3350" (assume TP1)
+                tp_simple = re.search(r'TP\s*[:\s]+\s*([\d.]+)', text_clean, re.IGNORECASE)
+                if tp_simple:
+                    tp_matches = [('1', tp_simple.group(1))]
+            
+            targets = {}
+            for tp_num, tp_value in tp_matches:
+                try:
+                    targets[f'target_{tp_num}'] = float(tp_value.strip())
+                except ValueError:
+                    continue
+            
+            # Sort targets by number
+            sorted_targets = {}
+            for i in range(1, 6):
+                key = f'target_{i}'
+                if key in targets:
+                    sorted_targets[key] = targets[key]
+            
+            # Build result
+            result = {
+                "symbol": symbol,
+                "action": action,
+                "entry_price": entry_price,
+                "stop_loss": stop_loss,
+                "signal_date": datetime.now(self.gmt4_tz).isoformat(),
+            }
+            
+            # Add targets
+            for i, (key, value) in enumerate(sorted_targets.items(), 1):
+                result[f"target_{i}"] = value
+            
+            return result
+            
+        except Exception as e:
+            print(f"Error parsing signal alert format: {e}")
+            return None
+    
     def _parse_inline_format(self, text: str) -> Optional[Dict]:
         """
         Parse inline format like:
@@ -892,7 +1058,7 @@ class TelegramSignalParser:
             if symbol_match:
                 potential = symbol_match.group(1).strip().upper()
                 # Check against blacklist
-                blacklist = {'SIGNAL', 'FOREX', 'CRYPTO', 'TRADING', 'ANALYSIS', 'TARGET', 'ENTRY', 'PRICE', 'STOP', 'LOSS', 'PROFIT', 'RISK', 'OPEN', 'CLOSE', 'BUY', 'SELL', 'DIRECTION', 'BETWEEN', 'TILL', 'ANY', 'FOLLOW', 'RULES'}
+                blacklist = {'SIGNAL', 'FOREX', 'CRYPTO', 'TRADING', 'ANALYSIS', 'TARGET', 'ENTRY', 'PRICE', 'STOP', 'LOSS', 'PROFIT', 'RISK', 'OPEN', 'CLOSE', 'BUY', 'SELL', 'DIRECTION', 'BETWEEN', 'TILL', 'ANY', 'FOLLOW', 'RULES', 'TP1', 'TP2', 'TP3', 'TP4', 'TP5', 'TP', 'SL'}
                 if potential in blacklist:
                     symbol_match = None
                 elif not self._is_valid_trading_symbol(potential):
@@ -903,7 +1069,7 @@ class TelegramSignalParser:
                 symbol_match = re.search(r'\b([A-Z]{3,8})\b', text[:range_match.start()], re.IGNORECASE)
                 if symbol_match:
                     potential = symbol_match.group(1).strip().upper()
-                    blacklist = {'SIGNAL', 'FOREX', 'CRYPTO', 'TRADING', 'ANALYSIS', 'TARGET', 'ENTRY', 'PRICE', 'STOP', 'LOSS', 'PROFIT', 'RISK', 'OPEN', 'CLOSE', 'BUY', 'SELL', 'DIRECTION', 'BETWEEN', 'TILL', 'ANY', 'FOLLOW', 'RULES', 'CRYPTO', 'FOREX'}
+                    blacklist = {'SIGNAL', 'FOREX', 'CRYPTO', 'TRADING', 'ANALYSIS', 'TARGET', 'ENTRY', 'PRICE', 'STOP', 'LOSS', 'PROFIT', 'RISK', 'OPEN', 'CLOSE', 'BUY', 'SELL', 'DIRECTION', 'BETWEEN', 'TILL', 'ANY', 'FOLLOW', 'RULES', 'CRYPTO', 'FOREX', 'TP1', 'TP2', 'TP3', 'TP4', 'TP5', 'TP', 'SL'}
                     if potential in blacklist:
                         return None
             
@@ -1194,7 +1360,7 @@ class TelegramSignalParser:
             if symbol_match:
                 potential = symbol_match.group(1).strip().upper()
                 # Check against blacklist
-                blacklist = {'SIGNAL', 'FOREX', 'CRYPTO', 'TRADING', 'ANALYSIS', 'TARGET', 'ENTRY', 'PRICE', 'STOP', 'LOSS', 'PROFIT', 'RISK', 'OPEN', 'CLOSE', 'BUY', 'SELL', 'DIRECTION', 'BETWEEN', 'TILL', 'ANY', 'FOLLOW', 'RULES', 'CRYPTO', 'FOREX', 'PLACE', 'TRADES'}
+                blacklist = {'SIGNAL', 'FOREX', 'CRYPTO', 'TRADING', 'ANALYSIS', 'TARGET', 'ENTRY', 'PRICE', 'STOP', 'LOSS', 'PROFIT', 'RISK', 'OPEN', 'CLOSE', 'BUY', 'SELL', 'DIRECTION', 'BETWEEN', 'TILL', 'ANY', 'FOLLOW', 'RULES', 'CRYPTO', 'FOREX', 'PLACE', 'TRADES', 'TP1', 'TP2', 'TP3', 'TP4', 'TP5', 'TP', 'SL'}
                 if potential in blacklist:
                     symbol_match = None
                 elif not self._is_valid_trading_symbol(potential):
@@ -1273,7 +1439,9 @@ class TelegramSignalParser:
             'DIRECTION', 'BETWEEN', 'TILL', 'ANY', 'FOLLOW', 'RULES', 'QUIZ', 'AFTER',
             'REACH', 'PLACE', 'MOVE', 'HANDLE', 'BETTER', 'READ', 'HERE',
             'SLOWLY', 'COMBUY', 'SUPPORT', 'INVERSE', 'COMBINE', 'COMBINED', 'COMBINING',
-            'SUPPORTS', 'SUPPORTED', 'INVERSED', 'INVERSING', 'SLOW', 'SLOWER'
+            'SUPPORTS', 'SUPPORTED', 'INVERSED', 'INVERSING', 'SLOW', 'SLOWER',
+            # Add TP1-TP5 and SL variations to blacklist (these are targets, not symbols)
+            'TP1', 'TP2', 'TP3', 'TP4', 'TP5', 'TP', 'SL', 'STOPLOSS', 'STOP_LOSS'
         }
         if symbol in blacklist:
             return False

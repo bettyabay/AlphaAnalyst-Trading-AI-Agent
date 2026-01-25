@@ -1397,11 +1397,18 @@ def phase1_foundation_data():
                             else:
                                 st.error(f"Failed: {result.get('message')}")
     with col_b:
-        signal_provider_options = [
-            "PipXpert",
-            "Add..."
-        ]
-        merged_providers = signal_provider_options + (st.session_state.get("signal_providers", []) or [])
+        # Fetch providers from database
+        db_providers = get_available_providers()
+        
+        # Base options
+        signal_provider_options = ["PipXpert", "Add..."]
+        
+        # Add providers from database (excluding PipXpert if already in base options)
+        db_providers_filtered = [p for p in db_providers if p not in signal_provider_options]
+        
+        # Merge: base options + database providers (sorted)
+        merged_providers = signal_provider_options + sorted(db_providers_filtered)
+        
         selected_provider = st.selectbox(
             "Signal Provider",
             options=merged_providers,
@@ -1409,8 +1416,9 @@ def phase1_foundation_data():
             key="select_signal_provider"
         )
         
-        # Show upload UI for PipXpert or when Add... is selected
-        if selected_provider == "PipXpert" or selected_provider == "Add...":
+        # Show upload UI for any selected provider
+        if selected_provider and selected_provider != "Add...":
+            # Handle PipXpert or any other provider
             if selected_provider == "PipXpert":
                 with st.expander("PipXpert Signal Data", expanded=False):
                     st.info("Upload PipXpert signal data from Excel file.")
@@ -1458,13 +1466,64 @@ def phase1_foundation_data():
                                     
                                     # Confirmation and submit button
                                     if st.button("✅ Ingest Signal Data", key="ingest_pipxpert_btn", type="primary"):
+                                        # Create progress container
+                                        progress_container = st.container()
+                                        progress_placeholder = progress_container.empty()
+                                        
+                                        # Progress callback function
+                                        progress_messages = []
+                                        def update_progress(msg, level="info"):
+                                            progress_messages.append((msg, level))
+                                            # Update UI with last few messages
+                                            with progress_placeholder:
+                                                for pm, pl in progress_messages[-5:]:
+                                                    if pl == "success":
+                                                        st.success(pm)
+                                                    elif pl == "warning":
+                                                        st.warning(pm)
+                                                    elif pl == "error":
+                                                        st.error(pm)
+                                                    else:
+                                                        st.info(pm)
+                                        
                                         result = ingest_signal_provider_data(
                                             signal_file,
                                             provider_name,
-                                            source_timezone=source_timezone
+                                            source_timezone=source_timezone,
+                                            progress_callback=update_progress
                                         )
+                                        
+                                        # Clear progress container and show final result
+                                        progress_placeholder.empty()
+                                        
                                         if result.get("success"):
                                             st.success(result.get("message"))
+                                            
+                                            # Show details if available
+                                            if result.get("details"):
+                                                details = result["details"]
+                                                st.markdown("#### 📊 Ingestion Details")
+                                                col1, col2, col3, col4 = st.columns(4)
+                                                with col1:
+                                                    st.metric("Total Processed", details.get("total_processed", 0))
+                                                with col2:
+                                                    st.metric("Inserted", details.get("inserted", 0))
+                                                with col3:
+                                                    if details.get("skipped_validation", 0) > 0:
+                                                        st.metric("Skipped (Validation)", details.get("skipped_validation", 0))
+                                                with col4:
+                                                    if details.get("skipped_duplicates", 0) > 0:
+                                                        st.metric("Skipped (Duplicates)", details.get("skipped_duplicates", 0))
+                                                if details.get("skip_reasons"):
+                                                    st.write("**Skip Reasons:**")
+                                                    for reason, count in details["skip_reasons"].items():
+                                                        st.write(f"- {reason}: {count}")
+                                            
+                                            # Force refresh to update dropdown with new provider
+                                            # Small delay to ensure database commit is complete
+                                            import time
+                                            time.sleep(0.5)
+                                            st.rerun()
                                         else:
                                             st.error(f"Failed: {result.get('message')}")
                                 else:
@@ -1477,7 +1536,125 @@ def phase1_foundation_data():
                         except Exception as e:
                             st.error(f"Error reading file: {str(e)}")
             
-            elif selected_provider == "Add...":
+            else:
+                # Handle other providers (not PipXpert)
+                provider_name = selected_provider
+                with st.expander(f"{provider_name} Signal Data", expanded=False):
+                    st.info(f"Upload {provider_name} signal data from Excel file.")
+                    
+                    # Date range selection (optional)
+                    col_date1, col_date2 = st.columns(2)
+                    with col_date1:
+                        start_date = st.date_input("Start Date (optional)", value=None, key=f"{provider_name}_start_date")
+                    with col_date2:
+                        end_date = st.date_input("End Date (optional)", value=None, key=f"{provider_name}_end_date")
+                    
+                    # All signals from Excel are assumed to be in UTC
+                    source_timezone = "UTC"
+                    
+                    signal_file = st.file_uploader("Upload Signal Data (Excel)", type=["xls", "xlsx", "csv"], key=f"{provider_name}_upload")
+                    
+                    if signal_file:
+                        # Preview and validate
+                        try:
+                            df_preview = _read_df(signal_file)
+                            if df_preview is not None and not df_preview.empty:
+                                st.dataframe(df_preview.head(10), use_container_width=True)
+                                
+                                # Validate data
+                                validation = validate_signal_provider_data(
+                                    df_preview, 
+                                    provider_name, 
+                                    "+04:00"
+                                )
+                                
+                                if validation["valid"]:
+                                    st.success("✓ Data validation passed")
+                                    if validation.get("warnings"):
+                                        for warning in validation["warnings"]:
+                                            st.warning(f"⚠ {warning}")
+                                    
+                                    # Show data summary
+                                    summary = validation.get("data_summary", {})
+                                    if summary:
+                                        st.info(f"**Summary:** {summary.get('total_rows', 0)} rows | "
+                                               f"Actions: {summary.get('action_counts', {})} | "
+                                               f"Date range: {summary.get('date_range', {}).get('start', 'N/A')} to {summary.get('date_range', {}).get('end', 'N/A')}")
+                                    
+                                    # Confirmation and submit button
+                                    if st.button("✅ Ingest Signal Data", key=f"ingest_{provider_name}_btn", type="primary"):
+                                        # Create progress container
+                                        progress_container = st.container()
+                                        progress_placeholder = progress_container.empty()
+                                        
+                                        # Progress callback function
+                                        progress_messages = []
+                                        def update_progress(msg, level="info"):
+                                            progress_messages.append((msg, level))
+                                            # Update UI with last few messages
+                                            with progress_placeholder:
+                                                for pm, pl in progress_messages[-5:]:
+                                                    if pl == "success":
+                                                        st.success(pm)
+                                                    elif pl == "warning":
+                                                        st.warning(pm)
+                                                    elif pl == "error":
+                                                        st.error(pm)
+                                                    else:
+                                                        st.info(pm)
+                                        
+                                        result = ingest_signal_provider_data(
+                                            signal_file,
+                                            provider_name,
+                                            source_timezone=source_timezone,
+                                            progress_callback=update_progress
+                                        )
+                                        
+                                        # Clear progress container and show final result
+                                        progress_placeholder.empty()
+                                        
+                                        if result.get("success"):
+                                            st.success(result.get("message"))
+                                            
+                                            # Show details if available
+                                            if result.get("details"):
+                                                details = result["details"]
+                                                st.markdown("#### 📊 Ingestion Details")
+                                                col1, col2, col3, col4 = st.columns(4)
+                                                with col1:
+                                                    st.metric("Total Processed", details.get("total_processed", 0))
+                                                with col2:
+                                                    st.metric("Inserted", details.get("inserted", 0))
+                                                with col3:
+                                                    if details.get("skipped_validation", 0) > 0:
+                                                        st.metric("Skipped (Validation)", details.get("skipped_validation", 0))
+                                                with col4:
+                                                    if details.get("skipped_duplicates", 0) > 0:
+                                                        st.metric("Skipped (Duplicates)", details.get("skipped_duplicates", 0))
+                                                if details.get("skip_reasons"):
+                                                    st.write("**Skip Reasons:**")
+                                                    for reason, count in details["skip_reasons"].items():
+                                                        st.write(f"- {reason}: {count}")
+                                            
+                                            # Force refresh to update dropdown with new provider
+                                            # Small delay to ensure database commit is complete
+                                            import time
+                                            time.sleep(0.5)
+                                            st.rerun()
+                                        else:
+                                            st.error(f"Failed: {result.get('message')}")
+                                else:
+                                    st.error(f"Validation failed: {validation.get('message')}")
+                                    if validation.get("warnings"):
+                                        for warning in validation["warnings"]:
+                                            st.warning(f"⚠ {warning}")
+                            else:
+                                st.error("Could not read file. Please ensure it is a valid Excel or CSV file.")
+                        except Exception as e:
+                            st.error(f"Error reading file: {str(e)}")
+        
+        # Handle "Add..." option separately
+        if selected_provider == "Add...":
                 with st.expander("Add New Signal Provider", expanded=False):
                     st.write("Enter signal provider details and upload data file.")
                     
@@ -1532,20 +1709,68 @@ def phase1_foundation_data():
                                     
                                     # Confirmation and submit button
                                     if st.button("✅ Submit Signal Data", key="ingest_new_provider_btn", type="primary"):
+                                        # Create progress container
+                                        progress_container = st.container()
+                                        progress_placeholder = progress_container.empty()
+                                        
+                                        # Progress callback function
+                                        progress_messages = []
+                                        def update_progress(msg, level="info"):
+                                            progress_messages.append((msg, level))
+                                            # Update UI with last few messages
+                                            with progress_placeholder:
+                                                for pm, pl in progress_messages[-5:]:
+                                                    if pl == "success":
+                                                        st.success(pm)
+                                                    elif pl == "warning":
+                                                        st.warning(pm)
+                                                    elif pl == "error":
+                                                        st.error(pm)
+                                                    else:
+                                                        st.info(pm)
+                                        
                                         result = ingest_signal_provider_data(
                                             signal_file,
                                             provider_name,
-                                            source_timezone=source_timezone
+                                            source_timezone=source_timezone,
+                                            progress_callback=update_progress
                                         )
+                                        
+                                        # Clear progress container and show final result
+                                        progress_placeholder.empty()
+                                        
                                         if result.get("success"):
                                             st.success(result.get("message"))
-                                            # Add provider to list
-                                            if provider_name not in (st.session_state.get("signal_providers", []) or []):
-                                                st.session_state.signal_providers = (st.session_state.get("signal_providers", []) or []) + [provider_name]
-                                                st.success(f"Added '{provider_name}' to provider list")
-                                                # Use st.rerun() if available, else just continue
-                                                if hasattr(st, "rerun"):
-                                                    st.rerun()
+                                            # Show details if available
+                                            if result.get("details"):
+                                                details = result["details"]
+                                                st.markdown("#### 📊 Ingestion Details")
+                                                col1, col2, col3, col4 = st.columns(4)
+                                                with col1:
+                                                    st.metric("Total Processed", details.get("total_processed", 0))
+                                                with col2:
+                                                    st.metric("Inserted", details.get("inserted", 0))
+                                                with col3:
+                                                    if details.get("skipped_validation", 0) > 0:
+                                                        st.metric("Skipped (Validation)", details.get("skipped_validation", 0))
+                                                with col4:
+                                                    if details.get("skipped_duplicates", 0) > 0:
+                                                        st.metric("Skipped (Duplicates)", details.get("skipped_duplicates", 0))
+                                                if details.get("skip_reasons"):
+                                                    st.write("**Skip Reasons:**")
+                                                    for reason, count in details["skip_reasons"].items():
+                                                        st.write(f"- {reason}: {count}")
+                                            # Add provider to session state immediately
+                                            if provider_name and provider_name not in (st.session_state.get("signal_providers", []) or []):
+                                                if "signal_providers" not in st.session_state:
+                                                    st.session_state.signal_providers = []
+                                                st.session_state.signal_providers.append(provider_name)
+                                            
+                                            # Force refresh to update dropdown with new provider
+                                            # Small delay to ensure database commit is complete
+                                            import time
+                                            time.sleep(0.5)
+                                            st.rerun()
                                         else:
                                             st.error(f"Failed: {result.get('message')}")
                                 else:
@@ -1991,6 +2216,300 @@ def phase1_foundation_data():
             st.code(traceback.format_exc())
     else:
         st.info("No analysis results found. Run analysis first. (Testing Mode - Results are not saved to database)")
+    
+    # =============================================================================
+    # MARKET REGIME SEGMENTATION MODULE - NEW SECTION
+    # =============================================================================
+    st.markdown("---")
+    st.markdown("### 🌐 Market Regime Analysis (Context-Based Performance)")
+    st.info("Analyze signal performance across different market conditions (Trending vs. Ranging, High Volatility vs. Low Volatility)")
+    
+    with st.expander("📖 About Market Regime Analysis", expanded=False):
+        st.markdown("""
+        **Market Regime Segmentation** helps answer the critical question:
+        
+        > *"Does this signal provider perform better in trending markets or ranging markets?"*
+        
+        This analysis segments your signal performance based on:
+        - **Trend Strength**: Trending vs Ranging (using ADX)
+        - **Volatility**: High Vol vs Low Vol (using ATR)
+        
+        **How it works:**
+        1. We calculate technical indicators (ADX, SMA, ATR) on historical market data
+        2. We classify each time period into a "regime" (e.g., "Trending - High Vol")
+        3. We match your signals to the market regime at the moment of entry
+        4. We calculate performance metrics for each regime
+        """)
+    
+    # Sidebar controls for regime parameters
+    st.markdown("#### ⚙️ Regime Configuration")
+    regime_col1, regime_col2, regime_col3 = st.columns(3)
+    
+    with regime_col1:
+        adx_threshold = st.slider(
+            "ADX Threshold (Trending Cutoff)",
+            min_value=15,
+            max_value=40,
+            value=25,
+            step=1,
+            help="ADX above this value = Trending market, below = Ranging market"
+        )
+    
+    with regime_col2:
+        regime_timeframe = st.selectbox(
+            "Market Data Timeframe",
+            options=["1h", "4h", "1d"],
+            index=0,
+            help="Timeframe for regime calculation (higher = smoother, lower = more granular)"
+        )
+    
+    with regime_col3:
+        regime_lookback_days = st.number_input(
+            "Lookback Period (Days)",
+            min_value=30,
+            max_value=730,
+            value=365,
+            step=30,
+            help="How many days of historical data to fetch for regime analysis"
+        )
+    
+    # Run Regime Analysis button
+    if st.button("🚀 Run Regime Analysis", key="run_regime_analysis_btn", type="primary"):
+        # Check if we have analysis results to work with
+        if 'latest_analysis_results' not in st.session_state or not st.session_state['latest_analysis_results']:
+            st.error("⚠️ No signal analysis results found. Please run signal analysis first (above).")
+        else:
+            with st.spinner("Running market regime analysis..."):
+                try:
+                    from tradingagents.dataflows.signal_analyzer import SignalAnalyzer
+                    from tradingagents.dataflows.market_data_service import fetch_ohlcv
+                    
+                    # Get analyzed signals from session state
+                    signals_data = st.session_state['latest_analysis_results']
+                    signals_df = pd.DataFrame(signals_data)
+                    
+                    # Determine the symbol from the signals
+                    if 'symbol' not in signals_df.columns or signals_df['symbol'].isna().all():
+                        st.error("⚠️ Signal data doesn't contain symbol information.")
+                    else:
+                        # Get the most common symbol (or first symbol if multiple)
+                        symbol = signals_df['symbol'].mode()[0] if len(signals_df['symbol'].mode()) > 0 else signals_df['symbol'].iloc[0]
+                        
+                        # Validate symbol
+                        if not symbol or len(symbol) < 2:
+                            st.error(f"⚠️ Invalid symbol: '{symbol}'. Please ensure signals have valid symbol data.")
+                            symbol = None
+                    
+                    if symbol:
+                        
+                        # Determine asset class for the symbol
+                        asset_class = None
+                        if "XAU" in symbol or "XAG" in symbol:
+                            asset_class = "Commodities"
+                        elif symbol.startswith("C:"):
+                            asset_class = "Currencies"
+                        elif symbol.startswith("I:") or symbol.startswith("^"):
+                            asset_class = "Indices"
+                        else:
+                            asset_class = "Currencies"  # Default
+                        
+                        st.info(f"Analyzing regime for: **{symbol}** ({asset_class})")
+                        
+                        # Fetch market data for regime analysis
+                        end_date = datetime.now()
+                        start_date = end_date - timedelta(days=regime_lookback_days)
+                        
+                        # Fetch 1min data from database and resample to desired timeframe
+                        # Database only has 1min data, so we'll fetch that and resample
+                        interval = "1min"
+                        
+                        market_data = fetch_ohlcv(
+                            symbol=symbol,
+                            interval=interval,
+                            start=start_date,
+                            end=end_date,
+                            asset_class=asset_class
+                        )
+                        
+                        if market_data is None or market_data.empty:
+                            st.error(f"❌ No market data available for {symbol} in the specified period.")
+                        else:
+                            st.success(f"✅ Fetched {len(market_data)} candles of 1min data")
+                            
+                            # Ensure timestamp is index
+                            if 'timestamp' in market_data.columns:
+                                market_data['timestamp'] = pd.to_datetime(market_data['timestamp'])
+                                market_data = market_data.set_index('timestamp')
+                            
+                            # Resample 1min data to the desired timeframe
+                            agg_dict = {
+                                'Open': 'first',
+                                'High': 'max',
+                                'Low': 'min',
+                                'Close': 'last'
+                            }
+                            if 'Volume' in market_data.columns:
+                                agg_dict['Volume'] = 'sum'
+                            
+                            if regime_timeframe == "1h":
+                                # Resample 1min data to 1h
+                                market_data = market_data.resample('1h').agg(agg_dict).dropna()
+                                st.info(f"📊 Resampled to 1h timeframe: {len(market_data)} candles")
+                            elif regime_timeframe == "4h":
+                                # Resample 1min data to 4h
+                                market_data = market_data.resample('4h').agg(agg_dict).dropna()
+                                st.info(f"📊 Resampled to 4h timeframe: {len(market_data)} candles")
+                            elif regime_timeframe == "1d":
+                                # Resample 1min data to 1d
+                                market_data = market_data.resample('1D').agg(agg_dict).dropna()
+                                st.info(f"📊 Resampled to 1d timeframe: {len(market_data)} candles")
+                            
+                            # Initialize analyzer
+                            analyzer = SignalAnalyzer()
+                            
+                            # Step 1: Calculate regime indicators
+                            st.info("Step 1/4: Calculating market indicators (ADX, SMA, ATR)...")
+                            market_with_indicators = analyzer.calculate_regimes(
+                                market_df=market_data,
+                                adx_period=14,
+                                sma_short=50,
+                                sma_long=200,
+                                atr_period=14,
+                                atr_ma_period=50
+                            )
+                            
+                            # Step 2: Define regimes
+                            st.info("Step 2/4: Classifying market regimes...")
+                            market_with_regimes = analyzer.define_regime(
+                                market_df=market_with_indicators,
+                                adx_threshold=adx_threshold
+                            )
+                            
+                            # Step 3: Merge signals with regimes
+                            st.info("Step 3/4: Matching signals to market conditions (timezone-aware)...")
+                            signals_with_regimes = analyzer.merge_signals_with_regimes(
+                                signals_df=signals_df,
+                                market_df=market_with_regimes,
+                                entry_time_col='signal_date',
+                                timezone='UTC'  # CRITICAL: Use UTC for consistency
+                            )
+                            
+                            # Step 4: Calculate metrics by regime
+                            st.info("Step 4/4: Calculating performance metrics by regime...")
+                            regime_metrics = analyzer.calculate_metrics_by_regime(
+                                signals_df=signals_with_regimes,
+                                pnl_col='pips_made',
+                                final_status_col='final_status'
+                            )
+                            
+                            if regime_metrics.empty:
+                                st.warning("⚠️ No regime metrics calculated. Check if signals were matched with market data.")
+                            else:
+                                st.success("✅ Regime analysis complete!")
+                                
+                                # Store in session state
+                                st.session_state['regime_metrics'] = regime_metrics
+                                st.session_state['signals_with_regimes'] = signals_with_regimes
+                
+                except Exception as e:
+                    st.error(f"❌ Regime analysis failed: {str(e)}")
+                    import traceback
+                    st.code(traceback.format_exc())
+    
+    # Display regime analysis results
+    if 'regime_metrics' in st.session_state and not st.session_state['regime_metrics'].empty:
+        st.markdown("---")
+        st.markdown("#### 📊 Regime Analysis Results")
+        
+        regime_metrics = st.session_state['regime_metrics']
+        
+        # Display metrics table
+        st.markdown("##### Performance Metrics by Market Regime")
+        st.dataframe(regime_metrics, use_container_width=True)
+        
+        # Create regime heatmap visualization
+        st.markdown("##### 🔥 Win Rate Heatmap")
+        
+        # Parse regime labels to create heatmap
+        regime_metrics['Trend'] = regime_metrics['Regime'].str.split(' - ').str[0]
+        regime_metrics['Volatility'] = regime_metrics['Regime'].str.split(' - ').str[1]
+        
+        # Create pivot table for heatmap
+        heatmap_data = regime_metrics.pivot_table(
+            values='Win_Rate_%',
+            index='Trend',
+            columns='Volatility',
+            aggfunc='mean'
+        )
+        
+        # Create heatmap using plotly
+        import plotly.graph_objects as go
+        
+        fig = go.Figure(data=go.Heatmap(
+            z=heatmap_data.values,
+            x=heatmap_data.columns,
+            y=heatmap_data.index,
+            colorscale='RdYlGn',
+            text=heatmap_data.values,
+            texttemplate='%{text:.1f}%',
+            textfont={"size": 16},
+            colorbar=dict(title="Win Rate %")
+        ))
+        
+        fig.update_layout(
+            title="Signal Performance by Market Condition",
+            xaxis_title="Volatility",
+            yaxis_title="Trend",
+            height=400
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Key insights
+        st.markdown("##### 💡 Key Insights")
+        
+        best_regime = regime_metrics.loc[regime_metrics['Win_Rate_%'].idxmax()]
+        worst_regime = regime_metrics.loc[regime_metrics['Win_Rate_%'].idxmin()]
+        
+        insight_col1, insight_col2 = st.columns(2)
+        
+        with insight_col1:
+            st.success(f"""
+            **Best Performance:**
+            - Regime: {best_regime['Regime']}
+            - Win Rate: {best_regime['Win_Rate_%']:.1f}%
+            - Total Trades: {best_regime['Total_Trades']}
+            - Profit Factor: {best_regime['Profit_Factor']:.2f}
+            """)
+        
+        with insight_col2:
+            st.error(f"""
+            **Worst Performance:**
+            - Regime: {worst_regime['Regime']}
+            - Win Rate: {worst_regime['Win_Rate_%']:.1f}%
+            - Total Trades: {worst_regime['Total_Trades']}
+            - Profit Factor: {worst_regime['Profit_Factor']:.2f}
+            """)
+        
+        # Recommendations
+        st.markdown("##### 🎯 Trading Recommendations")
+        st.info(f"""
+        Based on the regime analysis:
+        
+        1. **Focus on**: {best_regime['Regime']} conditions where your win rate is highest ({best_regime['Win_Rate_%']:.1f}%)
+        2. **Avoid or reduce exposure during**: {worst_regime['Regime']} conditions (only {worst_regime['Win_Rate_%']:.1f}% win rate)
+        3. **Sample size check**: Ensure adequate trades in each regime for statistical significance
+        """)
+        
+        # Export option
+        if st.button("📥 Export Regime Analysis to CSV", key="export_regime_csv"):
+            csv = regime_metrics.to_csv(index=False)
+            st.download_button(
+                label="Download CSV",
+                data=csv,
+                file_name=f"regime_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv"
+            )
 
     with col_c:
         kpi_options = ["ATR", "Volume", "VWAP", "EMA", "SMA", "RSI", "MACD", "Bollinger Bands", "Stochastic", "Momentum", "Add..."] + (st.session_state.get("kpi_indicators", []) or [])

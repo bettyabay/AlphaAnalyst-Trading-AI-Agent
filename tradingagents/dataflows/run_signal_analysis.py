@@ -17,6 +17,7 @@ from tradingagents.dataflows.daily_reporter import DailyReporter
 def get_available_providers() -> List[str]:
     """
     Get list of unique provider names from signal_provider_signals table.
+    Uses a more reliable query to ensure we get all distinct providers.
     
     Returns:
         List of unique provider names (sorted)
@@ -26,10 +27,48 @@ def get_available_providers() -> List[str]:
         return []
     
     try:
-        # Get distinct provider names
-        result = supabase.table('signal_provider_signals').select('provider_name').execute()
-        if result.data:
-            providers = list(set([row['provider_name'] for row in result.data if row.get('provider_name')]))
+        # Get all provider names - fetch in batches to handle large datasets
+        # Supabase has a default limit of 1000, so we need to fetch all records
+        all_providers = []
+        page_size = 1000
+        offset = 0
+        max_iterations = 100  # Safety limit to prevent infinite loops
+        
+        iteration = 0
+        while iteration < max_iterations:
+            iteration += 1
+            try:
+                result = supabase.table('signal_provider_signals')\
+                    .select('provider_name')\
+                    .range(offset, offset + page_size - 1)\
+                    .execute()
+                
+                if not result.data or len(result.data) == 0:
+                    break
+                    
+                all_providers.extend(result.data)
+                
+                # If we got fewer records than page_size, we've reached the end
+                if len(result.data) < page_size:
+                    break
+                    
+                offset += page_size
+            except Exception as e:
+                print(f"Error fetching providers batch at offset {offset}: {e}")
+                break
+        
+        if all_providers:
+            # Extract unique provider names, filtering out None/empty values
+            providers = []
+            seen = set()
+            for row in all_providers:
+                provider_name = row.get('provider_name')
+                if provider_name and isinstance(provider_name, str):
+                    provider_name = provider_name.strip()
+                    if provider_name and provider_name not in seen:
+                        providers.append(provider_name)
+                        seen.add(provider_name)
+            
             # Return sorted list
             return sorted(providers)
         return []
