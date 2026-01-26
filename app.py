@@ -2122,6 +2122,41 @@ def phase1_foundation_data():
             if results_list:
                 df_results = pd.DataFrame(results_list)
                 
+                # Calculate summary statistics
+                total_signals = len(df_results)
+                
+                # Count TP1, TP2, TP3, SL hits (convert boolean to int for proper counting)
+                tp1_count = int(df_results['tp1_hit'].fillna(False).astype(int).sum()) if 'tp1_hit' in df_results.columns else 0
+                tp2_count = int(df_results['tp2_hit'].fillna(False).astype(int).sum()) if 'tp2_hit' in df_results.columns else 0
+                tp3_count = int(df_results['tp3_hit'].fillna(False).astype(int).sum()) if 'tp3_hit' in df_results.columns else 0
+                sl_count = int(df_results['sl_hit'].fillna(False).astype(int).sum()) if 'sl_hit' in df_results.columns else 0
+                
+                # Calculate percentages
+                tp1_pct = (tp1_count / total_signals * 100) if total_signals > 0 else 0
+                tp2_pct = (tp2_count / total_signals * 100) if total_signals > 0 else 0
+                tp3_pct = (tp3_count / total_signals * 100) if total_signals > 0 else 0
+                sl_pct = (sl_count / total_signals * 100) if total_signals > 0 else 0
+                
+                # Sum of pips made (handle NaN values)
+                total_pips = df_results['pips_made'].fillna(0).sum() if 'pips_made' in df_results.columns else 0
+                
+                # Display summary statistics
+                st.markdown("##### 📊 Summary Statistics")
+                col_s1, col_s2, col_s3, col_s4, col_s5 = st.columns(5)
+                
+                with col_s1:
+                    st.metric("TP1 Hits", f"{tp1_count}", f"{tp1_pct:.1f}%")
+                with col_s2:
+                    st.metric("TP2 Hits", f"{tp2_count}", f"{tp2_pct:.1f}%")
+                with col_s3:
+                    st.metric("TP3 Hits", f"{tp3_count}", f"{tp3_pct:.1f}%")
+                with col_s4:
+                    st.metric("SL Hits", f"{sl_count}", f"{sl_pct:.1f}%")
+                with col_s5:
+                    st.metric("Total Pips", f"{int(total_pips)}", "Sum")
+                
+                st.markdown("---")
+                
                 # Format table to match the image format
                 # Columns: Date, Time, Asset, Direction, Entry, TP1, TP2, TP3, SL, Pips Made
                 formatted_data = []
