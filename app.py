@@ -2711,6 +2711,13 @@ def phase1_foundation_data():
         # Key insights
         st.markdown("##### 💡 Key Insights")
         
+        # Check if we have multiple regimes
+        num_regimes = len(regime_metrics)
+        
+        if num_regimes == 0:
+            st.warning("No regime data available for insights.")
+            return
+        
         # Sort by Win Rate descending to get best, then by Profit Factor as tiebreaker
         regime_metrics_sorted = regime_metrics.sort_values(
             by=['Win_Rate_%', 'Profit_Factor'], 
@@ -2719,7 +2726,6 @@ def phase1_foundation_data():
         best_regime = regime_metrics_sorted.iloc[0]
         
         # For worst, filter out the best regime and sort by Win Rate ascending
-        # If only one regime exists, we'll still show it but it will be the same
         regime_metrics_worst = regime_metrics[
             regime_metrics['Regime'] != best_regime['Regime']
         ]
@@ -2731,39 +2737,65 @@ def phase1_foundation_data():
                 ascending=[True, True]
             ).iloc[0]
         else:
-            # If only one regime exists, we can't have different best/worst
-            # In this case, show the same regime but indicate it's the only one
-            worst_regime = best_regime
+            # If only one regime exists, don't show worst performance
+            worst_regime = None
         
-        insight_col1, insight_col2 = st.columns(2)
-        
-        with insight_col1:
-            st.success(f"""
-            **Best Performance:**
-            - Regime: {best_regime['Regime']}
-            - Win Rate: {best_regime['Win_Rate_%']:.1f}%
-            - Total Trades: {best_regime['Total_Trades']}
-            - Profit Factor: {best_regime['Profit_Factor']:.2f}
-            """)
-        
-        with insight_col2:
-            st.error(f"""
-            **Worst Performance:**
-            - Regime: {worst_regime['Regime']}
-            - Win Rate: {worst_regime['Win_Rate_%']:.1f}%
-            - Total Trades: {worst_regime['Total_Trades']}
-            - Profit Factor: {worst_regime['Profit_Factor']:.2f}
+        if worst_regime is not None:
+            # Show both best and worst if we have multiple regimes
+            insight_col1, insight_col2 = st.columns(2)
+            
+            with insight_col1:
+                st.success(f"""
+                **Best Performance:**
+                - Regime: {best_regime['Regime']}
+                - Win Rate: {best_regime['Win_Rate_%']:.1f}%
+                - Total Trades: {best_regime['Total_Trades']}
+                - Profit Factor: {best_regime['Profit_Factor']:.2f}
+                """)
+            
+            with insight_col2:
+                st.error(f"""
+                **Worst Performance:**
+                - Regime: {worst_regime['Regime']}
+                - Win Rate: {worst_regime['Win_Rate_%']:.1f}%
+                - Total Trades: {worst_regime['Total_Trades']}
+                - Profit Factor: {worst_regime['Profit_Factor']:.2f}
+                """)
+        else:
+            # Only one regime - show only best performance
+            st.info(f"""
+            **📊 Current Performance Analysis:**
+            
+            Only one market regime detected in your data:
+            - **Regime**: {best_regime['Regime']}
+            - **Win Rate**: {best_regime['Win_Rate_%']:.1f}%
+            - **Total Trades**: {best_regime['Total_Trades']}
+            - **Profit Factor**: {best_regime['Profit_Factor']:.2f}
+            
+            💡 **Tip**: To compare best vs worst performance, you need signals across multiple market regimes (Trending/Ranging × High Vol/Low Vol).
             """)
         
         # Recommendations
         st.markdown("##### 🎯 Trading Recommendations")
-        st.info(f"""
-        Based on the regime analysis:
-        
-        1. **Focus on**: {best_regime['Regime']} conditions where your win rate is highest ({best_regime['Win_Rate_%']:.1f}%)
-        2. **Avoid or reduce exposure during**: {worst_regime['Regime']} conditions (only {worst_regime['Win_Rate_%']:.1f}% win rate)
-        3. **Sample size check**: Ensure adequate trades in each regime for statistical significance
-        """)
+        if worst_regime is not None:
+            # Multiple regimes - show comparison recommendations
+            st.info(f"""
+            Based on the regime analysis:
+            
+            1. **Focus on**: {best_regime['Regime']} conditions where your win rate is highest ({best_regime['Win_Rate_%']:.1f}%)
+            2. **Avoid or reduce exposure during**: {worst_regime['Regime']} conditions (only {worst_regime['Win_Rate_%']:.1f}% win rate)
+            3. **Sample size check**: Ensure adequate trades in each regime for statistical significance
+            """)
+        else:
+            # Single regime - show general recommendations
+            st.info(f"""
+            Based on the regime analysis:
+            
+            1. **Current Performance**: Your signals in {best_regime['Regime']} conditions show a {best_regime['Win_Rate_%']:.1f}% win rate
+            2. **Profit Factor**: {best_regime['Profit_Factor']:.2f} - {'Consider reviewing strategy' if best_regime['Profit_Factor'] < 1.0 else 'Strategy shows positive edge'}
+            3. **Sample Size**: With only {best_regime['Total_Trades']} trades, collect more data for statistical significance
+            4. **Next Steps**: Analyze signals across different market conditions (Trending/Ranging × High Vol/Low Vol) to identify optimal trading environments
+            """)
         
         # Export option
         if st.button("📥 Export Regime Analysis to CSV", key="export_regime_csv"):
