@@ -368,7 +368,7 @@ class TelegramSignalParser:
             sl_patterns = [
                 r'SL[:\s]+([\d.]+)',
                 r'Stop\s*Loss[:\s]+([\d.]+)',
-                r'Stop\s*Loss[.\s]+([\d.]+)',  # For "STOP LOSS ....4590"
+                r'Stop\s*Loss[._\s]+([\d.]+)',  # For "STOP LOSS ____ 4454" or "STOP LOSS ....4590"
             ]
             for pattern in sl_patterns:
                 sl_match = re.search(pattern, text, re.IGNORECASE)
@@ -1146,9 +1146,9 @@ class TelegramSignalParser:
         try:
             # Pattern: SYMBOL ACTION_ ENTRY _ DECIMAL (optional)
             # Example: XAUUSD BUY_ 4595 _ 92 or NAS100 SELL_ 25482.60
-            # Also handles: XAUUSD BUY_ 4403..4404 (range format)
+            # Also handles: XAUUSD BUY_ 4403..4404 (range format) or XAUUSD BUY 4463-4460 (dash range)
             # Updated to allow numbers in symbols (for indices like NAS100, US30)
-            pattern = r'\b([A-Z0-9]{3,8}|[a-z0-9]{3,8})\s+(BUY|SELL)[_\s]+([\d.]+(?:\.{2,}\d+)?)(?:\s*[_\s]+\s*([\d.]+))?'
+            pattern = r'\b([A-Z0-9]{3,8}|[a-z0-9]{3,8})\s+(BUY|SELL)[_\s]+([\d.]+(?:\.{2,}\d+|-\d+)?)(?:\s*[_\s]+\s*([\d.]+))?'
             match = re.search(pattern, text, re.IGNORECASE)
             
             if not match:
@@ -1174,7 +1174,7 @@ class TelegramSignalParser:
             # Clean up entry_main - remove trailing dots
             entry_main = entry_main.rstrip('.')
             
-            # Check if entry_main contains a range (multiple dots like "4403..4404" or "4249...50")
+            # Check if entry_main contains a range (multiple dots like "4403..4404" or dash like "4463-4460")
             if '..' in entry_main or '...' in entry_main:
                 # It's a range - extract the two numbers and calculate average
                 # Handle patterns like: "4403..4404", "4249...50", "4496..95"
@@ -1202,6 +1202,19 @@ class TelegramSignalParser:
                                 entry_price = (val1 + val2) / 2
                     except (ValueError, IndexError):
                         pass
+            elif '-' in entry_main:
+                # Handle dash-separated range like "4463-4460"
+                dash_range_match = re.search(r'(\d+)\s*-\s*(\d+)', entry_main)
+                if dash_range_match:
+                    try:
+                        val1 = float(dash_range_match.group(1))
+                        val2 = float(dash_range_match.group(2))
+                        # For entry ranges, use the first (higher) value or average
+                        # Typically for BUY: higher value, for SELL: lower value
+                        # For simplicity, use average
+                        entry_price = (val1 + val2) / 2
+                    except (ValueError, IndexError):
+                        pass
             
             # If not a range, try to parse as regular number
             if entry_price is None:
@@ -1225,10 +1238,10 @@ class TelegramSignalParser:
             if entry_price is None:
                 return None
             
-            # Extract Stop Loss - look for "STOP LOSS" followed by dots and number
+            # Extract Stop Loss - look for "STOP LOSS" followed by dots, underscores, spaces and number
             stop_loss = None
             sl_patterns = [
-                r'STOP\s*LOSS[.\s]+([\d.]+)',  # STOP LOSS ……4590
+                r'STOP\s*LOSS[._\s]+([\d.]+)',  # STOP LOSS ____ 4454 or STOP LOSS ……4590
                 r'STOP\s*LOSS[:\s]+([\d.]+)',  # STOP LOSS: 4590
                 r'SL[:\s]+([\d.]+)',  # SL: 4590
             ]

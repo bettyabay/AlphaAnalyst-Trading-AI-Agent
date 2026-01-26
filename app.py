@@ -2196,10 +2196,25 @@ def phase1_foundation_data():
                     if tp3_value != 'N/A' and tp3_hit:
                         tp3_value = f"{tp3_value} ✓"
                     
+                    # Get stop_loss from the analysis results (should match the original signal)
                     sl_value = row.get('stop_loss', 'N/A')
                     sl_hit = row.get('sl_hit', False)
-                    if sl_value != 'N/A' and sl_hit:
-                        sl_value = f"{sl_value} ✓"
+                    
+                    # Format stop_loss value
+                    if sl_value != 'N/A' and sl_value is not None:
+                        try:
+                            # Convert to float and format
+                            sl_value = float(sl_value)
+                            if sl_hit:
+                                sl_value = f"{sl_value} ✓"
+                            else:
+                                sl_value = f"{sl_value}"
+                        except (ValueError, TypeError):
+                            # If conversion fails, use as-is
+                            if sl_hit:
+                                sl_value = f"{sl_value} ✓"
+                    else:
+                        sl_value = 'N/A'
                     
                     # Get status - show final_status, don't show error messages
                     status = row.get('final_status', 'N/A')
@@ -2446,13 +2461,32 @@ def phase1_foundation_data():
                             
                             # Step 1: Calculate regime indicators
                             st.info("Step 1/4: Calculating market indicators (ADX, SMA, ATR)...")
+                            
+                            # Adjust indicator periods based on timeframe to reduce "Unknown" regimes
+                            # For daily timeframe, use shorter periods since we have fewer candles
+                            if regime_timeframe == "1d":
+                                # Daily: Use shorter periods to avoid too many "Unknown" at start
+                                sma_short = 20
+                                sma_long = 50
+                                atr_ma_period = 20
+                            elif regime_timeframe == "4h":
+                                # 4H: Use moderate periods
+                                sma_short = 30
+                                sma_long = 100
+                                atr_ma_period = 30
+                            else:  # 1h
+                                # 1H: Use full periods
+                                sma_short = 50
+                                sma_long = 200
+                                atr_ma_period = 50
+                            
                             market_with_indicators = analyzer.calculate_regimes(
                                 market_df=market_data,
                                 adx_period=14,
-                                sma_short=50,
-                                sma_long=200,
+                                sma_short=sma_short,
+                                sma_long=sma_long,
                                 atr_period=14,
-                                atr_ma_period=50
+                                atr_ma_period=atr_ma_period
                             )
                             
                             # Step 2: Define regimes
@@ -2462,13 +2496,37 @@ def phase1_foundation_data():
                                 adx_threshold=adx_threshold
                             )
                             
+                            # Check for "Unknown" regimes and provide feedback
+                            if 'Regime' in market_with_regimes.columns:
+                                unknown_count = (market_with_regimes['Regime'] == 'Unknown').sum()
+                                total_candles = len(market_with_regimes)
+                                if unknown_count > 0:
+                                    unknown_pct = (unknown_count / total_candles * 100) if total_candles > 0 else 0
+                                    if unknown_pct > 50:
+                                        st.warning(f"⚠️ {unknown_pct:.1f}% of candles have 'Unknown' regime. This may be due to insufficient data for indicator calculation. Consider increasing lookback period or using a lower timeframe.")
+                                    elif unknown_pct > 10:
+                                        st.info(f"ℹ️ {unknown_count} candles ({unknown_pct:.1f}%) have 'Unknown' regime (insufficient data for indicators at start of period). This is normal.")
+                            
                             # Step 3: Merge signals with regimes
                             st.info("Step 3/4: Matching signals to market conditions (timezone-aware)...")
+                            
+                            # Adjust tolerance based on timeframe
+                            # For daily candles, we need at least 1 day tolerance
+                            # For 4h candles, we need at least 4 hours tolerance
+                            # For 1h candles, 1 hour tolerance is fine
+                            if regime_timeframe == "1d":
+                                merge_tolerance = pd.Timedelta('2 days')  # Allow up to 2 days lookback for daily
+                            elif regime_timeframe == "4h":
+                                merge_tolerance = pd.Timedelta('8 hours')  # Allow up to 8 hours lookback for 4h
+                            else:  # 1h
+                                merge_tolerance = pd.Timedelta('2 hours')  # Allow up to 2 hours lookback for 1h
+                            
                             signals_with_regimes = analyzer.merge_signals_with_regimes(
                                 signals_df=signals_df,
                                 market_df=market_with_regimes,
                                 entry_time_col='signal_date',
-                                timezone='UTC'  # CRITICAL: Use UTC for consistency
+                                timezone='UTC',  # CRITICAL: Use UTC for consistency
+                                tolerance=merge_tolerance
                             )
                             
                             # Step 4: Calculate metrics by regime
@@ -2480,7 +2538,28 @@ def phase1_foundation_data():
                             )
                             
                             if regime_metrics.empty:
-                                st.warning("⚠️ No regime metrics calculated. Check if signals were matched with market data.")
+                                # Provide detailed diagnostics
+                                matched_count = signals_with_regimes['Regime'].notna().sum() if 'Regime' in signals_with_regimes.columns else 0
+                                total_signals = len(signals_with_regimes)
+                                unmatched_count = total_signals - matched_count
+                                
+                                st.warning("⚠️ No regime metrics calculated.")
+                                st.info(f"""
+                                **Diagnostics:**
+                                - Total signals: {total_signals}
+                                - Signals matched with regime: {matched_count}
+                                - Signals without regime: {unmatched_count}
+                                
+                                **Possible reasons:**
+                                1. Signal dates are outside the market data period
+                                2. Merge tolerance ({merge_tolerance}) is too strict for {regime_timeframe} timeframe
+                                3. Market data gaps or timezone misalignment
+                                
+                                **Suggestions:**
+                                - Try increasing lookback period
+                                - Try using a lower timeframe (1h or 4h instead of 1d)
+                                - Check if signal dates overlap with market data period
+                                """)
                             else:
                                 st.success("✅ Regime analysis complete!")
                                 

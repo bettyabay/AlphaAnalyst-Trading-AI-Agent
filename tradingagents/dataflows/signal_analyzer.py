@@ -923,7 +923,8 @@ class SignalAnalyzer:
         signals_df: pd.DataFrame,
         market_df: pd.DataFrame,
         entry_time_col: str = 'signal_date',
-        timezone: str = 'UTC'
+        timezone: str = 'UTC',
+        tolerance: pd.Timedelta = pd.Timedelta('1 hour')
     ) -> pd.DataFrame:
         """
         Step 3: Data Merging - Map market regime to each signal entry time.
@@ -1037,7 +1038,7 @@ class SignalAnalyzer:
             left_on=entry_time_col,
             right_index=True,
             direction='backward',
-            tolerance=pd.Timedelta('1 hour')  # Max 1 hour lookback
+            tolerance=tolerance  # Use provided tolerance (adjusted for timeframe)
         )
         
         print(f"[OK] [MERGE] Successfully merged {len(signals_with_regime)} signals with market regimes")
