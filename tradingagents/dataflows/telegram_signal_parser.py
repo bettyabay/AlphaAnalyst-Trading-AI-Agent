@@ -147,10 +147,14 @@ class TelegramSignalParser:
                 return parsed
             # If range format parser fails, still try other parsers as fallback
         
-        # Try range format: "at any price between X till Y" (Format 3)
-        parsed = self._parse_range_format(message_text)
-        if parsed and self._validate_signal(parsed):
-            return parsed
+        # Try range format: "at any price between X till Y" or "Buy EURUSD at any price between X till Y" (Format 3)
+        # This handles formats like:
+        # - Buy EURUSD at any price between 1.1695 till 1.1670
+        # - Target 1: 1.1742, Target 2: 1.1820, etc.
+        if 'between' in message_text.lower() and ('till' in message_text.lower() or 'until' in message_text.lower() or 'and' in message_text.lower()):
+            parsed = self._parse_range_format(message_text)
+            if parsed and self._validate_signal(parsed):
+                return parsed
         
         # Skip structured format if message contains range-like patterns to avoid incorrect matches
         has_range_pattern = (
@@ -1028,14 +1032,26 @@ class TelegramSignalParser:
         Target 2: 97400
         Target 3: 99000
         Target 4: 100500
+        Target 5: 102000
         Stop Loss: 93500
+        
+        Also handles:
+        📈Forex Signal
+        Buy EURUSD at any price between 1.1695 till 1.1670
+        Target 1: 1.1742
+        Target 2: 1.1820
+        Target 3: 1.1908
+        Target 4: 1.2030
+        Target 5: 1.2200
+        Stop Loss: 1.1607
         """
         try:
             text_upper = text.upper()
             
-            # Look for "at any price between X till Y" or "between X and Y" or "between X until Y"
+            # Look for "at any price between X till Y" or "between X and Y" or "between X until Y" or "between X till Y"
+            # Enhanced pattern to handle "at any price between" prefix
             range_match = re.search(
-                r'between\s+([\d.]+)\s+(?:till|until|and|to)\s+([\d.]+)',
+                r'(?:at\s+any\s+price\s+)?between\s+([\d.]+)\s+(?:till|until|and|to)\s+([\d.]+)',
                 text,
                 re.IGNORECASE
             )
@@ -1082,39 +1098,131 @@ class TelegramSignalParser:
                 # Invalid symbol - skip this signal
                 return None
             
-            # Calculate entry price (average of range)
+            # Calculate entry price - use first value from range (e.g., "between 1.1695 till 1.1670" -> entry = 1.1695)
             try:
                 val1 = float(range_match.group(1).strip())
                 val2 = float(range_match.group(2).strip())
-                entry_price = (val1 + val2) / 2
+                # Use first value as entry price (for BUY: higher value, for SELL: lower value)
+                # Since "between X till Y" typically means X is the entry point
+                entry_price = val1
             except ValueError:
                 return None
             
-            # Extract Stop Loss
-            stop_loss = None
-            sl_match = re.search(r'Stop\s*Loss[:\s]+([\d.]+)', text, re.IGNORECASE)
-            if sl_match:
-                try:
-                    stop_loss = float(sl_match.group(1).strip())
-                except ValueError:
-                    pass
-            
-            # Extract Targets (Target 1:, Target 2:, etc.)
+            # Extract Targets FIRST (Target 1:, Target 2:, etc.) - Extract before stop loss
+            # This ensures we capture all targets correctly, even if stop loss comes after them in the message
+            # Pattern must handle targets on separate lines with blank lines in between
             targets = {}
-            target_matches = re.findall(r'Target\s*(\d+)[:\s]+([\d.]+)', text, re.IGNORECASE)
+            # Pattern: "Target 1: 113.40" - require space between Target and number, colon after number
+            # Use word boundary to ensure we match the full phrase
+            target_matches = re.findall(r'\bTarget\s+(\d+)\s*:\s*([\d.]+)', text, re.IGNORECASE | re.MULTILINE | re.DOTALL)
+            
             for target_num, target_value in target_matches:
                 try:
-                    targets[f'target_{target_num}'] = float(target_value.strip())
-                except ValueError:
+                    target_num_int = int(target_num.strip())
+                    target_value_float = float(target_value.strip())
+                    # Validate: target should not be one of the range values
+                    tolerance = 0.01
+                    if abs(target_value_float - val1) < tolerance or abs(target_value_float - val2) < tolerance:
+                        # Skip this target if it matches a range value
+                        continue
+                    # Store by target number (supports up to target 10)
+                    targets[target_num_int] = target_value_float
+                except (ValueError, IndexError):
                     continue
             
-            # Sort targets
-            sorted_targets = {}
-            for i in range(1, 6):
-                key = f'target_{i}'
-                if key in targets:
-                    sorted_targets[key] = targets[key]
+            # Extract Stop Loss AFTER targets - must be explicitly after "Stop Loss:" and not from the range
+            # This handles cases where stop loss comes after all targets in the message (common format)
+            # Try multiple patterns to handle various formats
+            stop_loss = None
             
+            # First, try to find "Stop Loss" in the text to see what format it's in
+            sl_text_snippet = None
+            sl_match_found = re.search(r'Stop\s+Loss[:\s]+([\d.]+)', text, re.IGNORECASE | re.MULTILINE)
+            if sl_match_found:
+                # Get context around the match for debugging
+                start = max(0, sl_match_found.start() - 20)
+                end = min(len(text), sl_match_found.end() + 20)
+                sl_text_snippet = text[start:end]
+                print(f"DEBUG: Found 'Stop Loss' in text: '{sl_text_snippet}'")
+            
+            # Pattern 1: "Stop Loss: 114.70" with colon (most common) - try most specific first
+            sl_patterns = [
+                r'Stop\s+Loss\s*:\s*([\d.]+)',     # "Stop Loss: 114.70" - most common
+                r'Stop\s*Loss\s*:\s*([\d.]+)',     # "StopLoss: 114.70" - no space
+                r'Stop\s+Loss[:\s]+\s*([\d.]+)',   # More flexible whitespace
+                r'\bStop\s+Loss\s*:\s*([\d.]+)',   # With word boundary
+            ]
+            
+            for idx, pattern in enumerate(sl_patterns):
+                sl_match = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
+                if sl_match:
+                    try:
+                        sl_value = float(sl_match.group(1).strip())
+                        print(f"DEBUG: Pattern {idx} matched stop loss value: {sl_value}")
+                        # Validate: stop loss should not be one of the range values
+                        # Use a very small tolerance (0.0001) to only reject if stop loss is essentially the same as range value
+                        # This prevents false rejections when stop loss is close but different from range values
+                        tolerance = 0.0001  # Very small tolerance - only reject if essentially identical
+                        if abs(sl_value - val1) > tolerance and abs(sl_value - val2) > tolerance:
+                            # Also validate: stop loss should not match any target value
+                            is_target_value = False
+                            for target_val in targets.values():
+                                if abs(sl_value - target_val) < 0.01:
+                                    is_target_value = True
+                                    print(f"DEBUG: Stop loss {sl_value} rejected (matches target value {target_val})")
+                                    break
+                            if not is_target_value:
+                                stop_loss = sl_value
+                                print(f"DEBUG: Stop loss {sl_value} validated (val1={val1}, val2={val2}, targets={list(targets.values())})")
+                                break  # Found valid stop loss, stop searching
+                        else:
+                            print(f"DEBUG: Stop loss {sl_value} rejected (too close to range: val1={val1}, val2={val2}, diff1={abs(sl_value - val1):.6f}, diff2={abs(sl_value - val2):.6f})")
+                    except ValueError as e:
+                        print(f"DEBUG: Error converting stop loss value: {e}")
+                        continue
+            
+            # If still not found, try pattern without colon
+            if stop_loss is None:
+                sl_match2 = re.search(r'Stop\s+Loss\s+([\d.]+)', text, re.IGNORECASE | re.MULTILINE)
+                if sl_match2:
+                    try:
+                        sl_value = float(sl_match2.group(1).strip())
+                        print(f"DEBUG: Pattern without colon matched: {sl_value}")
+                        tolerance = 0.0001  # Very small tolerance - only reject if essentially identical
+                        if abs(sl_value - val1) > tolerance and abs(sl_value - val2) > tolerance:
+                            # Also validate: stop loss should not match any target value
+                            is_target_value = False
+                            for target_val in targets.values():
+                                if abs(sl_value - target_val) < 0.01:
+                                    is_target_value = True
+                                    print(f"DEBUG: Stop loss {sl_value} rejected (matches target value {target_val})")
+                                    break
+                            if not is_target_value:
+                                stop_loss = sl_value
+                                print(f"DEBUG: Stop loss {sl_value} validated")
+                        else:
+                            print(f"DEBUG: Stop loss {sl_value} rejected (too close to range: val1={val1}, val2={val2})")
+                    except ValueError:
+                        pass
+            
+            if stop_loss is None:
+                print(f"DEBUG: No valid stop loss found. val1={val1}, val2={val2}, targets={list(targets.values())}")
+            
+            # CRITICAL: Ensure stop_loss is NOT val2 or val1 (safety check)
+            # If stop_loss matches val2 or val1, it means we failed to extract the real stop loss
+            # Use very small tolerance (0.0001) to only reject if essentially identical
+            if stop_loss is not None:
+                tolerance = 0.0001  # Very small tolerance - only reject if essentially identical
+                if abs(stop_loss - val2) < tolerance:
+                    # Stop loss matches val2 - this is wrong, clear it
+                    print(f"WARNING: Stop loss {stop_loss} matches range val2 {val2} (diff={abs(stop_loss - val2):.6f}), clearing stop_loss")
+                    stop_loss = None
+                elif abs(stop_loss - val1) < tolerance:
+                    # Stop loss matches val1 - this is wrong, clear it
+                    print(f"WARNING: Stop loss {stop_loss} matches range val1 {val1} (diff={abs(stop_loss - val1):.6f}), clearing stop_loss")
+                    stop_loss = None
+            
+            # Build result dictionary
             result = {
                 "symbol": symbol,
                 "action": action,
@@ -1123,14 +1231,23 @@ class TelegramSignalParser:
                 "signal_date": datetime.now(self.gmt4_tz).isoformat(),
             }
             
-            # Add targets
-            for i, (key, value) in enumerate(sorted_targets.items(), 1):
-                result[f"target_{i}"] = value
+            # Assign targets by their actual number (not sequentially)
+            # If message has "Target 2", it should be stored as target_2, not target_1
+            for target_num in sorted(targets.keys()):
+                if target_num <= 5:  # Support up to target 5
+                    result[f"target_{target_num}"] = targets[target_num]
+            
+            print(f"DEBUG _parse_range_format: Final result - entry={entry_price}, sl={stop_loss}, targets={targets}, val1={val1}, val2={val2}")
+            # Final validation: if stop_loss is None but we have targets, that's suspicious
+            if stop_loss is None and targets:
+                print(f"WARNING: Stop loss is None but targets were found. This might indicate a parsing issue.")
             
             return result
             
         except Exception as e:
             print(f"Error parsing range format: {e}")
+            import traceback
+            traceback.print_exc()
             return None
     
     def _parse_emoji_format(self, text: str) -> Optional[Dict]:
@@ -1387,39 +1504,131 @@ class TelegramSignalParser:
             except ValueError:
                 return None
             
-            # Calculate entry price (average of range)
+            # Calculate entry price - use first value from range (e.g., "between 1.1695 till 1.1670" -> entry = 1.1695)
             try:
                 val1 = float(range_match.group(1).strip())
                 val2 = float(range_match.group(2).strip())
-                entry_price = (val1 + val2) / 2
+                # Use first value as entry price (for BUY: higher value, for SELL: lower value)
+                # Since "between X till Y" typically means X is the entry point
+                entry_price = val1
             except ValueError:
                 return None
             
-            # Extract Stop Loss
-            stop_loss = None
-            sl_match = re.search(r'Stop\s*Loss[:\s]+([\d.]+)', text, re.IGNORECASE)
-            if sl_match:
-                try:
-                    stop_loss = float(sl_match.group(1).strip())
-                except ValueError:
-                    pass
-            
-            # Extract Targets (Target 1:, Target 2:, etc.)
+            # Extract Targets FIRST (Target 1:, Target 2:, etc.) - Extract before stop loss
+            # This ensures we capture all targets correctly, even if stop loss comes after them in the message
+            # Pattern must handle targets on separate lines with blank lines in between
             targets = {}
-            target_matches = re.findall(r'Target\s*(\d+)[:\s]+([\d.]+)', text, re.IGNORECASE)
+            # Pattern: "Target 1: 113.40" - require space between Target and number, colon after number
+            # Use word boundary to ensure we match the full phrase
+            target_matches = re.findall(r'\bTarget\s+(\d+)\s*:\s*([\d.]+)', text, re.IGNORECASE | re.MULTILINE | re.DOTALL)
+            
             for target_num, target_value in target_matches:
                 try:
-                    targets[f'target_{target_num}'] = float(target_value.strip())
-                except ValueError:
+                    target_num_int = int(target_num.strip())
+                    target_value_float = float(target_value.strip())
+                    # Validate: target should not be one of the range values
+                    tolerance = 0.01
+                    if abs(target_value_float - val1) < tolerance or abs(target_value_float - val2) < tolerance:
+                        # Skip this target if it matches a range value
+                        continue
+                    # Store by target number (supports up to target 10)
+                    targets[target_num_int] = target_value_float
+                except (ValueError, IndexError):
                     continue
             
-            # Sort targets
-            sorted_targets = {}
-            for i in range(1, 6):
-                key = f'target_{i}'
-                if key in targets:
-                    sorted_targets[key] = targets[key]
+            # Extract Stop Loss AFTER targets - must be explicitly after "Stop Loss:" and not from the range
+            # This handles cases where stop loss comes after all targets in the message (common format)
+            # Try multiple patterns to handle various formats
+            stop_loss = None
             
+            # First, try to find "Stop Loss" in the text to see what format it's in
+            sl_text_snippet = None
+            sl_match_found = re.search(r'Stop\s+Loss[:\s]+([\d.]+)', text, re.IGNORECASE | re.MULTILINE)
+            if sl_match_found:
+                # Get context around the match for debugging
+                start = max(0, sl_match_found.start() - 20)
+                end = min(len(text), sl_match_found.end() + 20)
+                sl_text_snippet = text[start:end]
+                print(f"DEBUG: Found 'Stop Loss' in text: '{sl_text_snippet}'")
+            
+            # Pattern 1: "Stop Loss: 114.70" with colon (most common) - try most specific first
+            sl_patterns = [
+                r'Stop\s+Loss\s*:\s*([\d.]+)',     # "Stop Loss: 114.70" - most common
+                r'Stop\s*Loss\s*:\s*([\d.]+)',     # "StopLoss: 114.70" - no space
+                r'Stop\s+Loss[:\s]+\s*([\d.]+)',   # More flexible whitespace
+                r'\bStop\s+Loss\s*:\s*([\d.]+)',   # With word boundary
+            ]
+            
+            for idx, pattern in enumerate(sl_patterns):
+                sl_match = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
+                if sl_match:
+                    try:
+                        sl_value = float(sl_match.group(1).strip())
+                        print(f"DEBUG: Pattern {idx} matched stop loss value: {sl_value}")
+                        # Validate: stop loss should not be one of the range values
+                        # Use a very small tolerance (0.0001) to only reject if stop loss is essentially the same as range value
+                        # This prevents false rejections when stop loss is close but different from range values
+                        tolerance = 0.0001  # Very small tolerance - only reject if essentially identical
+                        if abs(sl_value - val1) > tolerance and abs(sl_value - val2) > tolerance:
+                            # Also validate: stop loss should not match any target value
+                            is_target_value = False
+                            for target_val in targets.values():
+                                if abs(sl_value - target_val) < 0.01:
+                                    is_target_value = True
+                                    print(f"DEBUG: Stop loss {sl_value} rejected (matches target value {target_val})")
+                                    break
+                            if not is_target_value:
+                                stop_loss = sl_value
+                                print(f"DEBUG: Stop loss {sl_value} validated (val1={val1}, val2={val2}, targets={list(targets.values())})")
+                                break  # Found valid stop loss, stop searching
+                        else:
+                            print(f"DEBUG: Stop loss {sl_value} rejected (too close to range: val1={val1}, val2={val2}, diff1={abs(sl_value - val1):.6f}, diff2={abs(sl_value - val2):.6f})")
+                    except ValueError as e:
+                        print(f"DEBUG: Error converting stop loss value: {e}")
+                        continue
+            
+            # If still not found, try pattern without colon
+            if stop_loss is None:
+                sl_match2 = re.search(r'Stop\s+Loss\s+([\d.]+)', text, re.IGNORECASE | re.MULTILINE)
+                if sl_match2:
+                    try:
+                        sl_value = float(sl_match2.group(1).strip())
+                        print(f"DEBUG: Pattern without colon matched: {sl_value}")
+                        tolerance = 0.0001  # Very small tolerance - only reject if essentially identical
+                        if abs(sl_value - val1) > tolerance and abs(sl_value - val2) > tolerance:
+                            # Also validate: stop loss should not match any target value
+                            is_target_value = False
+                            for target_val in targets.values():
+                                if abs(sl_value - target_val) < 0.01:
+                                    is_target_value = True
+                                    print(f"DEBUG: Stop loss {sl_value} rejected (matches target value {target_val})")
+                                    break
+                            if not is_target_value:
+                                stop_loss = sl_value
+                                print(f"DEBUG: Stop loss {sl_value} validated")
+                        else:
+                            print(f"DEBUG: Stop loss {sl_value} rejected (too close to range: val1={val1}, val2={val2})")
+                    except ValueError:
+                        pass
+            
+            if stop_loss is None:
+                print(f"DEBUG: No valid stop loss found. val1={val1}, val2={val2}, targets={list(targets.values())}")
+            
+            # CRITICAL: Ensure stop_loss is NOT val2 or val1 (safety check)
+            # If stop_loss matches val2 or val1, it means we failed to extract the real stop loss
+            # Use very small tolerance (0.0001) to only reject if essentially identical
+            if stop_loss is not None:
+                tolerance = 0.0001  # Very small tolerance - only reject if essentially identical
+                if abs(stop_loss - val2) < tolerance:
+                    # Stop loss matches val2 - this is wrong, clear it
+                    print(f"WARNING: Stop loss {stop_loss} matches range val2 {val2} (diff={abs(stop_loss - val2):.6f}), clearing stop_loss")
+                    stop_loss = None
+                elif abs(stop_loss - val1) < tolerance:
+                    # Stop loss matches val1 - this is wrong, clear it
+                    print(f"WARNING: Stop loss {stop_loss} matches range val1 {val1} (diff={abs(stop_loss - val1):.6f}), clearing stop_loss")
+                    stop_loss = None
+            
+            # Build result dictionary
             result = {
                 "symbol": symbol,
                 "action": action,
@@ -1428,14 +1637,20 @@ class TelegramSignalParser:
                 "signal_date": datetime.now(self.gmt4_tz).isoformat(),
             }
             
-            # Add targets
-            for i, (key, value) in enumerate(sorted_targets.items(), 1):
-                result[f"target_{i}"] = value
+            # Assign targets by their actual number (not sequentially)
+            # If message has "Target 2", it should be stored as target_2, not target_1
+            for target_num in sorted(targets.keys()):
+                if target_num <= 5:  # Support up to target 5
+                    result[f"target_{target_num}"] = targets[target_num]
+            
+            print(f"DEBUG _parse_range_with_explanation: Final result - entry={entry_price}, sl={stop_loss}, targets={targets}")
             
             return result
             
         except Exception as e:
             print(f"Error parsing range with explanation format: {e}")
+            import traceback
+            traceback.print_exc()
             return None
     
     def _is_valid_trading_symbol(self, symbol: str) -> bool:

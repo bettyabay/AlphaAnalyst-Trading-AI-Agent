@@ -2525,7 +2525,7 @@ def phase1_foundation_data():
                                 signals_df=signals_df,
                                 market_df=market_with_regimes,
                                 entry_time_col='signal_date',
-                                timezone='UTC',  # CRITICAL: Use UTC for consistency
+                                timezone='Asia/Dubai',  # Use GMT+4 to match database and signal analysis
                                 tolerance=merge_tolerance
                             )
                             
