@@ -39,6 +39,8 @@ from tradingagents.dataflows.run_signal_analysis import (
     get_available_providers,
     check_market_data_availability
 )
+from tradingagents.dataflows.trade_efficiency import TradeEfficiencyAnalyzer
+from tradingagents.database.db_service import get_backtest_results_with_efficiency, update_backtest_efficiency
 from tradingagents.config.watchlist import WATCHLIST_STOCKS, get_watchlist_symbols
 from tradingagents.dataflows.polygon_integration import PolygonDataClient
 from tradingagents.dataflows.market_data_service import (
@@ -2161,6 +2163,81 @@ def phase1_foundation_data():
                 # Columns: Date, Time, Asset, Direction, Entry, TP1, TP2, TP3, SL, Pips Made
                 formatted_data = []
                 
+                def calculate_pips_made(row):
+                    """Calculate pips made for a trade result row."""
+                    # Get values
+                    entry_price = row.get('entry_price')
+                    action = row.get('action', '').upper()
+                    target_1 = row.get('target_1')
+                    target_2 = row.get('target_2')
+                    target_3 = row.get('target_3')
+                    target_4 = row.get('target_4')
+                    target_5 = row.get('target_5')
+                    stop_loss = row.get('stop_loss')
+                    symbol = str(row.get('symbol', '')).upper()
+                    
+                    # Check if forex pair (for pip calculation)
+                    # Remove "C:" prefix for length check if present
+                    symbol_for_check = symbol.replace("C:", "") if symbol.startswith("C:") else symbol
+                    is_forex_pair = (
+                        (len(symbol_for_check) >= 6 and len(symbol_for_check) <= 7) and
+                        (symbol.startswith("C:") or (not symbol.startswith("^") and not symbol.startswith("I:"))) and
+                        ("XAU" not in symbol and "XAG" not in symbol)
+                    )
+                    
+                    if not entry_price or pd.isna(entry_price):
+                        return 0
+                    
+                    is_buy = (action == 'BUY')
+                    total_price_diff = 0
+                    
+                    # Calculate cumulative pips: add TP1 if hit, add TP2 if hit, etc.
+                    if row.get('tp1_hit') and target_1:
+                        tp1_diff = (target_1 - entry_price) if is_buy else (entry_price - target_1)
+                        total_price_diff += tp1_diff
+                    
+                    if row.get('tp2_hit') and target_2:
+                        tp2_diff = (target_2 - entry_price) if is_buy else (entry_price - target_2)
+                        total_price_diff += tp2_diff
+                    
+                    if row.get('tp3_hit') and target_3:
+                        tp3_diff = (target_3 - entry_price) if is_buy else (entry_price - target_3)
+                        total_price_diff += tp3_diff
+                    
+                    if row.get('tp4_hit') and target_4:
+                        tp4_diff = (target_4 - entry_price) if is_buy else (entry_price - target_4)
+                        total_price_diff += tp4_diff
+                    
+                    if row.get('tp5_hit') and target_5:
+                        tp5_diff = (target_5 - entry_price) if is_buy else (entry_price - target_5)
+                        total_price_diff += tp5_diff
+                    
+                    # If SL is hit (and no TPs were hit), use SL pips (negative)
+                    if row.get('final_status') == 'SL' and stop_loss:
+                        any_tp_hit = (row.get('tp1_hit') or row.get('tp2_hit') or 
+                                     row.get('tp3_hit') or row.get('tp4_hit') or row.get('tp5_hit'))
+                        if not any_tp_hit:
+                            total_price_diff = (stop_loss - entry_price) if is_buy else (entry_price - stop_loss)
+                    
+                    # If EXPIRED/OPEN, use max_profit percentage converted to price points
+                    if row.get('final_status') in ['EXPIRED', 'OPEN']:
+                        max_profit = row.get('max_profit')
+                        if max_profit and not pd.isna(max_profit):
+                            total_price_diff = (max_profit / 100) * entry_price
+                            if not is_buy:
+                                total_price_diff = -total_price_diff
+                    
+                    # Convert to pips based on instrument type
+                    if is_forex_pair:
+                        pips_made = total_price_diff * 10000
+                    else:
+                        pips_made = total_price_diff
+                    
+                    # Round to nearest integer
+                    if pd.isna(pips_made) or pips_made is None:
+                        return 0
+                    return int(round(pips_made))
+                
                 for _, row in df_results.iterrows():
                     # Parse signal_date
                     signal_date_str = row.get('signal_date', '')
@@ -2225,6 +2302,18 @@ def phase1_foundation_data():
                     elif not status or status == 'N/A':
                         status = 'N/A'
                     
+                    # Calculate pips_made if missing or recalculate to ensure accuracy
+                    pips_made = row.get('pips_made', 0)
+                    if pips_made == 0 or pd.isna(pips_made):
+                        # Recalculate if missing or 0 (might be incorrectly calculated)
+                        pips_made = calculate_pips_made(row)
+                    else:
+                        # Use existing value but ensure it's valid
+                        try:
+                            pips_made = int(round(float(pips_made)))
+                        except:
+                            pips_made = calculate_pips_made(row)
+                    
                     formatted_data.append({
                         'Date': date_str,
                         'Time': time_str,
@@ -2235,7 +2324,7 @@ def phase1_foundation_data():
                         'TP2': tp2_value,
                         'TP3': tp3_value,
                         'SL': sl_value,
-                        'Pips Made': row.get('pips_made', 0),
+                        'Pips Made': pips_made,
                         'Status': status
                     })
                 
@@ -2598,9 +2687,7 @@ def phase1_foundation_data():
             aggfunc='mean'
         )
         
-        # Create heatmap using plotly
-        import plotly.graph_objects as go
-        
+        # Create heatmap using plotly (go is imported at top of file)
         fig = go.Figure(data=go.Heatmap(
             z=heatmap_data.values,
             x=heatmap_data.columns,
@@ -2624,8 +2711,29 @@ def phase1_foundation_data():
         # Key insights
         st.markdown("##### 💡 Key Insights")
         
-        best_regime = regime_metrics.loc[regime_metrics['Win_Rate_%'].idxmax()]
-        worst_regime = regime_metrics.loc[regime_metrics['Win_Rate_%'].idxmin()]
+        # Sort by Win Rate descending to get best, then by Profit Factor as tiebreaker
+        regime_metrics_sorted = regime_metrics.sort_values(
+            by=['Win_Rate_%', 'Profit_Factor'], 
+            ascending=[False, False]
+        )
+        best_regime = regime_metrics_sorted.iloc[0]
+        
+        # For worst, filter out the best regime and sort by Win Rate ascending
+        # If only one regime exists, we'll still show it but it will be the same
+        regime_metrics_worst = regime_metrics[
+            regime_metrics['Regime'] != best_regime['Regime']
+        ]
+        
+        if len(regime_metrics_worst) > 0:
+            # Sort by Win Rate ascending, then by Profit Factor ascending (lower is worse)
+            worst_regime = regime_metrics_worst.sort_values(
+                by=['Win_Rate_%', 'Profit_Factor'], 
+                ascending=[True, True]
+            ).iloc[0]
+        else:
+            # If only one regime exists, we can't have different best/worst
+            # In this case, show the same regime but indicate it's the only one
+            worst_regime = best_regime
         
         insight_col1, insight_col2 = st.columns(2)
         
@@ -2888,6 +2996,594 @@ def phase1_foundation_data():
             else:
                 st.warning("Please select a Financial Instrument from the Category dropdown above to calculate KPIs.")
     st.markdown('</div>', unsafe_allow_html=True)
+    
+    # Trade Efficiency Analysis Section - After Market Regime Analysis
+    st.markdown("---")
+    st.markdown('<div class="feature-card">', unsafe_allow_html=True)
+    st.markdown("### 📊 Trade Efficiency Analysis (MFE/MAE)")
+    st.markdown("""
+    Analyze trade execution efficiency by calculating:
+    - **MAE (Maximum Adverse Excursion)**: Maximum price movement against the trade
+    - **MFE (Maximum Favorable Excursion)**: Maximum price movement in favor of the trade
+    """)
+    
+    with st.expander("📖 About Trade Efficiency Analysis", expanded=False):
+        st.markdown("""
+        **Trade Efficiency Analysis** helps answer critical questions:
+        
+        > *"Are stop losses too loose?"* - Analyze MAE to see if trades experienced more pain than necessary
+        
+        > *"Are we exiting too early?"* - Analyze MFE to see if we're leaving money on the table
+        
+        > *"What if we used tighter stop losses?"* - Simulate different stop loss scenarios
+        
+        **Key Metrics:**
+        - **MAE (Maximum Adverse Excursion)**: How much did price go against us while trade was open?
+        - **MFE (Maximum Favorable Excursion)**: How much did price go in our favor while trade was open?
+        - **R-Multiple**: Normalized excursion divided by stop loss distance (MAE_R = 1.0 means price hit stop loss)
+        """)
+    
+    st.markdown('</div>', unsafe_allow_html=True)
+    
+    # Step 1: Select Provider and Symbol
+    st.markdown("#### Step 1: Select Data Source")
+    
+    eff_col1, eff_col2 = st.columns(2)
+    with eff_col1:
+        providers = get_available_providers()
+        selected_eff_provider = st.selectbox(
+            "Signal Provider",
+            options=providers if providers else ["No providers available"],
+            key="efficiency_provider"
+        )
+    
+    with eff_col2:
+        if selected_eff_provider and selected_eff_provider != "No providers available":
+            # Get instruments for this specific provider
+            supabase = get_supabase()
+            instruments = []
+            if supabase:
+                try:
+                    result = supabase.table('signal_provider_signals')\
+                        .select('symbol')\
+                        .eq('provider_name', selected_eff_provider)\
+                        .execute()
+                    if result.data:
+                        raw_instruments = [row.get('symbol', '').strip() for row in result.data if row.get('symbol')]
+                        # Normalize symbols to remove duplicates (e.g., C:XAUUSD and XAUUSD)
+                        normalized_instruments = {}
+                        for inst in raw_instruments:
+                            inst_upper = inst.upper().strip()
+                            if not inst_upper:
+                                continue
+                            
+                            # Handle C: prefix (currencies/commodities)
+                            if inst_upper.startswith("C:") and len(inst_upper) > 2:
+                                base = inst_upper[2:]  # Remove "C:" prefix
+                                # Prefer base symbol without prefix
+                                if base not in normalized_instruments:
+                                    normalized_instruments[base] = base
+                            # Handle ^ prefix (indices)
+                            elif inst_upper.startswith("^"):
+                                normalized_instruments[inst_upper] = inst_upper
+                            # Handle I: prefix (indices)
+                            elif inst_upper.startswith("I:"):
+                                base = inst_upper[2:]
+                                if base not in normalized_instruments:
+                                    normalized_instruments[base] = base
+                            else:
+                                # No prefix - use as-is
+                                normalized_instruments[inst_upper] = inst_upper
+                        
+                        instruments = sorted(list(normalized_instruments.values()))
+                except Exception as e:
+                    print(f"Error fetching instruments for provider: {e}")
+            
+            selected_eff_symbol = st.selectbox(
+                "Symbol",
+                options=instruments if instruments else ["No instruments available"],
+                key="efficiency_symbol"
+            )
+        else:
+            selected_eff_symbol = None
+    
+    # Step 2: Load Backtest Results
+    if st.button("Load Trades & Calculate Efficiency", key="load_efficiency_trades"):
+        if not selected_eff_provider or selected_eff_provider == "No providers available":
+            st.error("Please select a provider")
+        elif not selected_eff_symbol or selected_eff_symbol == "No instruments available":
+            st.error("Please select a symbol")
+        else:
+            with st.spinner("Loading trades and calculating efficiency metrics..."):
+                try:
+                    # First, try to use signal analysis results from session state
+                    trades_df = pd.DataFrame()
+                    
+                    if 'latest_analysis_results' in st.session_state and st.session_state['latest_analysis_results']:
+                        analysis_results = st.session_state['latest_analysis_results']
+                        
+                        # Debug: Show what we have
+                        if len(analysis_results) > 0:
+                            sample_result = analysis_results[0]
+                            available_providers = list(set([r.get('provider_name', '') for r in analysis_results if r.get('provider_name')]))
+                            available_symbols = list(set([r.get('symbol', '') for r in analysis_results if r.get('symbol')]))
+                            
+                            st.info(f"📊 Found {len(analysis_results)} analysis results in session. Providers: {', '.join(available_providers[:3])}, Symbols: {', '.join(available_symbols[:5])}")
+                        
+                        # Filter by provider and symbol if they match
+                        filtered_results = []
+                        for result in analysis_results:
+                            result_provider = str(result.get('provider_name', '')).strip()
+                            result_symbol = str(result.get('symbol', '')).strip()
+                            
+                            # Normalize symbols for comparison (handle C: prefix and variations)
+                            def normalize_symbol(sym):
+                                if not sym:
+                                    return ''
+                                sym_upper = sym.upper().strip()
+                                # Remove C: prefix for comparison
+                                if sym_upper.startswith('C:'):
+                                    return sym_upper[2:]
+                                return sym_upper
+                            
+                            normalized_result_symbol = normalize_symbol(result_symbol)
+                            normalized_selected_symbol = normalize_symbol(selected_eff_symbol) if selected_eff_symbol else ''
+                            
+                            # Normalize providers (case-insensitive, strip whitespace)
+                            normalized_result_provider = result_provider.upper().strip()
+                            normalized_selected_provider = selected_eff_provider.upper().strip() if selected_eff_provider else ''
+                            
+                            # Check if matches selected provider and symbol
+                            provider_match = (not selected_eff_provider or 
+                                            selected_eff_provider == "No providers available" or 
+                                            result_provider == selected_eff_provider or
+                                            normalized_result_provider == normalized_selected_provider)
+                            
+                            symbol_match = (not selected_eff_symbol or 
+                                          selected_eff_symbol == "No instruments available" or 
+                                          result_symbol.upper() == selected_eff_symbol.upper() or
+                                          normalized_result_symbol == normalized_selected_symbol)
+                            
+                            if provider_match and symbol_match:
+                                filtered_results.append(result)
+                        
+                        # If no filtered results but we have analysis results, use all of them with a warning
+                        if not filtered_results and analysis_results:
+                            st.warning(f"""
+                            ⚠️ **No exact match found** for:
+                            - Provider: {selected_eff_provider}
+                            - Symbol: {selected_eff_symbol}
+                            
+                            **Using all {len(analysis_results)} analysis results from session.**
+                            
+                            **Available in session:**
+                            - Providers: {', '.join(available_providers[:3])}
+                            - Symbols: {', '.join(available_symbols[:5])}
+                            
+                            **Tip:** Make sure you select the same provider/symbol that you used for Signal Analysis.
+                            """)
+                            filtered_results = analysis_results
+                        
+                        if filtered_results:
+                            # Convert analysis results to backtest-like format
+                            converted_trades = []
+                            for result in filtered_results:
+                                # Determine exit datetime and exit price
+                                exit_datetime = None
+                                exit_price = None
+                                
+                                # Check which TP/SL was hit (in order of priority)
+                                if result.get('tp3_hit_datetime'):
+                                    exit_datetime = result.get('tp3_hit_datetime')
+                                    exit_price = result.get('target_3')
+                                elif result.get('tp2_hit_datetime'):
+                                    exit_datetime = result.get('tp2_hit_datetime')
+                                    exit_price = result.get('target_2')
+                                elif result.get('tp1_hit_datetime'):
+                                    exit_datetime = result.get('tp1_hit_datetime')
+                                    exit_price = result.get('target_1')
+                                elif result.get('sl_hit_datetime'):
+                                    exit_datetime = result.get('sl_hit_datetime')
+                                    exit_price = result.get('stop_loss')
+                                
+                                # If no exit datetime, use a default (expired/open trades)
+                                if not exit_datetime:
+                                    # For expired/open trades, use signal_date + 30 days as exit
+                                    import pytz
+                                    gmt4_tz = pytz.timezone('Asia/Dubai')
+                                    signal_date = pd.to_datetime(result.get('signal_date'))
+                                    if signal_date.tzinfo is None:
+                                        signal_date = gmt4_tz.localize(signal_date)
+                                    elif signal_date.tzinfo != gmt4_tz:
+                                        signal_date = signal_date.astimezone(gmt4_tz)
+                                    exit_datetime = signal_date + pd.Timedelta(days=30)
+                                    # Use entry price as exit price for expired trades
+                                    exit_price = result.get('entry_price')
+                                
+                                # Calculate profit_loss from pips_made if available
+                                profit_loss = result.get('pips_made', 0)
+                                if profit_loss == 0 and exit_price and result.get('entry_price'):
+                                    # Calculate manually
+                                    is_buy = result.get('action', '').upper() == 'BUY'
+                                    if is_buy:
+                                        profit_loss = (exit_price - result.get('entry_price')) * 10000  # Convert to pips
+                                    else:
+                                        profit_loss = (result.get('entry_price') - exit_price) * 10000
+                                
+                                # Parse and ensure timestamps are in GMT+4
+                                import pytz
+                                gmt4_tz = pytz.timezone('Asia/Dubai')
+                                
+                                entry_dt = pd.to_datetime(result.get('signal_date'))
+                                if entry_dt.tzinfo is None:
+                                    entry_dt = gmt4_tz.localize(entry_dt)
+                                elif entry_dt.tzinfo != gmt4_tz:
+                                    entry_dt = entry_dt.astimezone(gmt4_tz)
+                                
+                                exit_dt = pd.to_datetime(exit_datetime)
+                                if exit_dt.tzinfo is None:
+                                    exit_dt = gmt4_tz.localize(exit_dt)
+                                elif exit_dt.tzinfo != gmt4_tz:
+                                    exit_dt = exit_dt.astimezone(gmt4_tz)
+                                
+                                trade_dict = {
+                                    'id': result.get('signal_id'),  # Use signal_id as identifier
+                                    'provider_name': result.get('provider_name'),
+                                    'symbol': result.get('symbol'),
+                                    'entry_datetime': entry_dt,
+                                    'exit_datetime': exit_dt,
+                                    'entry_price': result.get('entry_price'),
+                                    'exit_price': exit_price,
+                                    'direction': result.get('action', 'BUY').upper(),
+                                    'stop_loss': result.get('stop_loss'),
+                                    'profit_loss': profit_loss,
+                                    'net_profit_loss': profit_loss,
+                                    'final_status': result.get('final_status', 'EXPIRED')
+                                }
+                                converted_trades.append(trade_dict)
+                            
+                            if converted_trades:
+                                trades_df = pd.DataFrame(converted_trades)
+                                st.success(f"✅ Using {len(trades_df)} trades from signal analysis results")
+                            else:
+                                st.warning(f"⚠️ Could not convert {len(filtered_results)} analysis results to trades format")
+                        else:
+                            if analysis_results:
+                                st.warning(f"⚠️ Found {len(analysis_results)} analysis results in session, but none matched Provider: {selected_eff_provider}, Symbol: {selected_eff_symbol}")
+                            else:
+                                st.info("ℹ️ No analysis results found in session state")
+                    
+                    # If no session state results, try database
+                    if trades_df.empty:
+                        trades_df = get_backtest_results_with_efficiency(
+                            provider_name=selected_eff_provider,
+                            symbol=selected_eff_symbol,
+                            limit=1000
+                        )
+                    
+                    if trades_df.empty:
+                        # Check if there are any backtest results at all (without filters)
+                        all_results = get_backtest_results_with_efficiency(limit=10)
+                        
+                        # Also check session state one more time for debugging
+                        has_session_results = 'latest_analysis_results' in st.session_state and st.session_state.get('latest_analysis_results')
+                        session_count = len(st.session_state.get('latest_analysis_results', [])) if has_session_results else 0
+                        
+                        if all_results.empty and not has_session_results:
+                            st.warning("""
+                            **No backtest results or signal analysis results found.**
+                            
+                            To use Trade Efficiency Analysis:
+                            
+                            1. Go to the **Signal Analysis** section in Phase 1 (in col_b)
+                            2. Select a provider and symbol
+                            3. Click **"Run Analysis"** to generate analysis results
+                            4. **Keep the same provider/symbol selected** when you come here
+                            5. Click **"Load Trades & Calculate Efficiency"** (results will be used from session)
+                            
+                            **Note:** Make sure you run analysis in the same browser session and don't refresh the page.
+                            
+                            Or run backtesting to save results to database.
+                            """)
+                        elif has_session_results:
+                            st.error(f"""
+                            **Found {session_count} analysis results in session, but couldn't match them.**
+                            
+                            **Selected:**
+                            - Provider: {selected_eff_provider}
+                            - Symbol: {selected_eff_symbol}
+                            
+                            **Please ensure:**
+                            1. You selected the SAME provider and symbol that you used for Signal Analysis
+                            2. The analysis completed successfully (check the Signal Analysis section)
+                            3. You haven't refreshed the page (which clears session state)
+                            
+                            Try running Signal Analysis again with the same provider/symbol, then come back here.
+                            """)
+                        else:
+                            # Show what's available
+                            available_providers = all_results['provider_name'].unique() if 'provider_name' in all_results.columns else []
+                            available_symbols = all_results['symbol'].unique() if 'symbol' in all_results.columns else []
+                            
+                            st.warning(f"""
+                            **No backtest results found for:**
+                            - Provider: {selected_eff_provider}
+                            - Symbol: {selected_eff_symbol}
+                            
+                            **Available in database:**
+                            - Providers: {', '.join(available_providers[:5])}{'...' if len(available_providers) > 5 else ''}
+                            - Symbols: {', '.join(available_symbols[:5])}{'...' if len(available_symbols) > 5 else ''}
+                            
+                            Please select a provider/symbol combination that has backtest results, or run signal analysis first.
+                            """)
+                    else:
+                        # Check if efficiency metrics already exist
+                        needs_calculation = True
+                        if 'mfe' in trades_df.columns and 'mae' in trades_df.columns:
+                            if not trades_df['mfe'].isna().all() and not trades_df['mae'].isna().all():
+                                needs_calculation = False
+                        
+                        if needs_calculation:
+                            st.info("Calculating MFE/MAE for all trades...")
+                            
+                            # Initialize analyzer
+                            analyzer = TradeEfficiencyAnalyzer()
+                            
+                            # Determine asset class
+                            asset_class = None
+                            if selected_eff_symbol.startswith("C:") or '/' in selected_eff_symbol:
+                                asset_class = "Currencies"
+                            elif selected_eff_symbol.startswith("I:") or selected_eff_symbol.startswith("^"):
+                                asset_class = "Indices"
+                            elif "*" in selected_eff_symbol or "XAU" in selected_eff_symbol or "XAG" in selected_eff_symbol:
+                                asset_class = "Commodities"
+                            else:
+                                asset_class = "Stocks"
+                            
+                            # Calculate efficiency
+                            trades_df = analyzer.calculate_excursions_batch(
+                                trades_df=trades_df,
+                                symbol=selected_eff_symbol,
+                                interval='1min',
+                                asset_class=asset_class
+                            )
+                            
+                            # Save to database
+                            for idx, row in trades_df.iterrows():
+                                if 'id' in row and pd.notna(row.get('mfe')) and pd.notna(row.get('mae')):
+                                    update_backtest_efficiency(
+                                        backtest_id=int(row['id']),
+                                        mfe=float(row.get('mfe', 0)),
+                                        mae=float(row.get('mae', 0)),
+                                        mfe_pips=float(row.get('mfe_pips', 0)),
+                                        mae_pips=float(row.get('mae_pips', 0)),
+                                        mae_r=float(row.get('mae_r')) if pd.notna(row.get('mae_r')) else None,
+                                        mfe_r=float(row.get('mfe_r')) if pd.notna(row.get('mfe_r')) else None,
+                                        confidence=str(row.get('confidence', 'HIGH'))
+                                    )
+                            
+                            st.success(f"✅ Calculated efficiency metrics for {len(trades_df)} trades")
+                        else:
+                            st.success(f"✅ Loaded {len(trades_df)} trades with existing efficiency metrics")
+                        
+                        # Store in session state (use different keys to avoid widget conflict)
+                        st.session_state['efficiency_trades_df'] = trades_df
+                        st.session_state['efficiency_provider_selected'] = selected_eff_provider
+                        st.session_state['efficiency_symbol_selected'] = selected_eff_symbol
+                        
+                except Exception as e:
+                    st.error(f"❌ Error calculating efficiency: {str(e)}")
+                    import traceback
+                    st.code(traceback.format_exc())
+    
+    # Step 3: Display Efficiency Analysis
+    if 'efficiency_trades_df' in st.session_state:
+        trades_df = st.session_state['efficiency_trades_df']
+        
+        if not trades_df.empty:
+            st.markdown("---")
+            st.markdown("#### Step 2: Efficiency Metrics Overview")
+            
+            # Summary metrics
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                avg_mae = trades_df['mae_pips'].mean() if 'mae_pips' in trades_df.columns else 0
+                st.metric("Average MAE", f"{avg_mae:.2f} pips")
+            with col2:
+                avg_mfe = trades_df['mfe_pips'].mean() if 'mfe_pips' in trades_df.columns else 0
+                st.metric("Average MFE", f"{avg_mfe:.2f} pips")
+            with col3:
+                avg_mae_r = trades_df['mae_r'].mean() if 'mae_r' in trades_df.columns and not trades_df['mae_r'].isna().all() else 0
+                st.metric("Average MAE_R", f"{avg_mae_r:.2f}R" if avg_mae_r > 0 else "N/A")
+            with col4:
+                low_confidence = (trades_df['confidence'] == 'LOW').sum() if 'confidence' in trades_df.columns else 0
+                st.metric("Low Confidence Trades", f"{low_confidence}")
+            
+            # Step 4: Efficiency Map (Scatter Plot)
+            st.markdown("---")
+            st.markdown("#### Step 3: Efficiency Map")
+            st.markdown("""
+            **Visual Insight**: 
+            - X-axis: MAE (Pain) - How much price went against us
+            - Y-axis: MFE (Potential) - How much price went in our favor
+            - Green dots: Winning trades
+            - Red dots: Losing trades
+            """)
+            
+            # Prepare data for scatter plot
+            profit_col = 'profit_loss' if 'profit_loss' in trades_df.columns else 'net_profit_loss'
+            if profit_col in trades_df.columns:
+                winning_trades = trades_df[trades_df[profit_col] > 0]
+                losing_trades = trades_df[trades_df[profit_col] <= 0]
+            else:
+                winning_trades = pd.DataFrame()
+                losing_trades = trades_df
+            
+            # Create scatter plot using plotly (go is imported at top of file)
+            fig = go.Figure()
+            
+            # Add winning trades (green)
+            if not winning_trades.empty and 'mae_pips' in winning_trades.columns and 'mfe_pips' in winning_trades.columns:
+                fig.add_trace(go.Scatter(
+                    x=winning_trades['mae_pips'],
+                    y=winning_trades['mfe_pips'],
+                    mode='markers',
+                    name='Winning Trades',
+                    marker=dict(
+                        color='green',
+                        size=8,
+                        opacity=0.6,
+                        line=dict(width=1, color='darkgreen')
+                    ),
+                    text=winning_trades.get('symbol', ''),
+                    hovertemplate='<b>%{text}</b><br>' +
+                                  'MAE: %{x:.2f} pips<br>' +
+                                  'MFE: %{y:.2f} pips<br>' +
+                                  '<extra></extra>'
+                ))
+            
+            # Add losing trades (red)
+            if not losing_trades.empty and 'mae_pips' in losing_trades.columns and 'mfe_pips' in losing_trades.columns:
+                fig.add_trace(go.Scatter(
+                    x=losing_trades['mae_pips'],
+                    y=losing_trades['mfe_pips'],
+                    mode='markers',
+                    name='Losing Trades',
+                    marker=dict(
+                        color='red',
+                        size=8,
+                        opacity=0.6,
+                        line=dict(width=1, color='darkred')
+                    ),
+                    text=losing_trades.get('symbol', ''),
+                    hovertemplate='<b>%{text}</b><br>' +
+                                  'MAE: %{x:.2f} pips<br>' +
+                                  'MFE: %{y:.2f} pips<br>' +
+                                  '<extra></extra>'
+                ))
+            
+            fig.update_layout(
+                title="Trade Efficiency Map (MFE vs MAE)",
+                xaxis_title="MAE (Maximum Adverse Excursion) - Pips",
+                yaxis_title="MFE (Maximum Favorable Excursion) - Pips",
+                height=600,
+                hovermode='closest',
+                legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01)
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Step 5: Stop Loss Optimizer
+            st.markdown("---")
+            st.markdown("#### Step 4: Stop Loss Optimizer")
+            st.markdown("""
+            **Simulate tighter stop losses** to see how it would affect overall PnL.
+            """)
+            
+            # Get max MAE for slider range
+            if 'mae_pips' in trades_df.columns:
+                max_mae = trades_df['mae_pips'].max()
+                
+                # Calculate current average stop loss distance
+                if 'entry_price' in trades_df.columns and 'stop_loss' in trades_df.columns:
+                    analyzer = TradeEfficiencyAnalyzer()
+                    current_avg_sl = trades_df.apply(
+                        lambda row: abs(row['entry_price'] - row['stop_loss']) / analyzer._calculate_pip_value(row['entry_price'], st.session_state.get('efficiency_symbol_selected', selected_eff_symbol if 'selected_eff_symbol' in locals() else '')),
+                        axis=1
+                    ).mean() if not trades_df.empty else max_mae
+                else:
+                    current_avg_sl = max_mae
+                
+                # Slider for proposed stop loss
+                proposed_sl = st.slider(
+                    "Proposed Stop Loss (Pips)",
+                    min_value=0.0,
+                    max_value=float(max_mae * 1.5) if max_mae > 0 else 100.0,
+                    value=float(current_avg_sl) if current_avg_sl > 0 else float(max_mae * 0.5) if max_mae > 0 else 50.0,
+                    step=1.0,
+                    key="sl_optimizer_slider"
+                )
+                
+                # Calculate optimization
+                if st.button("Calculate Optimization", key="calc_optimization"):
+                    analyzer = TradeEfficiencyAnalyzer()
+                    optimization_result = analyzer.simulate_stop_loss_optimization(
+                        trades_df,
+                        proposed_sl
+                    )
+                    
+                    st.session_state['optimization_result'] = optimization_result
+                
+                # Display optimization results
+                if 'optimization_result' in st.session_state:
+                    opt_result = st.session_state['optimization_result']
+                    
+                    opt_col1, opt_col2, opt_col3, opt_col4 = st.columns(4)
+                    with opt_col1:
+                        st.metric(
+                            "Original Total PnL",
+                            f"${opt_result['original_total_pnl']:,.2f}"
+                        )
+                    with opt_col2:
+                        delta_val = opt_result['pnl_difference']
+                        st.metric(
+                            "Projected Total PnL",
+                            f"${opt_result['projected_total_pnl']:,.2f}",
+                            delta=f"${delta_val:,.2f}"
+                        )
+                    with opt_col3:
+                        st.metric(
+                            "Trades Stopped Out",
+                            f"{opt_result['stopped_out_trades']} / {opt_result['total_trades']}"
+                        )
+                    with opt_col4:
+                        win_rate_delta = opt_result['win_rate_projected'] - opt_result['win_rate_original']
+                        st.metric(
+                            "Projected Win Rate",
+                            f"{opt_result['win_rate_projected']:.1f}%",
+                            delta=f"{win_rate_delta:.1f}%"
+                        )
+                    
+                    # Interpretation
+                    if opt_result['pnl_difference'] < 0:
+                        st.warning(f"⚠️ Tighter stop loss would reduce PnL by ${abs(opt_result['pnl_difference']):,.2f}")
+                    else:
+                        st.success(f"✅ Tighter stop loss would improve PnL by ${opt_result['pnl_difference']:,.2f}")
+            
+            # Step 6: Detailed Table
+            st.markdown("---")
+            st.markdown("#### Step 5: Detailed Efficiency Table")
+            
+            # Filter options
+            filter_col1, filter_col2 = st.columns(2)
+            with filter_col1:
+                show_only_low_confidence = st.checkbox("Show only low confidence trades", key="filter_confidence")
+            with filter_col2:
+                min_mae_filter = st.number_input("Minimum MAE (pips)", min_value=0.0, value=0.0, key="filter_mae")
+            
+            # Apply filters
+            display_df = trades_df.copy()
+            if show_only_low_confidence and 'confidence' in display_df.columns:
+                display_df = display_df[display_df['confidence'] == 'LOW']
+            if min_mae_filter > 0 and 'mae_pips' in display_df.columns:
+                display_df = display_df[display_df['mae_pips'] >= min_mae_filter]
+            
+            # Select columns to display
+            columns_to_show = [
+                'symbol', 'entry_datetime', 'exit_datetime', 
+                'entry_price', 'exit_price', 'profit_loss', 'net_profit_loss',
+                'mae_pips', 'mfe_pips', 'mae_r', 'mfe_r', 'confidence'
+            ]
+            available_columns = [col for col in columns_to_show if col in display_df.columns]
+            
+            if available_columns:
+                st.dataframe(
+                    display_df[available_columns],
+                    use_container_width=True,
+                    height=400
+                )
+            else:
+                st.info("No efficiency columns available to display")
     
     # Data ingestion
     st.markdown('<div class="feature-card">', unsafe_allow_html=True)

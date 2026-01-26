@@ -1012,3 +1012,104 @@ def get_latest_instrument_profile(symbol: str) -> Optional[Dict]:
             return None
         print(f"Error getting latest instrument profile for {symbol}: {e}")
         return None
+
+
+# ============================================================================
+# TRADE EFFICIENCY (MFE/MAE) FUNCTIONS
+# ============================================================================
+
+def update_backtest_efficiency(
+    backtest_id: int,
+    mfe: float,
+    mae: float,
+    mfe_pips: float,
+    mae_pips: float,
+    mae_r: Optional[float] = None,
+    mfe_r: Optional[float] = None,
+    confidence: str = 'HIGH'
+) -> bool:
+    """
+    Update backtest result with efficiency metrics.
+    
+    Args:
+        backtest_id: ID of the backtest result record
+        mfe: Maximum Favorable Excursion (price units)
+        mae: Maximum Adverse Excursion (price units)
+        mfe_pips: MFE in pips
+        mae_pips: MAE in pips
+        mae_r: MAE as R-multiple (optional)
+        mfe_r: MFE as R-multiple (optional)
+        confidence: 'HIGH' or 'LOW'
+    
+    Returns:
+        True if updated successfully
+    """
+    supabase = get_supabase()
+    if not supabase:
+        return False
+    
+    try:
+        update_data = {
+            "mfe": _make_json_serializable(mfe),
+            "mae": _make_json_serializable(mae),
+            "mfe_pips": _make_json_serializable(mfe_pips),
+            "mae_pips": _make_json_serializable(mae_pips),
+            "efficiency_confidence": confidence
+        }
+        
+        if mae_r is not None:
+            update_data["mae_r"] = _make_json_serializable(mae_r)
+        if mfe_r is not None:
+            update_data["mfe_r"] = _make_json_serializable(mfe_r)
+        
+        # Remove None values
+        update_data = {k: v for k, v in update_data.items() if v is not None}
+        
+        supabase.table("backtest_results").update(update_data).eq("id", backtest_id).execute()
+        return True
+    except Exception as e:
+        print(f"Error updating efficiency: {e}")
+        return False
+
+
+def get_backtest_results_with_efficiency(
+    provider_name: Optional[str] = None,
+    symbol: Optional[str] = None,
+    limit: int = 1000
+) -> pd.DataFrame:
+    """
+    Retrieve backtest results with efficiency metrics.
+    
+    Args:
+        provider_name: Optional provider name filter
+        symbol: Optional symbol filter
+        limit: Maximum number of records to return
+    
+    Returns:
+        DataFrame with backtest results and efficiency metrics
+    """
+    supabase = get_supabase()
+    if not supabase:
+        return pd.DataFrame()
+    
+    try:
+        query = supabase.table("backtest_results").select("*")
+        
+        if provider_name:
+            query = query.eq("provider_name", provider_name)
+        if symbol:
+            query = query.eq("symbol", symbol.upper())
+        
+        result = query.order("backtest_start_date", desc=True).limit(limit).execute()
+        
+        if result.data:
+            df = pd.DataFrame(result.data)
+            # Convert datetime columns
+            for col in ['entry_datetime', 'exit_datetime', 'backtest_start_date', 'backtest_end_date', 'backtest_date']:
+                if col in df.columns:
+                    df[col] = pd.to_datetime(df[col], errors='coerce')
+            return df
+        return pd.DataFrame()
+    except Exception as e:
+        print(f"Error fetching backtest results: {e}")
+        return pd.DataFrame()

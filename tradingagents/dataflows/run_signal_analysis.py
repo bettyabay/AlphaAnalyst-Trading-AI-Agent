@@ -637,17 +637,21 @@ def run_analysis_for_all_signals(
                         'target_1': signal.get('target_1'),
                         'target_2': signal.get('target_2'),
                         'target_3': signal.get('target_3'),
+                        'target_4': signal.get('target_4'),
+                        'target_5': signal.get('target_5'),
                         'stop_loss': signal.get('stop_loss'),
                         'final_status': 'NO_DATA',
                         'error': error_msg,
                         'tp1_hit': False,
                         'tp2_hit': False,
                         'tp3_hit': False,
+                        'tp4_hit': False,
+                        'tp5_hit': False,
                         'sl_hit': False,
                         'max_profit': 0.0,
                         'max_drawdown': 0.0,
                         'hold_time_hours': 0.0,
-                        'pips_made': 0
+                        'pips_made': 0  # Set to 0 for NO_DATA cases
                     }
                     if not save_results:
                         # Store error result in list for display (testing mode)

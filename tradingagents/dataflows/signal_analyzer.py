@@ -65,19 +65,39 @@ class SignalAnalyzer:
             target_1 = signal.get('target_1')
             target_2 = signal.get('target_2')
             target_3 = signal.get('target_3')
+            target_4 = signal.get('target_4')
+            target_5 = signal.get('target_5')
             stop_loss = signal.get('stop_loss')
+            
+            # Ensure all prices are floats for calculation
+            try:
+                entry_price = float(entry_price) if entry_price is not None else None
+                target_1 = float(target_1) if target_1 is not None else None
+                target_2 = float(target_2) if target_2 is not None else None
+                target_3 = float(target_3) if target_3 is not None else None
+                target_4 = float(target_4) if target_4 is not None else None
+                target_5 = float(target_5) if target_5 is not None else None
+                stop_loss = float(stop_loss) if stop_loss is not None else None
+            except (ValueError, TypeError):
+                pass  # Keep original values if conversion fails
             
             # Validate required fields
             if not all([symbol, signal_date, action, entry_price]):
                 return {"error": "Missing required signal fields"}
             
             # Detect if this is a forex pair for proper pips calculation and decimal formatting
-            # Forex pairs typically have 4 decimal places and are 6-7 characters
+            # Forex pairs typically have 4 decimal places
             # Use original_symbol to avoid issues if symbol is modified during market data lookup
+            # Remove C: prefix for length check
+            symbol_for_check = original_symbol.replace("C:", "") if original_symbol.startswith("C:") else original_symbol
+            
             is_forex_pair = (
-                (len(original_symbol) >= 6 and len(original_symbol) <= 7) and
+                # Check length without C: prefix (should be 6-7 chars like EURUSD, GBPUSD)
+                (len(symbol_for_check) >= 6 and len(symbol_for_check) <= 7) and
+                # Must start with C: or not be indices/stocks
                 (original_symbol.startswith("C:") or (not original_symbol.startswith("^") and not original_symbol.startswith("I:"))) and
-                ("XAU" not in original_symbol and "XAG" not in original_symbol)  # Exclude commodities
+                # Exclude commodities (Gold/Silver)
+                ("XAU" not in original_symbol.upper() and "XAG" not in original_symbol.upper())
             )
             
             # Parse signal_date
@@ -212,6 +232,8 @@ class SignalAnalyzer:
                 target_1=target_1,
                 target_2=target_2,
                 target_3=target_3,
+                target_4=target_4,
+                target_5=target_5,
                 stop_loss=stop_loss,
                 price_tolerance=price_tolerance,
                 symbol=original_symbol,  # Pass original symbol for forex detection
@@ -231,9 +253,11 @@ class SignalAnalyzer:
             result['target_1'] = target_1
             result['target_2'] = target_2
             result['target_3'] = target_3
+            result['target_4'] = target_4
+            result['target_5'] = target_5
             result['stop_loss'] = stop_loss
             
-            # Calculate "Pips Made" - CUMULATIVE: TP1 + TP2 + TP3
+            # Calculate "Pips Made" - CUMULATIVE: TP1 + TP2 + TP3 + TP4 + TP5
             # For forex pairs (EURUSD, GBPUSD, etc.), pips = price_diff * 10000 (1 pip = 0.0001)
             # For commodities (XAUUSD, etc.), pips are price points (not forex pips)
             # For indices/stocks, pips are price points
@@ -241,30 +265,68 @@ class SignalAnalyzer:
             pips_made = 0
             is_buy = (action.lower() == 'buy')
             
-            # Calculate cumulative pips: add TP1 if hit, add TP2 if hit, add TP3 if hit
+            # Calculate cumulative pips: add TP1 if hit, add TP2 if hit, add TP3 if hit, add TP4 if hit, add TP5 if hit
             total_price_diff = 0
             
+            # Ensure entry_price is a float for calculations
+            if entry_price is None:
+                entry_price = 0
+            
             # If TP1 is hit, add TP1 pips
-            if result.get('tp1_hit') and target_1:
-                tp1_diff = (target_1 - entry_price) if is_buy else (entry_price - target_1)
-                total_price_diff += tp1_diff
+            if result.get('tp1_hit') and target_1 is not None:
+                try:
+                    tp1_diff = (float(target_1) - float(entry_price)) if is_buy else (float(entry_price) - float(target_1))
+                    total_price_diff += tp1_diff
+                except (ValueError, TypeError):
+                    pass
             
             # If TP2 is hit, add TP2 pips
-            if result.get('tp2_hit') and target_2:
-                tp2_diff = (target_2 - entry_price) if is_buy else (entry_price - target_2)
-                total_price_diff += tp2_diff
+            if result.get('tp2_hit') and target_2 is not None:
+                try:
+                    tp2_diff = (float(target_2) - float(entry_price)) if is_buy else (float(entry_price) - float(target_2))
+                    total_price_diff += tp2_diff
+                except (ValueError, TypeError):
+                    pass
             
             # If TP3 is hit, add TP3 pips
-            if result.get('tp3_hit') and target_3:
-                tp3_diff = (target_3 - entry_price) if is_buy else (entry_price - target_3)
-                total_price_diff += tp3_diff
+            if result.get('tp3_hit') and target_3 is not None:
+                try:
+                    tp3_diff = (float(target_3) - float(entry_price)) if is_buy else (float(entry_price) - float(target_3))
+                    total_price_diff += tp3_diff
+                except (ValueError, TypeError):
+                    pass
+            
+            # If TP4 is hit, add TP4 pips
+            if result.get('tp4_hit') and target_4 is not None:
+                try:
+                    tp4_diff = (float(target_4) - float(entry_price)) if is_buy else (float(entry_price) - float(target_4))
+                    total_price_diff += tp4_diff
+                except (ValueError, TypeError):
+                    pass
+            
+            # If TP5 is hit, add TP5 pips
+            if result.get('tp5_hit') and target_5 is not None:
+                try:
+                    tp5_diff = (float(target_5) - float(entry_price)) if is_buy else (float(entry_price) - float(target_5))
+                    total_price_diff += tp5_diff
+                except (ValueError, TypeError):
+                    pass
             
             # If SL is hit (and no TPs were hit), use SL pips (negative)
-            if result['final_status'] == 'SL' and stop_loss and not (result.get('tp1_hit') or result.get('tp2_hit') or result.get('tp3_hit')):
-                total_price_diff = (stop_loss - entry_price) if is_buy else (entry_price - stop_loss)
+            # IMPORTANT: Only calculate SL pips if NO TPs were hit (SL overrides everything)
+            if result.get('final_status') == 'SL' and stop_loss is not None:
+                # Check if any TP was hit
+                any_tp_hit = (result.get('tp1_hit') or result.get('tp2_hit') or 
+                              result.get('tp3_hit') or result.get('tp4_hit') or result.get('tp5_hit'))
+                if not any_tp_hit:
+                    # SL was hit and no TPs were hit, calculate SL loss
+                    try:
+                        total_price_diff = (float(stop_loss) - float(entry_price)) if is_buy else (float(entry_price) - float(stop_loss))
+                    except (ValueError, TypeError):
+                        total_price_diff = 0
             
             # If EXPIRED/OPEN, use max_profit percentage converted to price points
-            if result['final_status'] in ['EXPIRED', 'OPEN']:
+            if result.get('final_status') in ['EXPIRED', 'OPEN']:
                 # Use max_profit percentage converted to price points
                 # max_profit is in percentage (e.g., 0.43% = 0.0043)
                 if result.get('max_profit'):
@@ -281,7 +343,25 @@ class SignalAnalyzer:
                 pips_made = total_price_diff
             
             # Round to nearest integer (as shown in image)
-            result['pips_made'] = round(pips_made)
+            # Ensure pips_made is always set, even if calculation resulted in 0 or NaN
+            if pd.isna(pips_made) or pips_made is None:
+                pips_made = 0
+            
+            # Debug logging for pip calculation
+            import os
+            debug_mode = True  # Always show pip calculation details
+            if debug_mode:
+                print(f"\n💰 [PIPS CALCULATION]")
+                print(f"   Entry: {entry_price}, Action: {action.upper()}")
+                print(f"   TP1 Hit: {result.get('tp1_hit')}, TP2 Hit: {result.get('tp2_hit')}, TP3 Hit: {result.get('tp3_hit')}")
+                print(f"   SL Hit: {result.get('sl_hit')}, Final Status: {result.get('final_status')}")
+                print(f"   Total Price Diff: {total_price_diff}")
+                print(f"   Is Forex Pair: {is_forex_pair}")
+                print(f"   Pips Made (before round): {pips_made}")
+                print(f"   Pips Made (final): {int(round(pips_made))}")
+                print(f"")
+            
+            result['pips_made'] = int(round(pips_made))
             
             return result
             
@@ -296,6 +376,8 @@ class SignalAnalyzer:
         target_1: Optional[float],
         target_2: Optional[float],
         target_3: Optional[float],
+        target_4: Optional[float],
+        target_5: Optional[float],
         stop_loss: Optional[float],
         price_tolerance: float,
         symbol: str = "",
@@ -315,6 +397,10 @@ class SignalAnalyzer:
         tp2_hit_datetime = None
         tp3_hit = False
         tp3_hit_datetime = None
+        tp4_hit = False
+        tp4_hit_datetime = None
+        tp5_hit = False
+        tp5_hit_datetime = None
         sl_hit = False
         sl_hit_datetime = None
         
@@ -342,8 +428,10 @@ class SignalAnalyzer:
             tp1_str = f"{target_1:{price_format}}" if target_1 else "N/A"
             tp2_str = f"{target_2:{price_format}}" if target_2 else "N/A"
             tp3_str = f"{target_3:{price_format}}" if target_3 else "N/A"
+            tp4_str = f"{target_4:{price_format}}" if target_4 else "N/A"
+            tp5_str = f"{target_5:{price_format}}" if target_5 else "N/A"
             sl_str = f"{stop_loss:{price_format}}" if stop_loss else "N/A"
-            print(f"   TP1: {tp1_str}, TP2: {tp2_str}, TP3: {tp3_str}")
+            print(f"   TP1: {tp1_str}, TP2: {tp2_str}, TP3: {tp3_str}, TP4: {tp4_str}, TP5: {tp5_str}")
             print(f"   SL: {sl_str}")
             print(f"   Action: {action.upper()}")
             print(f"   Total candles available: {len(market_data)}")
@@ -362,6 +450,8 @@ class SignalAnalyzer:
                 'tp1_hit': False,
                 'tp2_hit': False,
                 'tp3_hit': False,
+                'tp4_hit': False,
+                'tp5_hit': False,
                 'sl_hit': False,
                 'max_profit': 0.0,
                 'max_drawdown': 0.0,
@@ -439,7 +529,7 @@ class SignalAnalyzer:
             if current_profit < max_drawdown:
                 max_drawdown = current_profit
             
-            # CORE PRINCIPLE: If any TP (TP1, TP2, or TP3) is hit, SL should NOT be hit
+            # CORE PRINCIPLE: If any TP (TP1, TP2, TP3, TP4, or TP5) is hit, SL should NOT be hit
             # Check TPs first, and only check SL if no TP has been hit
             
             if is_buy:
@@ -473,11 +563,31 @@ class SignalAnalyzer:
                         print(f"\n✅ [HIT] TP3 HIT at {timestamp}")
                         print(f"   Candle: H={high:.2f}, L={low:.2f}, C={close:.2f}")
                         print(f"   Condition: High ({high:.2f}) >= TP3 ({target_3:.2f})")
-                        print(f"   Status: TP3 (position closed, all profit taken)")
-                    break  # TP3 closes position - all profit taken, no SL possible after
+                        print(f"   Status: TP3 (continuing to check TP4/TP5, SL disabled)")
+                
+                if target_4 and tp3_hit and not tp4_hit and high >= target_4:
+                    tp4_hit = True
+                    tp4_hit_datetime = timestamp
+                    final_status = 'TP4'
+                    if debug_mode:
+                        print(f"\n✅ [HIT] TP4 HIT at {timestamp}")
+                        print(f"   Candle: H={high:.2f}, L={low:.2f}, C={close:.2f}")
+                        print(f"   Condition: High ({high:.2f}) >= TP4 ({target_4:.2f})")
+                        print(f"   Status: TP4 (continuing to check TP5, SL disabled)")
+                
+                if target_5 and tp4_hit and not tp5_hit and high >= target_5:
+                    tp5_hit = True
+                    tp5_hit_datetime = timestamp
+                    final_status = 'TP5'
+                    if debug_mode:
+                        print(f"\n✅ [HIT] TP5 HIT at {timestamp}")
+                        print(f"   Candle: H={high:.2f}, L={low:.2f}, C={close:.2f}")
+                        print(f"   Condition: High ({high:.2f}) >= TP5 ({target_5:.2f})")
+                        print(f"   Status: TP5 (position closed, all profit taken)")
+                    break  # TP5 closes position - all profit taken, no SL possible after
                 
                 # Only check SL if no TP has been hit
-                if not tp1_hit and not tp2_hit and not tp3_hit:
+                if not tp1_hit and not tp2_hit and not tp3_hit and not tp4_hit and not tp5_hit:
                     if stop_loss and low <= stop_loss:
                         sl_hit = True
                         sl_hit_datetime = timestamp
@@ -520,11 +630,31 @@ class SignalAnalyzer:
                         print(f"\n✅ [HIT] TP3 HIT at {timestamp}")
                         print(f"   Candle: H={high:.2f}, L={low:.2f}, C={close:.2f}")
                         print(f"   Condition: Low ({low:.2f}) <= TP3 ({target_3:.2f})")
-                        print(f"   Status: TP3 (position closed, all profit taken)")
-                    break  # TP3 closes position - all profit taken, no SL possible after
+                        print(f"   Status: TP3 (continuing to check TP4/TP5, SL disabled)")
+                
+                if target_4 and tp3_hit and not tp4_hit and low <= target_4:
+                    tp4_hit = True
+                    tp4_hit_datetime = timestamp
+                    final_status = 'TP4'
+                    if debug_mode:
+                        print(f"\n✅ [HIT] TP4 HIT at {timestamp}")
+                        print(f"   Candle: H={high:.2f}, L={low:.2f}, C={close:.2f}")
+                        print(f"   Condition: Low ({low:.2f}) <= TP4 ({target_4:.2f})")
+                        print(f"   Status: TP4 (continuing to check TP5, SL disabled)")
+                
+                if target_5 and tp4_hit and not tp5_hit and low <= target_5:
+                    tp5_hit = True
+                    tp5_hit_datetime = timestamp
+                    final_status = 'TP5'
+                    if debug_mode:
+                        print(f"\n✅ [HIT] TP5 HIT at {timestamp}")
+                        print(f"   Candle: H={high:.2f}, L={low:.2f}, C={close:.2f}")
+                        print(f"   Condition: Low ({low:.2f}) <= TP5 ({target_5:.2f})")
+                        print(f"   Status: TP5 (position closed, all profit taken)")
+                    break  # TP5 closes position - all profit taken, no SL possible after
                 
                 # Only check SL if no TP has been hit
-                if not tp1_hit and not tp2_hit and not tp3_hit:
+                if not tp1_hit and not tp2_hit and not tp3_hit and not tp4_hit and not tp5_hit:
                     if stop_loss and high >= stop_loss:
                         sl_hit = True
                         sl_hit_datetime = timestamp
@@ -537,8 +667,12 @@ class SignalAnalyzer:
                         break  # SL closes entire position immediately
         
         # Determine final status if still open
-        if not sl_hit and not tp3_hit:
-            if tp2_hit:
+        if not sl_hit and not tp5_hit:
+            if tp4_hit:
+                final_status = 'TP4'
+            elif tp3_hit:
+                final_status = 'TP3'
+            elif tp2_hit:
                 final_status = 'TP2'
             elif tp1_hit:
                 final_status = 'TP1'
@@ -558,18 +692,24 @@ class SignalAnalyzer:
             print(f"   TP1 Hit: {tp1_hit} ({tp1_hit_datetime})")
             print(f"   TP2 Hit: {tp2_hit} ({tp2_hit_datetime})")
             print(f"   TP3 Hit: {tp3_hit} ({tp3_hit_datetime})")
+            print(f"   TP4 Hit: {tp4_hit} ({tp4_hit_datetime})")
+            print(f"   TP5 Hit: {tp5_hit} ({tp5_hit_datetime})")
             print(f"   SL Hit: {sl_hit} ({sl_hit_datetime})")
             print(f"   Final Status: {final_status}")
             print(f"   Max Profit: {max_profit*100:.4f}%, Max Drawdown: {max_drawdown*100:.4f}%")
             print(f"{'='*80}\n")
         
         # Calculate hold time
-        if tp1_hit_datetime:
-            hold_time = (tp1_hit_datetime - market_data.index[0]).total_seconds() / 3600.0
-        elif tp2_hit_datetime:
-            hold_time = (tp2_hit_datetime - market_data.index[0]).total_seconds() / 3600.0
+        if tp5_hit_datetime:
+            hold_time = (tp5_hit_datetime - market_data.index[0]).total_seconds() / 3600.0
+        elif tp4_hit_datetime:
+            hold_time = (tp4_hit_datetime - market_data.index[0]).total_seconds() / 3600.0
         elif tp3_hit_datetime:
             hold_time = (tp3_hit_datetime - market_data.index[0]).total_seconds() / 3600.0
+        elif tp2_hit_datetime:
+            hold_time = (tp2_hit_datetime - market_data.index[0]).total_seconds() / 3600.0
+        elif tp1_hit_datetime:
+            hold_time = (tp1_hit_datetime - market_data.index[0]).total_seconds() / 3600.0
         elif sl_hit_datetime:
             hold_time = (sl_hit_datetime - market_data.index[0]).total_seconds() / 3600.0
         else:
@@ -582,6 +722,10 @@ class SignalAnalyzer:
             'tp2_hit_datetime': tp2_hit_datetime.isoformat() if tp2_hit_datetime else None,
             'tp3_hit': tp3_hit,
             'tp3_hit_datetime': tp3_hit_datetime.isoformat() if tp3_hit_datetime else None,
+            'tp4_hit': tp4_hit,
+            'tp4_hit_datetime': tp4_hit_datetime.isoformat() if tp4_hit_datetime else None,
+            'tp5_hit': tp5_hit,
+            'tp5_hit_datetime': tp5_hit_datetime.isoformat() if tp5_hit_datetime else None,
             'sl_hit': sl_hit,
             'sl_hit_datetime': sl_hit_datetime.isoformat() if sl_hit_datetime else None,
             'max_profit': round(max_profit * 100, 4),  # As percentage
@@ -649,6 +793,8 @@ class SignalAnalyzer:
             tp1_success = sum(1 for a in analyses if a.get('tp1_hit', False))
             tp2_success = sum(1 for a in analyses if a.get('tp2_hit', False))
             tp3_success = sum(1 for a in analyses if a.get('tp3_hit', False))
+            tp4_success = sum(1 for a in analyses if a.get('tp4_hit', False))
+            tp5_success = sum(1 for a in analyses if a.get('tp5_hit', False))
             sl_hit_count = sum(1 for a in analyses if a.get('sl_hit', False))
             
             tp1_success_rate = (tp1_success / analyzed_signals * 100) if analyzed_signals > 0 else 0
@@ -656,7 +802,7 @@ class SignalAnalyzer:
             tp3_success_rate = (tp3_success / analyzed_signals * 100) if analyzed_signals > 0 else 0
             sl_hit_rate = (sl_hit_count / analyzed_signals * 100) if analyzed_signals > 0 else 0
             
-            win_rate = ((tp1_success + tp2_success + tp3_success) / analyzed_signals * 100) if analyzed_signals > 0 else 0
+            win_rate = ((tp1_success + tp2_success + tp3_success + tp4_success + tp5_success) / analyzed_signals * 100) if analyzed_signals > 0 else 0
             
             # Calculate average hold time
             hold_times = [a.get('hold_time_hours', 0) for a in analyses if a.get('hold_time_hours')]
@@ -756,12 +902,17 @@ class SignalAnalyzer:
                 'tp2_hit_datetime': result.get('tp2_hit_datetime'),
                 'tp3_hit': result.get('tp3_hit', False),
                 'tp3_hit_datetime': result.get('tp3_hit_datetime'),
+                'tp4_hit': result.get('tp4_hit', False),
+                'tp4_hit_datetime': result.get('tp4_hit_datetime'),
+                'tp5_hit': result.get('tp5_hit', False),
+                'tp5_hit_datetime': result.get('tp5_hit_datetime'),
                 'sl_hit': result.get('sl_hit', False),
                 'sl_hit_datetime': result.get('sl_hit_datetime'),
                 'max_profit': result.get('max_profit'),
                 'max_drawdown': result.get('max_drawdown'),
                 'final_status': result.get('final_status'),
                 'hold_time_hours': result.get('hold_time_hours'),
+                # Note: pips_made is calculated in the app, not stored in DB
                 'analysis_method': 'automated',
                 'timezone_offset': '+04:00',
                 'analysis_date': result.get('analysis_date')
@@ -1081,9 +1232,9 @@ class SignalAnalyzer:
             return pd.DataFrame()
         
         # Determine winning trades
-        # A trade is a win if final_status is TP1, TP2, or TP3
+        # A trade is a win if final_status is TP1, TP2, TP3, TP4, or TP5
         if final_status_col in df.columns:
-            df['is_win'] = df[final_status_col].isin(['TP1', 'TP2', 'TP3'])
+            df['is_win'] = df[final_status_col].isin(['TP1', 'TP2', 'TP3', 'TP4', 'TP5'])
         else:
             # Fallback: use PnL > 0
             df['is_win'] = df[pnl_col] > 0
