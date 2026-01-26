@@ -90,10 +90,35 @@ def get_available_instruments() -> List[str]:
         return []
     
     try:
-        # Get distinct symbols
-        result = supabase.table('signal_provider_signals').select('symbol').execute()
-        if result.data:
-            raw_symbols = list(set([row['symbol'] for row in result.data]))
+        # Get ALL distinct symbols from signal_provider_signals table
+        # Use pagination to fetch ALL records (Supabase default limit is 1000)
+        # This ensures we get every symbol, even if there are thousands of signals
+        all_symbols = []
+        offset = 0
+        page_size = 1000  # Supabase max limit per request
+        
+        while True:
+            result = supabase.table('signal_provider_signals')\
+                .select('symbol')\
+                .range(offset, offset + page_size - 1)\
+                .execute()
+            
+            if not result.data or len(result.data) == 0:
+                break
+            
+            # Extract symbols from this page
+            page_symbols = [row.get('symbol', '').strip() for row in result.data if row.get('symbol')]
+            all_symbols.extend(page_symbols)
+            
+            # If we got less than page_size, we've reached the end
+            if len(result.data) < page_size:
+                break
+            
+            offset += page_size
+        
+        if all_symbols:
+            # Get unique set of all symbols
+            raw_symbols = list(set(all_symbols))
             
             # Normalize symbols to avoid duplicates
             # Strategy: Prefer format without prefix, but keep C: prefix for currencies if that's the only format
@@ -133,10 +158,13 @@ def get_available_instruments() -> List[str]:
             
             # Return sorted list of normalized symbols
             symbols = sorted(normalized_symbols.values())
+            print(f"✅ Fetched {len(symbols)} distinct instruments from {len(all_symbols)} total signal records")
             return symbols
         return []
     except Exception as e:
-        print(f"Error fetching instruments: {e}")
+        print(f"❌ Error fetching instruments: {e}")
+        import traceback
+        traceback.print_exc()
         return []
 
 
@@ -532,8 +560,45 @@ def run_analysis_for_all_signals(
             if len(valid_variants) > 8:
                 variants_display += f" (and {len(valid_variants) - 8} more variants)"
             
-            symbol_info = f" for symbol '{symbol}' (tried variants: {variants_display})" if symbol else ""
-            return {"error": f"No signals found{symbol_info}. Check if signals exist in signal_provider_signals table. Note: Signals might be stored as lowercase (e.g., 'xauusd')."}
+            # Build comprehensive error message
+            symbol_info = f" for symbol '{symbol}'" if symbol else ""
+            provider_info = f" from provider '{provider_name}'" if provider_name else ""
+            variants_info = f" (tried variants: {variants_display})" if symbol and valid_variants else ""
+            
+            # Check if provider has signals for other symbols (helpful diagnostic)
+            other_symbols_info = ""
+            if provider_name and symbol:
+                try:
+                    # Check what symbols this provider actually has
+                    provider_symbols_query = supabase.table('signal_provider_signals')\
+                        .select('symbol')\
+                        .eq('provider_name', provider_name)\
+                        .execute()
+                    
+                    if provider_symbols_query.data:
+                        provider_symbols = list(set([row.get('symbol', '') for row in provider_symbols_query.data if row.get('symbol')]))
+                        if provider_symbols:
+                            # Show first 10 symbols this provider has
+                            sample_symbols = sorted(provider_symbols)[:10]
+                            other_symbols_info = f"\n\n💡 Provider '{provider_name}' has signals for these symbols: {', '.join(sample_symbols)}"
+                            if len(provider_symbols) > 10:
+                                other_symbols_info += f" (and {len(provider_symbols) - 10} more)"
+                            other_symbols_info += f"\n💡 Try selecting one of these symbols, or select 'All Providers' to see signals from all providers."
+                except Exception as e:
+                    print(f"DEBUG: Could not check provider symbols: {e}")
+            
+            error_msg = f"No signals found{symbol_info}{provider_info}{variants_info}."
+            if not provider_name:
+                error_msg += " Check if signals exist in signal_provider_signals table."
+            else:
+                error_msg += f"\n\n💡 Suggestions:"
+                error_msg += f"\n   • Try selecting 'All Providers' to see if other providers have signals for '{symbol}'"
+                error_msg += f"\n   • Check if the symbol name matches exactly (case-sensitive)"
+                error_msg += f"\n   • Verify that provider '{provider_name}' has signals for this symbol"
+            
+            error_msg += other_symbols_info
+            
+            return {"error": error_msg}
         
         # Skip the query execution below and use signals directly
         analyzed_count = 0

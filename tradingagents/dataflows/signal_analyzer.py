@@ -233,7 +233,7 @@ class SignalAnalyzer:
             result['target_3'] = target_3
             result['stop_loss'] = stop_loss
             
-            # Calculate "Pips Made" based on final_status
+            # Calculate "Pips Made" - CUMULATIVE: TP1 + TP2 + TP3
             # For forex pairs (EURUSD, GBPUSD, etc.), pips = price_diff * 10000 (1 pip = 0.0001)
             # For commodities (XAUUSD, etc.), pips are price points (not forex pips)
             # For indices/stocks, pips are price points
@@ -241,31 +241,44 @@ class SignalAnalyzer:
             pips_made = 0
             is_buy = (action.lower() == 'buy')
             
-            # Calculate price difference
-            price_diff = 0
-            if result['final_status'] == 'TP1' and target_1:
-                price_diff = (target_1 - entry_price) if is_buy else (entry_price - target_1)
-            elif result['final_status'] == 'TP2' and target_2:
-                price_diff = (target_2 - entry_price) if is_buy else (entry_price - target_2)
-            elif result['final_status'] == 'TP3' and target_3:
-                price_diff = (target_3 - entry_price) if is_buy else (entry_price - target_3)
-            elif result['final_status'] == 'SL' and stop_loss:
-                price_diff = (stop_loss - entry_price) if is_buy else (entry_price - stop_loss)
-            elif result['final_status'] in ['EXPIRED', 'OPEN']:
+            # Calculate cumulative pips: add TP1 if hit, add TP2 if hit, add TP3 if hit
+            total_price_diff = 0
+            
+            # If TP1 is hit, add TP1 pips
+            if result.get('tp1_hit') and target_1:
+                tp1_diff = (target_1 - entry_price) if is_buy else (entry_price - target_1)
+                total_price_diff += tp1_diff
+            
+            # If TP2 is hit, add TP2 pips
+            if result.get('tp2_hit') and target_2:
+                tp2_diff = (target_2 - entry_price) if is_buy else (entry_price - target_2)
+                total_price_diff += tp2_diff
+            
+            # If TP3 is hit, add TP3 pips
+            if result.get('tp3_hit') and target_3:
+                tp3_diff = (target_3 - entry_price) if is_buy else (entry_price - target_3)
+                total_price_diff += tp3_diff
+            
+            # If SL is hit (and no TPs were hit), use SL pips (negative)
+            if result['final_status'] == 'SL' and stop_loss and not (result.get('tp1_hit') or result.get('tp2_hit') or result.get('tp3_hit')):
+                total_price_diff = (stop_loss - entry_price) if is_buy else (entry_price - stop_loss)
+            
+            # If EXPIRED/OPEN, use max_profit percentage converted to price points
+            if result['final_status'] in ['EXPIRED', 'OPEN']:
                 # Use max_profit percentage converted to price points
                 # max_profit is in percentage (e.g., 0.43% = 0.0043)
                 if result.get('max_profit'):
-                    price_diff = (result['max_profit'] / 100) * entry_price
+                    total_price_diff = (result['max_profit'] / 100) * entry_price
                     if not is_buy:
-                        price_diff = -price_diff
+                        total_price_diff = -total_price_diff
             
             # Convert to pips based on instrument type
             if is_forex_pair:
                 # For forex pairs, 1 pip = 0.0001, so multiply by 10000
-                pips_made = price_diff * 10000
+                pips_made = total_price_diff * 10000
             else:
                 # For commodities, indices, stocks - use price points directly
-                pips_made = price_diff
+                pips_made = total_price_diff
             
             # Round to nearest integer (as shown in image)
             result['pips_made'] = round(pips_made)
@@ -426,46 +439,31 @@ class SignalAnalyzer:
             if current_profit < max_drawdown:
                 max_drawdown = current_profit
             
-            # CORE PRINCIPLE: Whichever price is touched FIRST in time wins - TP or SL
-            # Use worst-case assumption: Check SL first in each candle (risk management)
-            # However, if TP1/TP2 are already hit, continue tracking but SL can still override
+            # CORE PRINCIPLE: If any TP (TP1, TP2, or TP3) is hit, SL should NOT be hit
+            # Check TPs first, and only check SL if no TP has been hit
             
             if is_buy:
                 # BUY trade: SL is below entry, TPs are above entry
-                # Check if SL (low) is hit in this candle
-                if stop_loss and low <= stop_loss:
-                    sl_hit = True
-                    sl_hit_datetime = timestamp
-                    final_status = 'SL'
-                    if debug_mode:
-                        print(f"\n🛑 [HIT] SL HIT at {timestamp}")
-                        print(f"   Candle: H={high:.2f}, L={low:.2f}, C={close:.2f}")
-                        print(f"   Condition: Low ({low:.2f}) <= SL ({stop_loss:.2f})")
-                        print(f"   Previous TPs: TP1={tp1_hit}, TP2={tp2_hit}, TP3={tp3_hit}")
-                        print(f"   Final Status: SL")
-                    break  # SL closes entire position immediately (even if TPs were hit before)
-                
-                # Then check TPs (high) - price moving up
-                # Track TPs sequentially, but SL can override later
+                # Check TPs first (high) - price moving up
                 if target_1 and not tp1_hit and high >= target_1:
                     tp1_hit = True
                     tp1_hit_datetime = timestamp
-                    final_status = 'TP1'  # Update status, but continue (SL can override)
+                    final_status = 'TP1'  # Update status, continue to check TP2/TP3
                     if debug_mode:
                         print(f"\n✅ [HIT] TP1 HIT at {timestamp}")
                         print(f"   Candle: H={high:.2f}, L={low:.2f}, C={close:.2f}")
                         print(f"   Condition: High ({high:.2f}) >= TP1 ({target_1:.2f})")
-                        print(f"   Status: TP1 (continuing to check TP2/TP3/SL)")
+                        print(f"   Status: TP1 (continuing to check TP2/TP3, SL disabled)")
                 
                 if target_2 and tp1_hit and not tp2_hit and high >= target_2:
                     tp2_hit = True
                     tp2_hit_datetime = timestamp
-                    final_status = 'TP2'  # Update status, but continue (SL can override)
+                    final_status = 'TP2'  # Update status, continue to check TP3
                     if debug_mode:
                         print(f"\n✅ [HIT] TP2 HIT at {timestamp}")
                         print(f"   Candle: H={high:.2f}, L={low:.2f}, C={close:.2f}")
                         print(f"   Condition: High ({high:.2f}) >= TP2 ({target_2:.2f})")
-                        print(f"   Status: TP2 (continuing to check TP3/SL)")
+                        print(f"   Status: TP2 (continuing to check TP3, SL disabled)")
                 
                 if target_3 and tp2_hit and not tp3_hit and high >= target_3:
                     tp3_hit = True
@@ -477,43 +475,42 @@ class SignalAnalyzer:
                         print(f"   Condition: High ({high:.2f}) >= TP3 ({target_3:.2f})")
                         print(f"   Status: TP3 (position closed, all profit taken)")
                     break  # TP3 closes position - all profit taken, no SL possible after
+                
+                # Only check SL if no TP has been hit
+                if not tp1_hit and not tp2_hit and not tp3_hit:
+                    if stop_loss and low <= stop_loss:
+                        sl_hit = True
+                        sl_hit_datetime = timestamp
+                        final_status = 'SL'
+                        if debug_mode:
+                            print(f"\n🛑 [HIT] SL HIT at {timestamp}")
+                            print(f"   Candle: H={high:.2f}, L={low:.2f}, C={close:.2f}")
+                            print(f"   Condition: Low ({low:.2f}) <= SL ({stop_loss:.2f})")
+                            print(f"   Final Status: SL")
+                        break  # SL closes entire position immediately
                     
             else:
                 # SELL trade: SL is above entry, TPs are below entry
-                # Check if SL (high) is hit in this candle
-                if stop_loss and high >= stop_loss:
-                    sl_hit = True
-                    sl_hit_datetime = timestamp
-                    final_status = 'SL'
-                    if debug_mode:
-                        print(f"\n🛑 [HIT] SL HIT at {timestamp}")
-                        print(f"   Candle: H={high:.2f}, L={low:.2f}, C={close:.2f}")
-                        print(f"   Condition: High ({high:.2f}) >= SL ({stop_loss:.2f})")
-                        print(f"   Previous TPs: TP1={tp1_hit}, TP2={tp2_hit}, TP3={tp3_hit}")
-                        print(f"   Final Status: SL")
-                    break  # SL closes entire position immediately (even if TPs were hit before)
-                
-                # Then check TPs (low) - price moving down
-                # Track TPs sequentially, but SL can override later
+                # Check TPs first (low) - price moving down
                 if target_1 and not tp1_hit and low <= target_1:
                     tp1_hit = True
                     tp1_hit_datetime = timestamp
-                    final_status = 'TP1'  # Update status, but continue (SL can override)
+                    final_status = 'TP1'  # Update status, continue to check TP2/TP3
                     if debug_mode:
                         print(f"\n✅ [HIT] TP1 HIT at {timestamp}")
                         print(f"   Candle: H={high:.2f}, L={low:.2f}, C={close:.2f}")
                         print(f"   Condition: Low ({low:.2f}) <= TP1 ({target_1:.2f})")
-                        print(f"   Status: TP1 (continuing to check TP2/TP3/SL)")
+                        print(f"   Status: TP1 (continuing to check TP2/TP3, SL disabled)")
                 
                 if target_2 and tp1_hit and not tp2_hit and low <= target_2:
                     tp2_hit = True
                     tp2_hit_datetime = timestamp
-                    final_status = 'TP2'  # Update status, but continue (SL can override)
+                    final_status = 'TP2'  # Update status, continue to check TP3
                     if debug_mode:
                         print(f"\n✅ [HIT] TP2 HIT at {timestamp}")
                         print(f"   Candle: H={high:.2f}, L={low:.2f}, C={close:.2f}")
                         print(f"   Condition: Low ({low:.2f}) <= TP2 ({target_2:.2f})")
-                        print(f"   Status: TP2 (continuing to check TP3/SL)")
+                        print(f"   Status: TP2 (continuing to check TP3, SL disabled)")
                 
                 if target_3 and tp2_hit and not tp3_hit and low <= target_3:
                     tp3_hit = True
@@ -525,6 +522,19 @@ class SignalAnalyzer:
                         print(f"   Condition: Low ({low:.2f}) <= TP3 ({target_3:.2f})")
                         print(f"   Status: TP3 (position closed, all profit taken)")
                     break  # TP3 closes position - all profit taken, no SL possible after
+                
+                # Only check SL if no TP has been hit
+                if not tp1_hit and not tp2_hit and not tp3_hit:
+                    if stop_loss and high >= stop_loss:
+                        sl_hit = True
+                        sl_hit_datetime = timestamp
+                        final_status = 'SL'
+                        if debug_mode:
+                            print(f"\n🛑 [HIT] SL HIT at {timestamp}")
+                            print(f"   Candle: H={high:.2f}, L={low:.2f}, C={close:.2f}")
+                            print(f"   Condition: High ({high:.2f}) >= SL ({stop_loss:.2f})")
+                            print(f"   Final Status: SL")
+                        break  # SL closes entire position immediately
         
         # Determine final status if still open
         if not sl_hit and not tp3_hit:

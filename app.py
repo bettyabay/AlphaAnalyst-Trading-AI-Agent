@@ -1519,6 +1519,9 @@ def phase1_foundation_data():
                                                     for reason, count in details["skip_reasons"].items():
                                                         st.write(f"- {reason}: {count}")
                                             
+                                            # Mark instruments list for refresh
+                                            st.session_state.instruments_need_refresh = True
+                                            
                                             # Force refresh to update dropdown with new provider
                                             # Small delay to ensure database commit is complete
                                             import time
@@ -1635,6 +1638,9 @@ def phase1_foundation_data():
                                                     st.write("**Skip Reasons:**")
                                                     for reason, count in details["skip_reasons"].items():
                                                         st.write(f"- {reason}: {count}")
+                                            
+                                            # Mark instruments list for refresh
+                                            st.session_state.instruments_need_refresh = True
                                             
                                             # Force refresh to update dropdown with new provider
                                             # Small delay to ensure database commit is complete
@@ -1765,6 +1771,9 @@ def phase1_foundation_data():
                                                 if "signal_providers" not in st.session_state:
                                                     st.session_state.signal_providers = []
                                                 st.session_state.signal_providers.append(provider_name)
+                                            
+                                            # Mark instruments list for refresh
+                                            st.session_state.instruments_need_refresh = True
                                             
                                             # Force refresh to update dropdown with new provider
                                             # Small delay to ensure database commit is complete
@@ -1973,8 +1982,22 @@ def phase1_foundation_data():
     st.write("Analyze signals to determine TP/SL hits and calculate performance metrics. Select an instrument to analyze its signals against market data.")
     
     # Get available instruments and providers from database
+    # Always fetch fresh data on every page load/refresh - no caching to ensure latest symbols appear
+    # Clear cached instruments if signals were just uploaded
+    if st.session_state.get("instruments_need_refresh", False):
+        # Clear any cached instrument list
+        if "cached_instruments" in st.session_state:
+            del st.session_state.cached_instruments
+        st.session_state.instruments_need_refresh = False
+    
+    # Always fetch fresh instruments from database on every page load (no caching)
+    # This ensures new symbols appear automatically when signals are added
     available_instruments = get_available_instruments()
     available_providers = get_available_providers()
+    
+    # Show count of available instruments
+    if available_instruments:
+        st.caption(f"📊 {len(available_instruments)} instrument(s) available with signals")
     
     col_a1, col_a2, col_a3 = st.columns(3)
     with col_a1:
@@ -1982,7 +2005,7 @@ def phase1_foundation_data():
             "Instrument (Required)",
             options=["Select Instrument"] + (available_instruments or []),
             key="analysis_instrument",
-            help="Select the instrument to analyze. The system will check for market data and signals for this instrument."
+            help="Select the instrument to analyze. All distinct symbols from signal_provider_signals table are shown here."
         )
     with col_a2:
         analysis_provider = st.selectbox(
@@ -2022,6 +2045,10 @@ def phase1_foundation_data():
             else:
                 st.warning(f"⚠️ {market_data_status.get('error', 'Market data not available for this instrument')}")
                 st.info("💡 Please ensure market data has been ingested for this instrument before running analysis.")
+        
+        # Show informational message when specific provider is selected
+        if analysis_provider and analysis_provider != "All Providers":
+            st.caption(f"ℹ️ Filtering by provider: **{analysis_provider}** for symbol **{analysis_instrument}**. If no signals are found, try selecting 'All Providers' to see signals from all providers.")
     
     if st.button("Run Analysis", key="run_analysis_btn", type="primary"):
         if analysis_instrument == "Select Instrument":
@@ -2062,7 +2089,22 @@ def phase1_foundation_data():
                         # Store results in session state for display (without saving to DB)
                         st.session_state['latest_analysis_results'] = result.get('analysis_results', [])
                     else:
-                        st.error(f"Error: {result.get('error')}")
+                        # Display error with better formatting for multi-line messages
+                        error_msg = result.get('error', 'Unknown error')
+                        st.error("❌ Analysis Error")
+                        # Use st.warning for suggestions (they're in the error message)
+                        if '💡' in error_msg or 'Suggestions:' in error_msg:
+                            # Split error message into main error and suggestions
+                            lines = error_msg.split('\n')
+                            main_error = lines[0]
+                            suggestions = '\n'.join(lines[1:]) if len(lines) > 1 else ''
+                            
+                            st.error(main_error)
+                            if suggestions:
+                                st.info(suggestions)
+                        else:
+                            st.error(error_msg)
+                        
                         if 'latest_analysis_results' in st.session_state:
                             del st.session_state['latest_analysis_results']
                 except Exception as e:
