@@ -2089,21 +2089,21 @@ def phase1_foundation_data():
                         # Store results in session state for display (without saving to DB)
                         st.session_state['latest_analysis_results'] = result.get('analysis_results', [])
                     else:
-                        # Display error with better formatting for multi-line messages
+                        # Display informational message instead of error
                         error_msg = result.get('error', 'Unknown error')
-                        st.error("❌ Analysis Error")
-                        # Use st.warning for suggestions (they're in the error message)
+                        
+                        # Use informational message instead of error
                         if '💡' in error_msg or 'Suggestions:' in error_msg:
-                            # Split error message into main error and suggestions
+                            # Split message into main message and suggestions
                             lines = error_msg.split('\n')
-                            main_error = lines[0]
+                            main_message = lines[0]
                             suggestions = '\n'.join(lines[1:]) if len(lines) > 1 else ''
                             
-                            st.error(main_error)
+                            st.info(f"ℹ️ {main_message}")
                             if suggestions:
                                 st.info(suggestions)
                         else:
-                            st.error(error_msg)
+                            st.info(f"ℹ️ {error_msg}")
                         
                         if 'latest_analysis_results' in st.session_state:
                             del st.session_state['latest_analysis_results']
