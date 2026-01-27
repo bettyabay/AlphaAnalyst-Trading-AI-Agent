@@ -3232,15 +3232,15 @@ def phase1_foundation_data():
                                     # Use entry price as exit price for expired trades
                                     exit_price = result.get('entry_price')
                                 
-                                # Calculate profit_loss from pips_made if available
-                                profit_loss = result.get('pips_made', 0)
-                                if profit_loss == 0 and exit_price and result.get('entry_price'):
-                                    # Calculate manually
+                                # Get pips_made from signal analysis results
+                                pips_made = result.get('pips_made', 0)
+                                if pips_made == 0 and exit_price and result.get('entry_price'):
+                                    # Calculate manually if pips_made not available
                                     is_buy = result.get('action', '').upper() == 'BUY'
                                     if is_buy:
-                                        profit_loss = (exit_price - result.get('entry_price')) * 10000  # Convert to pips
+                                        pips_made = (exit_price - result.get('entry_price')) * 10000  # Convert to pips
                                     else:
-                                        profit_loss = (result.get('entry_price') - exit_price) * 10000
+                                        pips_made = (result.get('entry_price') - exit_price) * 10000
                                 
                                 # Parse and ensure timestamps are in GMT+4
                                 import pytz
@@ -3268,8 +3268,7 @@ def phase1_foundation_data():
                                     'exit_price': exit_price,
                                     'direction': result.get('action', 'BUY').upper(),
                                     'stop_loss': result.get('stop_loss'),
-                                    'profit_loss': profit_loss,
-                                    'net_profit_loss': profit_loss,
+                                    'pips_made': pips_made,
                                     'final_status': result.get('final_status', 'EXPIRED')
                                 }
                                 converted_trades.append(trade_dict)
@@ -3443,7 +3442,7 @@ def phase1_foundation_data():
             """)
             
             # Prepare data for scatter plot
-            profit_col = 'profit_loss' if 'profit_loss' in trades_df.columns else 'net_profit_loss'
+            profit_col = 'pips_made' if 'pips_made' in trades_df.columns else 'profit_loss'  # Fallback for old data
             if profit_col in trades_df.columns:
                 winning_trades = trades_df[trades_df[profit_col] > 0]
                 losing_trades = trades_df[trades_df[profit_col] <= 0]
@@ -3603,7 +3602,7 @@ def phase1_foundation_data():
             # Select columns to display
             columns_to_show = [
                 'symbol', 'entry_datetime', 'exit_datetime', 
-                'entry_price', 'exit_price', 'profit_loss', 'net_profit_loss',
+                'entry_price', 'exit_price', 'pips_made',
                 'mae_pips', 'mfe_pips', 'mae_r', 'mfe_r', 'confidence'
             ]
             available_columns = [col for col in columns_to_show if col in display_df.columns]

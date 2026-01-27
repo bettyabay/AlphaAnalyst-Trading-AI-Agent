@@ -438,16 +438,18 @@ class TradeEfficiencyAnalyzer:
                         return -sl_distance  # Exit at SL, which is above entry
                 else:
                     # Fallback: use original PnL if we can't calculate
-                    return row.get('profit_loss', 0)
+                    return row.get('pips_made', row.get('profit_loss', 0))  # Support both old and new column names
             else:
                 # Trade would not be stopped out, keep original PnL
-                return row.get('profit_loss', 0)
+                return row.get('pips_made', row.get('profit_loss', 0))  # Support both old and new column names
         
         df['projected_pnl'] = df.apply(calc_projected_pnl, axis=1)
         
         # Calculate metrics
         stopped_out_count = df['would_stop_out'].sum()
-        original_total_pnl = df.get('profit_loss', pd.Series([0] * len(df))).sum()
+        # Support both 'pips_made' and 'profit_loss' column names for backward compatibility
+        pnl_col = 'pips_made' if 'pips_made' in df.columns else 'profit_loss'
+        original_total_pnl = df.get(pnl_col, pd.Series([0] * len(df))).sum()
         if original_total_pnl is None or pd.isna(original_total_pnl):
             original_total_pnl = 0.0
         projected_total_pnl = df['projected_pnl'].sum()
@@ -455,7 +457,7 @@ class TradeEfficiencyAnalyzer:
             projected_total_pnl = 0.0
         
         # Calculate win rates
-        original_wins = (df.get('profit_loss', pd.Series([0] * len(df))) > 0).sum()
+        original_wins = (df.get(pnl_col, pd.Series([0] * len(df))) > 0).sum()
         original_win_rate = (original_wins / len(df) * 100) if len(df) > 0 else 0.0
         
         projected_wins = (df['projected_pnl'] > 0).sum()
