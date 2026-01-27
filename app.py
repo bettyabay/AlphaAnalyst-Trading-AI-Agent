@@ -9,6 +9,7 @@ import os
 import io
 from uuid import uuid4
 from groq import Groq
+import pytz
 
 # Load environment variables early
 load_dotenv()
@@ -51,6 +52,14 @@ from tradingagents.dataflows.market_data_service import (
 )
 from tradingagents.dataflows.data_guardrails import DataCoverageService
 from tradingagents.dataflows.feature_lab import FeatureLab
+from tradingagents.dataflows.indicator_confluence import (
+    generate_technical_features,
+    snapshot_indicators_for_signals,
+    get_distribution_stats,
+    apply_filters as apply_indicator_filters,
+    IndicatorCache,
+    export_enriched_to_json,
+)
 
 # Phase 2 imports
 from tradingagents.dataflows.ai_analysis import AIResearchAnalyzer
@@ -3221,7 +3230,6 @@ def phase1_foundation_data():
                                 # If no exit datetime, use a default (expired/open trades)
                                 if not exit_datetime:
                                     # For expired/open trades, use signal_date + 30 days as exit
-                                    import pytz
                                     gmt4_tz = pytz.timezone('Asia/Dubai')
                                     signal_date = pd.to_datetime(result.get('signal_date'))
                                     if signal_date.tzinfo is None:
@@ -3243,7 +3251,6 @@ def phase1_foundation_data():
                                         pips_made = (result.get('entry_price') - exit_price) * 10000
                                 
                                 # Parse and ensure timestamps are in GMT+4
-                                import pytz
                                 gmt4_tz = pytz.timezone('Asia/Dubai')
                                 
                                 entry_dt = pd.to_datetime(result.get('signal_date'))
@@ -3615,6 +3622,341 @@ def phase1_foundation_data():
                 )
             else:
                 st.info("No efficiency columns available to display")
+
+            # ------------------------------------------------------------------
+            # Indicator Confluence & Filter Builder
+            # ------------------------------------------------------------------
+            st.markdown("---")
+            st.markdown("#### Step 6: Indicator Confluence & Filter Builder")
+            st.markdown(
+                """
+                Explore how classic technical indicators align with your provider's
+                trades, then build simple rules to improve the raw PnL.
+
+                - **Confluence Chart**: Histogram of trades by indicator value, stacked by Win/Loss  
+                - **Filter Builder**: Rules like `RSI_14 > 70` or `sma_200_distance_pct < 0`  
+                - **Before vs After**: Compare Net PnL, Win Rate, and Trade Count
+                """
+            )
+
+            # Use the same symbol/asset_class as in the efficiency section
+            symbol_for_indicators = st.session_state.get("efficiency_symbol_selected", None)
+            
+            # If not in session state, try to get from trades_df
+            if not symbol_for_indicators and not trades_df.empty and 'symbol' in trades_df.columns:
+                # Get the most common symbol from trades_df
+                symbol_for_indicators = trades_df['symbol'].mode()[0] if len(trades_df['symbol'].mode()) > 0 else None
+                if symbol_for_indicators:
+                    st.session_state["efficiency_symbol_selected"] = symbol_for_indicators
+
+            if not symbol_for_indicators:
+                st.warning("No symbol available for indicator analysis. Please load efficiency trades first.")
+            else:
+                # Determine asset class from symbol
+                if symbol_for_indicators.startswith("C:") or "/" in symbol_for_indicators:
+                    asset_class = "Currencies"
+                elif symbol_for_indicators.startswith("I:") or symbol_for_indicators.startswith("^"):
+                    asset_class = "Indices"
+                elif "*" in symbol_for_indicators or "XAU" in symbol_for_indicators or "XAG" in symbol_for_indicators:
+                    asset_class = "Commodities"
+                else:
+                    asset_class = "Stocks"
+
+                # Fetch market data covering the trade span (in GMT+4)
+                gmt4_tz = pytz.timezone("Asia/Dubai")
+                entry_min = pd.to_datetime(trades_df["entry_datetime"]).min()
+                exit_max = pd.to_datetime(trades_df["exit_datetime"]).max()
+
+                if isinstance(entry_min, pd.Timestamp):
+                    if entry_min.tzinfo is None:
+                        entry_min = gmt4_tz.localize(entry_min)
+                    else:
+                        entry_min = entry_min.astimezone(gmt4_tz)
+                if isinstance(exit_max, pd.Timestamp):
+                    if exit_max.tzinfo is None:
+                        exit_max = gmt4_tz.localize(exit_max)
+                    else:
+                        exit_max = exit_max.astimezone(gmt4_tz)
+
+                # Add a small buffer around the trade window
+                start_gmt4 = entry_min - pd.Timedelta(hours=2)
+                end_gmt4 = exit_max + pd.Timedelta(hours=2)
+
+                # Initialize indicator cache in session state
+                if "indicator_cache" not in st.session_state:
+                    st.session_state["indicator_cache"] = IndicatorCache()
+                cache = st.session_state["indicator_cache"]
+                
+                # Generate cache key
+                cache_key = cache.get_cache_key(symbol_for_indicators, start_gmt4, end_gmt4)
+                
+                # Check cache first
+                market_with_indicators = cache.get(cache_key)
+                cache_hit = market_with_indicators is not None
+                
+                if cache_hit:
+                    st.success(f"✅ Using cached indicators for {symbol_for_indicators} (cache hit)")
+                else:
+                    with st.spinner("Calculating indicators and mapping them to trades (GMT+4)..."):
+                        # Ensure fetch_ohlcv is accessible
+                        from tradingagents.dataflows.market_data_service import fetch_ohlcv
+                        market_df = fetch_ohlcv(
+                            symbol=symbol_for_indicators,
+                            interval="1min",
+                            start=start_gmt4,
+                            end=end_gmt4,
+                            asset_class=asset_class,
+                        )
+
+                        if market_df is None or market_df.empty:
+                            st.warning("No market data available to calculate indicators for this symbol.")
+                            market_with_indicators = None
+                        else:
+                            # Generate indicators with look-ahead safety (shifted by 1 bar)
+                            market_with_indicators = generate_technical_features(market_df)
+                            # Store in cache
+                            cache.set(cache_key, market_with_indicators)
+                            st.success(f"✅ Indicators calculated and cached for {symbol_for_indicators}")
+
+                if market_with_indicators is not None and not market_with_indicators.empty:
+                    # Snapshot indicators at trade entry time (backward merge, GMT+4 safe)
+                    enriched_trades = snapshot_indicators_for_signals(
+                        trades_df,
+                        market_with_indicators,
+                        entry_time_col="entry_datetime",
+                    )
+
+                    st.session_state["indicator_enriched_trades"] = enriched_trades
+                    st.session_state["indicator_cache_key"] = cache_key
+
+                    # Available indicators (only those present in enriched data)
+                    candidate_indicators = [
+                        "rsi_14",
+                        "stoch_k",
+                        "stoch_d",
+                        "sma_50",
+                        "sma_200",
+                        "ema_20",
+                        "macd",
+                        "macd_signal",
+                        "macd_hist",
+                        "bb_width",
+                        "sma_200_distance_pct",
+                    ]
+                    available_indicators = [
+                        col for col in candidate_indicators if col in enriched_trades.columns
+                    ]
+
+                    if not available_indicators:
+                        st.warning("No indicator columns found in enriched trades.")
+                    else:
+                        profit_col = (
+                            "pips_made"
+                            if "pips_made" in enriched_trades.columns
+                            else "profit_loss"
+                            if "profit_loss" in enriched_trades.columns
+                            else None
+                        )
+
+                        if profit_col is None:
+                            st.warning("PnL column not found (expected 'pips_made' or 'profit_loss').")
+                        else:
+                            # Layout: Filters on the left, charts & metrics on the right
+                            filter_col, viz_col = st.columns([1, 3])
+
+                            with filter_col:
+                                st.markdown("**Filter Builder**")
+                                st.caption("Add simple indicator rules. All rules are combined with AND.")
+
+                                # Persist rules in session_state
+                                if "indicator_filter_rules" not in st.session_state:
+                                    st.session_state["indicator_filter_rules"] = []
+                                rules = st.session_state["indicator_filter_rules"]
+
+                                new_indicator = st.selectbox(
+                                    "Indicator",
+                                    options=available_indicators,
+                                    key="filter_indicator_select",
+                                )
+                                new_operator = st.selectbox(
+                                    "Operator",
+                                    options=[">", "<"],
+                                    key="filter_operator_select",
+                                )
+                                new_value = st.number_input(
+                                    "Value",
+                                    value=0.0,
+                                    key="filter_value_input",
+                                )
+
+                                if st.button("Add Filter", key="add_indicator_filter_btn"):
+                                    rules.append(
+                                        {
+                                            "indicator": new_indicator,
+                                            "operator": new_operator,
+                                            "value": float(new_value),
+                                        }
+                                    )
+                                    st.session_state["indicator_filter_rules"] = rules
+
+                                if rules:
+                                    st.markdown("**Active Filters**")
+                                    for idx, rule in enumerate(rules):
+                                        st.markdown(
+                                            f"- `{rule['indicator']} {rule['operator']} {rule['value']}`"
+                                        )
+                                    if st.button("Clear All Filters", key="clear_indicator_filters_btn"):
+                                        st.session_state["indicator_filter_rules"] = []
+                                        rules = []
+
+                            with viz_col:
+                                st.markdown("**Confluence Chart**")
+
+                                selected_indicator = st.selectbox(
+                                    "Indicator for Distribution",
+                                    options=available_indicators,
+                                    key="confluence_indicator_select",
+                                )
+
+                                # Distribution for original trades
+                                dist_bins = get_distribution_stats(
+                                    enriched_trades,
+                                    indicator_col=selected_indicator,
+                                    pnl_col=profit_col,
+                                )
+
+                                if not dist_bins:
+                                    st.info("Not enough data to build a distribution for this indicator.")
+                                else:
+                                    labels = [b.bin_label for b in dist_bins]
+                                    wins = [b.count_wins for b in dist_bins]
+                                    losses = [b.count_losses for b in dist_bins]
+
+                                    fig_hist = go.Figure()
+                                    fig_hist.add_trace(
+                                        go.Bar(
+                                            x=labels,
+                                            y=wins,
+                                            name="Wins",
+                                            marker_color="green",
+                                        )
+                                    )
+                                    fig_hist.add_trace(
+                                        go.Bar(
+                                            x=labels,
+                                            y=losses,
+                                            name="Losses",
+                                            marker_color="red",
+                                        )
+                                    )
+                                    fig_hist.update_layout(
+                                        barmode="stack",
+                                        xaxis_title=f"{selected_indicator} (binned)",
+                                        yaxis_title="Trade Count",
+                                        height=400,
+                                    )
+                                    st.plotly_chart(fig_hist, use_container_width=True)
+
+                                # Apply filters to get "after" set
+                                filtered_trades = apply_indicator_filters(enriched_trades, rules)
+
+                                # Before vs After metrics
+                                st.markdown("**Before vs After Metrics**")
+                                before_count = len(enriched_trades)
+                                after_count = len(filtered_trades)
+
+                                before_pnl = enriched_trades[profit_col].sum() if before_count > 0 else 0.0
+                                after_pnl = filtered_trades[profit_col].sum() if after_count > 0 else 0.0
+
+                                before_wins = (
+                                    (enriched_trades[profit_col] > 0).sum() if before_count > 0 else 0
+                                )
+                                after_wins = (
+                                    (filtered_trades[profit_col] > 0).sum() if after_count > 0 else 0
+                                )
+
+                                before_win_rate = (
+                                    before_wins / before_count * 100 if before_count > 0 else 0.0
+                                )
+                                after_win_rate = (
+                                    after_wins / after_count * 100 if after_count > 0 else 0.0
+                                )
+
+                                mcol1, mcol2, mcol3 = st.columns(3)
+                                with mcol1:
+                                    st.metric(
+                                        "Net PnL (Before)",
+                                        f"{before_pnl:,.2f}",
+                                    )
+                                with mcol2:
+                                    pnl_delta = after_pnl - before_pnl
+                                    st.metric(
+                                        "Net PnL (Filtered)",
+                                        f"{after_pnl:,.2f}",
+                                        delta=f"{pnl_delta:,.2f}",
+                                    )
+                                with mcol3:
+                                    trade_delta_pct = (
+                                        (after_count / before_count * 100 - 100) if before_count > 0 else 0.0
+                                    )
+                                    st.metric(
+                                        "Win Rate (Before → After)",
+                                        f"{before_win_rate:.1f}% → {after_win_rate:.1f}%",
+                                        delta=f"{after_win_rate - before_win_rate:.1f}%",
+                                    )
+                                    st.caption(
+                                        f"Trades kept: {after_count} / {before_count} "
+                                        f"({after_count / before_count * 100:.1f}% retained)"
+                                        if before_count > 0
+                                        else "No trades available."
+                                    )
+
+                                # Curve-fitting warning
+                                if before_count > 0 and after_count < 0.2 * before_count:
+                                    st.warning(
+                                        "Warning: Sample size too small after filtering "
+                                        "(< 20% of original trades). Results may be curve-fitted."
+                                    )
+                                    
+                                # Export functionality
+                                st.markdown("---")
+                                st.markdown("**Export & Cache Management**")
+                                export_col1, export_col2, export_col3 = st.columns(3)
+                                
+                                with export_col1:
+                                    include_indicators_export = st.checkbox(
+                                        "Include indicators in export",
+                                        value=True,
+                                        key="export_include_indicators"
+                                    )
+                                    json_export = export_enriched_to_json(
+                                        enriched_trades,
+                                        include_indicators=include_indicators_export
+                                    )
+                                    timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+                                    filename = f"enriched_trades_{symbol_for_indicators}_{timestamp_str}.json"
+                                    st.download_button(
+                                        label="📥 Download JSON Export",
+                                        data=json_export,
+                                        file_name=filename,
+                                        mime="application/json",
+                                        key="download_json_export"
+                                    )
+                                
+                                with export_col2:
+                                    if cache_hit:
+                                        st.info(f"💾 Cache: **HIT** (reused cached indicators)")
+                                    else:
+                                        st.info(f"💾 Cache: **MISS** (calculated fresh)")
+                                    cache_size = len(cache._cache) if hasattr(cache, '_cache') else 0
+                                    st.caption(f"Cache entries: {cache_size}")
+                                
+                                with export_col3:
+                                    if st.button("🗑️ Clear Indicator Cache", key="clear_indicator_cache_btn"):
+                                        cache.clear()
+                                        st.session_state["indicator_cache"] = IndicatorCache()
+                                        st.success("Cache cleared!")
+                                        st.rerun()
     
     # Data ingestion
     st.markdown('<div class="feature-card">', unsafe_allow_html=True)
