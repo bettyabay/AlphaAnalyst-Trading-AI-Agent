@@ -71,19 +71,52 @@ def convert_instrument_to_polygon_symbol(category: str, instrument: str) -> str:
     # Indices
     elif category_upper == "INDICES":
         # NOTE: For 1-minute data, Polygon doesn't support indices (I:SPX, etc.)
-        # The universal_ingestion function will auto-convert I:SPX to SPY
-        # But we still return I:SPX here for consistency, and let the ingestion layer handle conversion
-        if "S&P" in instrument_upper or "SPX" in instrument_upper or "SP500" in instrument_upper:
+        # The ingestion functions will auto-convert indices to ETFs (I:SPX → SPY, etc.)
+        # But we still return I:SPX format here for consistency, and let the ingestion layer handle conversion
+        
+        # Handle common index names
+        # Normalize by removing spaces, dashes, and converting to uppercase for matching
+        instrument_normalized = instrument_upper.replace(" ", "").replace("-", "").replace("_", "")
+        
+        # Check for known index patterns FIRST (before checking I: prefix)
+        # This handles cases like "I:NAS 100" where we need to normalize the base symbol
+        
+        # Extract base symbol if it has I: or ^ prefix for pattern matching
+        base_symbol = instrument_upper
+        has_i_prefix = False
+        if instrument_upper.startswith("I:"):
+            base_symbol = instrument_upper[2:].strip()
+            has_i_prefix = True
+        elif instrument_upper.startswith("^"):
+            base_symbol = instrument_upper[1:].strip()
+        base_normalized = base_symbol.replace(" ", "").replace("-", "").replace("_", "")
+        
+        # S&P 500
+        if "S&P" in instrument_upper or "SPX" in instrument_upper or "SP500" in instrument_upper or instrument_normalized == "SP500" or base_normalized == "SPX" or base_normalized == "SP500":
             return "I:SPX"  # S&P 500 index (will be converted to SPY for minute data)
+        # NASDAQ-100 (handle "NAS 100", "NAS100", "NDX", etc.)
+        elif ("NAS" in base_symbol or "NASDAQ" in base_symbol) and ("100" in base_symbol or "NDX" in base_symbol) or base_normalized in ["NAS100", "NDX"] or instrument_normalized in ["INAS100", "INDX"]:
+            return "I:NDX"  # NASDAQ-100 index (will be converted to QQQ for minute data)
+        # Dow Jones
+        elif "DOW" in base_symbol or "DJI" in base_symbol or base_normalized in ["DOW", "DJI"]:
+            return "I:DJI"  # Dow Jones index (will be converted to DIA for minute data)
+        # Russell 2000
+        elif "RUSSELL" in base_symbol or "RUT" in base_symbol or base_normalized in ["RUSSELL2000", "RUT"]:
+            return "I:RUT"  # Russell 2000 index (will be converted to IWM for minute data)
+        # VIX
+        elif "VIX" in base_symbol or base_normalized == "VIX":
+            return "I:VIX"  # VIX volatility index
+        # If it already has I: prefix and we didn't match above, return as-is (might be valid)
+        elif has_i_prefix:
+            return instrument_upper
+        # Handle ^ prefix
         elif instrument_upper.startswith("^"):
             symbol_part = instrument_upper[1:].strip()
             if symbol_part:  # Make sure there's something after the ^
                 return f"I:{symbol_part}"
             else:
                 return instrument_upper  # Return as-is if invalid
-        elif instrument_upper.startswith("I:"):
-            # Already has I: prefix, return as-is
-            return instrument_upper
+        # Add I: prefix if it doesn't have one
         elif len(instrument_upper) > 1:  # Only add I: prefix if there's more than one character
             return f"I:{instrument_upper}"
         else:

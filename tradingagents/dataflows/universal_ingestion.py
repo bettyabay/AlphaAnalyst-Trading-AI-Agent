@@ -359,17 +359,24 @@ def ingest_from_polygon_api(api_symbol, asset_class, db_symbol=None, auto_resume
             polygon_symbol = "I:SPX"
             
         # CRITICAL: Polygon does NOT support 1-minute data for indices (I:SPX, I:DJI, etc.)
-        # Auto-convert I:SPX to SPY (ETF that tracks S&P 500) for minute data
-        # SPY is tradable and Polygon provides full minute history
-        if polygon_symbol and polygon_symbol.startswith("I:"):
-            index_name = polygon_symbol[2:]  # Remove "I:" prefix
-            if index_name == "SPX":
-                # Use SPY instead of I:SPX for minute data (industry standard workaround)
-                polygon_symbol = "SPY"
-                print(f"⚠️ Polygon doesn't support I:SPX minute data. Auto-converting to SPY (ETF that tracks S&P 500).")
-            else:
-                # For other indices, warn but try anyway
-                print(f"⚠️ WARNING: Polygon may not support 1-minute data for {polygon_symbol}. Consider using an ETF or futures contract instead.")
+        # Auto-convert indices to ETFs for minute data
+        # Import the mapping function from ingest_indices_polygon
+        if polygon_symbol and (polygon_symbol.startswith("I:") or polygon_symbol.startswith("^")):
+            try:
+                from ingest_indices_polygon import _get_etf_for_index
+                original_symbol = polygon_symbol
+                polygon_symbol = _get_etf_for_index(polygon_symbol, interval="1min")
+                if polygon_symbol != original_symbol:
+                    print(f"⚠️ Polygon doesn't support 1-minute data for {original_symbol}. Auto-converted to {polygon_symbol} (ETF).")
+            except ImportError:
+                # Fallback: only handle S&P 500 if import fails
+                if polygon_symbol.startswith("I:"):
+                    index_name = polygon_symbol[2:]  # Remove "I:" prefix
+                    if index_name == "SPX":
+                        polygon_symbol = "SPY"
+                        print(f"⚠️ Polygon doesn't support I:SPX minute data. Auto-converting to SPY (ETF that tracks S&P 500).")
+                    else:
+                        print(f"⚠️ WARNING: Polygon may not support 1-minute data for {polygon_symbol}. Consider using an ETF or futures contract instead.")
         
         # CRITICAL: Clean symbol immediately after conversion (remove all whitespace/newlines)
         if polygon_symbol:

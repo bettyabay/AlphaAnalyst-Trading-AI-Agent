@@ -91,6 +91,123 @@ def _insert_chunk_to_db(
         return {"success": False, "count": 0, "message": f"Insert error: {str(e)}"}
 
 
+# Mapping of indices to their ETF equivalents for 1-minute data
+# Polygon doesn't provide 1-minute data for cash indices, so we use ETFs
+INDEX_TO_ETF_MAPPING = {
+    # S&P 500
+    "I:SPX": "SPY",
+    "SPX": "SPY",
+    "^SPX": "SPY",
+    "SP500": "SPY",
+    "S&P 500": "SPY",
+    "S&P500": "SPY",
+    # NASDAQ-100 (handle various formats)
+    "I:NDX": "QQQ",
+    "NDX": "QQQ",
+    "^NDX": "QQQ",
+    "NASDAQ-100": "QQQ",
+    "NASDAQ100": "QQQ",
+    "NAS 100": "QQQ",  # Common variation with space
+    "NAS100": "QQQ",
+    "I:NAS 100": "QQQ",  # If user enters with I: prefix and space
+    "I:NAS100": "QQQ",
+    # Dow Jones Industrial Average
+    "I:DJI": "DIA",
+    "DJI": "DIA",
+    "^DJI": "DIA",
+    "DOW": "DIA",
+    "DOW JONES": "DIA",
+    # Russell 2000
+    "I:RUT": "IWM",
+    "RUT": "IWM",
+    "^RUT": "IWM",
+    "RUSSELL 2000": "IWM",
+    "RUSSELL2000": "IWM",
+    # VIX (volatility index - may work directly, but try VXX as backup)
+    "I:VIX": "VIX",  # VIX might work directly for daily, but for 1min we might need VXX
+    "VIX": "VIX",
+    "^VIX": "VIX",
+}
+
+
+def _get_etf_for_index(index_symbol: str, interval: str = "1min") -> str:
+    """
+    Convert an index symbol to its ETF equivalent for Polygon API.
+    
+    Args:
+        index_symbol: Index symbol (e.g., "I:SPX", "^SPX", "SPX", "NAS 100", "I:NAS 100")
+        interval: "1min" for 1-minute data (requires ETF), "daily" for daily data (can use index)
+    
+    Returns:
+        ETF symbol for 1-minute data, or original symbol for daily data
+    """
+    symbol_upper = index_symbol.upper().strip()
+    
+    # Normalize by removing spaces, dashes for flexible matching
+    symbol_normalized = symbol_upper.replace(" ", "").replace("-", "").replace("_", "")
+    
+    # For daily data, indices might work directly, so try original first
+    if interval == "daily":
+        # Check if it's a known index that might work for daily
+        if symbol_upper in INDEX_TO_ETF_MAPPING or symbol_normalized in INDEX_TO_ETF_MAPPING:
+            # For daily, we can try the index directly first, but have ETF as fallback
+            return index_symbol.strip()
+        return index_symbol.strip()
+    
+    # For 1-minute data, always use ETF mapping
+    # First try exact match
+    if symbol_upper in INDEX_TO_ETF_MAPPING:
+        etf = INDEX_TO_ETF_MAPPING[symbol_upper]
+        if etf != symbol_upper:
+            print(f"⚠️ Auto-converting {index_symbol} to {etf} (Polygon doesn't support 1-minute data for indices)")
+        return etf
+    
+    # Try normalized version (without spaces/dashes)
+    if symbol_normalized in INDEX_TO_ETF_MAPPING:
+        etf = INDEX_TO_ETF_MAPPING[symbol_normalized]
+        if etf != symbol_normalized:
+            print(f"⚠️ Auto-converting {index_symbol} to {etf} (Polygon doesn't support 1-minute data for indices)")
+        return etf
+    
+    # Check if it starts with I: or ^ and extract base symbol
+    if symbol_upper.startswith("I:"):
+        base = symbol_upper[2:].strip()
+        base_normalized = base.replace(" ", "").replace("-", "").replace("_", "")
+        # Try base with spaces removed
+        if base in INDEX_TO_ETF_MAPPING:
+            etf = INDEX_TO_ETF_MAPPING[base]
+            print(f"⚠️ Auto-converting {index_symbol} to {etf} (Polygon doesn't support 1-minute data for indices)")
+            return etf
+        elif base_normalized in INDEX_TO_ETF_MAPPING:
+            etf = INDEX_TO_ETF_MAPPING[base_normalized]
+            print(f"⚠️ Auto-converting {index_symbol} to {etf} (Polygon doesn't support 1-minute data for indices)")
+            return etf
+        # Also try the full I: prefix version
+        if symbol_normalized in INDEX_TO_ETF_MAPPING:
+            etf = INDEX_TO_ETF_MAPPING[symbol_normalized]
+            print(f"⚠️ Auto-converting {index_symbol} to {etf} (Polygon doesn't support 1-minute data for indices)")
+            return etf
+    elif symbol_upper.startswith("^"):
+        base = symbol_upper[1:].strip()
+        base_normalized = base.replace(" ", "").replace("-", "").replace("_", "")
+        if base in INDEX_TO_ETF_MAPPING:
+            etf = INDEX_TO_ETF_MAPPING[base]
+            print(f"⚠️ Auto-converting {index_symbol} to {etf} (Polygon doesn't support 1-minute data for indices)")
+            return etf
+        elif base_normalized in INDEX_TO_ETF_MAPPING:
+            etf = INDEX_TO_ETF_MAPPING[base_normalized]
+            print(f"⚠️ Auto-converting {index_symbol} to {etf} (Polygon doesn't support 1-minute data for indices)")
+            return etf
+    
+    # Special handling for "NAS 100" variations that might not be in mapping
+    if "NAS" in symbol_upper and "100" in symbol_upper:
+        print(f"⚠️ Auto-converting {index_symbol} to QQQ (Polygon doesn't support 1-minute data for indices)")
+        return "QQQ"
+    
+    # If no mapping found, return as-is (might be an ETF already or unknown index)
+    return index_symbol.strip()
+
+
 def ingest_indices_from_polygon(
     api_symbol: str,
     interval: str = "1min",  # "1min" or "daily"
@@ -107,12 +224,8 @@ def ingest_indices_from_polygon(
         db_symbol: Symbol to store in database (defaults to api_symbol)
     """
     try:
-        # Auto-convert I:SPX to SPY (Polygon doesn't support I:SPX minute data)
-        if api_symbol.upper() in ["I:SPX", "SPX", "^SPX"]:
-            polygon_symbol = "SPY"
-            print(f"⚠️ Auto-converting I:SPX to SPY (Polygon doesn't support I:SPX minute data)")
-        else:
-            polygon_symbol = api_symbol.strip()
+        # Convert index to ETF for 1-minute data
+        polygon_symbol = _get_etf_for_index(api_symbol, interval)
         
         # Determine target table
         if interval == "1min":
@@ -133,12 +246,69 @@ def ingest_indices_from_polygon(
         if not sb:
             return {"success": False, "message": "Supabase not configured (check .env)"}
         
-        # Calculate date range (1 year back from now)
+        # Prepare timezone conversion objects (needed for resume logic)
+        utc_tz = pytz.timezone('UTC')
+        gmt4_tz = pytz.timezone('Asia/Dubai')  # GMT+4
+        
+        # RESUME LOGIC: Check if data already exists in database
+        # If data exists, only fetch from latest timestamp forward
+        resume_from_latest = True  # Always check for existing data
+        latest_timestamp_utc = None
+        
+        if resume_from_latest:
+            try:
+                # Query for latest timestamp for this symbol
+                latest_result = sb.table(target_table)\
+                    .select("timestamp")\
+                    .eq("symbol", target_symbol)\
+                    .order("timestamp", desc=True)\
+                    .limit(1)\
+                    .execute()
+                
+                if latest_result.data and len(latest_result.data) > 0:
+                    latest_ts_str = latest_result.data[0].get("timestamp")
+                    if latest_ts_str:
+                        # Parse timestamp (stored in GMT+4, convert back to UTC for comparison)
+                        if isinstance(latest_ts_str, str):
+                            # Parse ISO format timestamp
+                            latest_timestamp = datetime.fromisoformat(latest_ts_str.replace('Z', '+00:00'))
+                        else:
+                            latest_timestamp = latest_ts_str
+                        
+                        # Convert from GMT+4 (database) to UTC for Polygon API
+                        if latest_timestamp.tzinfo is None:
+                            # Assume it's GMT+4 if naive
+                            latest_timestamp = gmt4_tz.localize(latest_timestamp)
+                        
+                        # Convert to UTC
+                        latest_timestamp_utc = latest_timestamp.astimezone(utc_tz)
+                        
+                        print(f"✅ Found existing data for '{target_symbol}' in database")
+                        print(f"   Latest timestamp: {latest_timestamp_utc.strftime('%Y-%m-%d %H:%M:%S')} UTC")
+                        print(f"   Will resume from this point forward...")
+            except Exception as e:
+                print(f"⚠️ Could not check for existing data: {e}")
+                print(f"   Will start fresh ingestion...")
+                latest_timestamp_utc = None
+        
+        # Calculate date range
         now_utc = datetime.utcnow()
         end_dt = now_utc - timedelta(minutes=15)  # Safety buffer for intraday
         
-        # Calculate start date: go BACK in time (subtract days)
-        start_dt = end_dt - timedelta(days=365 * years)  # 1 year BACK for free plan
+        # Determine start date based on resume logic
+        if latest_timestamp_utc and resume_from_latest:
+            # Resume from latest timestamp + 1 minute (to avoid duplicates)
+            start_dt = latest_timestamp_utc + timedelta(minutes=1)
+            print(f"📅 Resuming from: {start_dt.strftime('%Y-%m-%d %H:%M:%S')} UTC")
+            
+            # If start_dt is already at or after end_dt, no new data to fetch
+            if start_dt >= end_dt:
+                print(f"✅ Data is already up to date. Latest: {latest_timestamp_utc.strftime('%Y-%m-%d %H:%M:%S')} UTC, End: {end_dt.strftime('%Y-%m-%d %H:%M:%S')} UTC")
+                return {"success": True, "message": f"✅ Data for {target_symbol} is already up to date. Latest timestamp: {latest_timestamp_utc.strftime('%Y-%m-%d %H:%M:%S')} UTC"}
+        else:
+            # No existing data - start from 1 year back
+            start_dt = end_dt - timedelta(days=365 * years)  # 1 year BACK for free plan
+            print(f"📅 Starting fresh ingestion from: {start_dt.strftime('%Y-%m-%d %H:%M:%S')} UTC")
         
         # Validate dates are not in the future
         current_year = now_utc.year
@@ -183,9 +353,7 @@ def ingest_indices_from_polygon(
                 time.sleep(sleep_time)
             _last_polygon_call = time.time()
         
-        # Prepare timezone conversion objects
-        utc_tz = pytz.timezone('UTC')
-        gmt4_tz = pytz.timezone('Asia/Dubai')  # GMT+4
+        # Timezone conversion objects already defined above
         
         # Chunk by 1 day (same as gold ingestion for free plan compatibility)
         chunk_days = 1
@@ -334,22 +502,111 @@ def ingest_indices_from_polygon(
         return {"success": False, "message": f"Indices ingestion error: {str(e)}"}
 
 
+def verify_indices_in_database():
+    """
+    Helper function to verify what index symbols are stored in the database.
+    This helps identify if symbols are stored correctly (I:SPX, I:NDX, I:DJI).
+    """
+    sb = get_supabase()
+    if not sb:
+        print("❌ Supabase not configured")
+        return
+    
+    target_table = "market_data_indices_1min"
+    
+    try:
+        # Get all distinct symbols
+        result = sb.table(target_table)\
+            .select("symbol, timestamp")\
+            .order("symbol")\
+            .order("timestamp", desc=True)\
+            .execute()
+        
+        if not result.data:
+            print(f"ℹ️ No data found in {target_table}")
+            return
+        
+        # Group by symbol and get latest timestamp for each
+        symbols_info = {}
+        for row in result.data:
+            symbol = row.get("symbol")
+            timestamp = row.get("timestamp")
+            
+            if symbol not in symbols_info:
+                symbols_info[symbol] = {
+                    "latest": timestamp,
+                    "count": 0
+                }
+            symbols_info[symbol]["count"] += 1
+            # Update latest if this timestamp is newer
+            if timestamp and symbols_info[symbol]["latest"]:
+                try:
+                    if isinstance(timestamp, str):
+                        ts1 = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                        ts2 = datetime.fromisoformat(symbols_info[symbol]["latest"].replace('Z', '+00:00'))
+                        if ts1 > ts2:
+                            symbols_info[symbol]["latest"] = timestamp
+                    else:
+                        if timestamp > symbols_info[symbol]["latest"]:
+                            symbols_info[symbol]["latest"] = timestamp
+                except:
+                    pass
+        
+        print(f"\n{'='*60}")
+        print(f"📊 INDICES IN DATABASE: {target_table}")
+        print(f"{'='*60}")
+        print(f"Found {len(symbols_info)} unique symbol(s):\n")
+        
+        for symbol, info in sorted(symbols_info.items()):
+            print(f"  • {symbol}")
+            print(f"    - Records: {info['count']}")
+            print(f"    - Latest: {info['latest']}")
+            print()
+        
+        # Check for expected symbols
+        expected_symbols = ["I:SPX", "I:NDX", "I:DJI"]
+        print(f"Expected symbols (from image): {', '.join(expected_symbols)}")
+        print(f"\n✅ Verification:")
+        for exp_sym in expected_symbols:
+            if exp_sym in symbols_info:
+                print(f"  ✅ {exp_sym} - Found ({symbols_info[exp_sym]['count']} records)")
+            else:
+                # Check for variations
+                found_variants = [s for s in symbols_info.keys() if exp_sym.upper() in s.upper() or s.upper() in exp_sym.upper()]
+                if found_variants:
+                    print(f"  ⚠️ {exp_sym} - Not found, but found variants: {', '.join(found_variants)}")
+                else:
+                    print(f"  ❌ {exp_sym} - Not found")
+        
+        print(f"{'='*60}\n")
+        
+    except Exception as e:
+        print(f"❌ Error verifying database: {e}")
+        import traceback
+        traceback.print_exc()
+
+
 def main():
     """Example usage"""
-    # Example: Ingest SPY (S&P 500 ETF) 1-minute data
-    result = ingest_indices_from_polygon(
-        api_symbol="SPY",
-        interval="1min",
-        years=1,  # 1 year for free plan
-        db_symbol="SPY"
-    )
+    # First, verify what's in the database
+    print("🔍 Verifying indices in database...")
+    verify_indices_in_database()
     
-    print("\n" + "="*60)
-    if result["success"]:
-        print("✅ " + result["message"])
-    else:
-        print("❌ " + result["message"])
-    print("="*60)
+    # Example: Ingest SPY (S&P 500 ETF) 1-minute data
+    # Uncomment to test ingestion:
+    # result = ingest_indices_from_polygon(
+    #     api_symbol="I:SPX",
+    #     interval="1min",
+    #     years=1,  # 1 year for free plan
+    #     db_symbol="I:SPX"
+    # )
+    # 
+    # print("\n" + "="*60)
+    # if result["success"]:
+    #     print("✅ " + result["message"])
+    # else:
+    #     print("❌ " + result["message"])
+    # print("="*60)
 
 
 if __name__ == "__main__":

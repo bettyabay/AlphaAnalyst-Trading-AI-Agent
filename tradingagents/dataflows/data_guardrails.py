@@ -624,6 +624,7 @@ class DataCoverageService:
         # Import here to avoid circular imports
         from tradingagents.dataflows.universal_ingestion import ingest_from_polygon_api
         from tradingagents.dataflows.ingestion_pipeline import convert_instrument_to_polygon_symbol
+        from ingest_indices_polygon import ingest_indices_from_polygon
         
         for record in records:
             for task in self._create_backfill_tasks(record):
@@ -638,36 +639,53 @@ class DataCoverageService:
                     
                     # For 1min data, convert symbol to Polygon format and use GMT+4 timezone
                     if interval == "1min" and self.asset_class:
-                        # Convert symbol to Polygon format based on asset class
-                        # This ensures currencies get "C:" prefix (USDJPY → C:USDJPY), indices get "I:" prefix, etc.
-                        polygon_symbol = convert_instrument_to_polygon_symbol(self.asset_class, symbol)
-                        print(f"🔄 Converting symbol '{symbol}' to Polygon format '{polygon_symbol}' for asset class '{self.asset_class}'")
-                        
-                        if not pipeline:
-                            logs.append({
-                                "symbol": symbol,
-                                "interval": interval,
-                                "reason": task["reason"],
-                                "start": start_dt.isoformat(),
-                                "end": end_dt.isoformat(),
-                                "success": False,
-                                "message": "Pipeline not provided",
-                            })
-                            continue
-                        
-                        # Use pipeline with converted Polygon symbol and GMT+4 timezone conversion
-                        # The pipeline will convert UTC timestamps from Polygon to GMT+4 (Asia/Dubai) before storing
-                        # Pass asset_class so pipeline can also do symbol conversion as a safeguard
-                        success = pipeline.ingest_historical_data(
-                            symbol=polygon_symbol,  # Use converted Polygon symbol format (e.g., "C:USDJPY")
-                            interval="daily" if interval == "1d" else interval,
-                            start_date=start_dt,
-                            end_date=end_dt,
-                            chunk_days=task["chunk_days"],
-                            resume_from_latest=False,  # Don't use auto-resume for backfill - use explicit dates
-                            target_timezone="Asia/Dubai",  # Convert UTC to GMT+4 (Asia/Dubai) before storing
-                            asset_class=self.asset_class,  # Pass asset_class for symbol conversion safeguard
-                        )
+                        # Special handling for indices: use dedicated indices ingestion, not the generic pipeline.
+                        if self.asset_class == "Indices":
+                            # Convert display symbol (e.g. "^SPX") to Polygon index symbol (e.g. "I:SPX")
+                            api_symbol = convert_instrument_to_polygon_symbol(self.asset_class, symbol)
+                            print(f"🔄 Indices backfill: symbol '{symbol}' → Polygon '{api_symbol}' (1min)")
+
+                            # Call the indices ingestion helper which:
+                            # - Maps I:SPX → SPY internally for minute data
+                            # - Stores data into market_data_indices_1min with db_symbol below
+                            result = ingest_indices_from_polygon(
+                                api_symbol=api_symbol,
+                                interval="1min",
+                                years=1,
+                                db_symbol=symbol,
+                            )
+                            success = bool(result.get("success")) if isinstance(result, dict) else False
+                        else:
+                            # Non-index 1min data: use the generic pipeline with proper symbol conversion
+                            # This ensures currencies get "C:" prefix (USDJPY → C:USDJPY), etc.
+                            polygon_symbol = convert_instrument_to_polygon_symbol(self.asset_class, symbol)
+                            print(f"🔄 Converting symbol '{symbol}' to Polygon format '{polygon_symbol}' for asset class '{self.asset_class}'")
+                            
+                            if not pipeline:
+                                logs.append({
+                                    "symbol": symbol,
+                                    "interval": interval,
+                                    "reason": task["reason"],
+                                    "start": start_dt.isoformat(),
+                                    "end": end_dt.isoformat(),
+                                    "success": False,
+                                    "message": "Pipeline not provided",
+                                })
+                                continue
+                            
+                            # Use pipeline with converted Polygon symbol and GMT+4 timezone conversion
+                            # The pipeline will convert UTC timestamps from Polygon to GMT+4 (Asia/Dubai) before storing
+                            # Pass asset_class so pipeline can also do symbol conversion as a safeguard
+                            success = pipeline.ingest_historical_data(
+                                symbol=polygon_symbol,  # Use converted Polygon symbol format (e.g., "C:USDJPY")
+                                interval="daily" if interval == "1d" else interval,
+                                start_date=start_dt,
+                                end_date=end_dt,
+                                chunk_days=task["chunk_days"],
+                                resume_from_latest=False,  # Don't use auto-resume for backfill - use explicit dates
+                                target_timezone="Asia/Dubai",  # Convert UTC to GMT+4 (Asia/Dubai) before storing
+                                asset_class=self.asset_class,  # Pass asset_class for symbol conversion safeguard
+                            )
                     else:
                         # For non-1min data, use pipeline as before
                         if not pipeline:

@@ -1111,11 +1111,10 @@ def phase1_foundation_data():
                 from tradingagents.dataflows.data_guardrails import DataCoverageService
                 
                 # Determine the symbol to check (may need conversion)
-                check_symbol = selected_instrument_item
+                # Use the conversion function to get the correct Polygon format
+                check_symbol = convert_instrument_to_polygon_symbol(selected_category, selected_instrument_item)
                 if selected_instrument_item == "GOLD":
                     check_symbol = "C:XAUUSD"
-                elif selected_instrument_item == "S&P 500":
-                    check_symbol = "^SPX"
                 
                 # Try to find the symbol in the database (may be stored with different format)
                 sb = get_supabase()
@@ -1126,11 +1125,16 @@ def phase1_foundation_data():
                     table_name = get_1min_table_name_for_symbol(check_symbol)
                     
                     # Try multiple symbol formats to find the actual symbol in database
-                    symbol_variants = [check_symbol]
+                    # Primary format is now I:SPX, I:NDX, I:DJI (correct Polygon format)
+                    symbol_variants = [check_symbol]  # Start with the converted symbol (I:SPX, I:NDX, I:DJI)
                     if selected_instrument_item == "GOLD":
                         symbol_variants = ["C:XAUUSD", "^XAUUSD", "GOLD", "XAUUSD"]
                     elif selected_instrument_item == "S&P 500":
-                        symbol_variants = ["^SPX", "SPX", "I:SPX", "S&P 500", "SPY"]  # SPY is used for minute data
+                        symbol_variants = ["I:SPX", "^SPX", "SPX", "S&P 500", "SPY"]  # I:SPX is now primary
+                    elif "NAS" in selected_instrument_item.upper() or "NDX" in selected_instrument_item.upper():
+                        symbol_variants = ["I:NDX", "NDX", "^NDX", "NAS 100", "NAS100", "QQQ"]
+                    elif "DJI" in selected_instrument_item.upper() or "DOW" in selected_instrument_item.upper():
+                        symbol_variants = ["I:DJI", "DJI", "^DJI", "DOW", "DIA"]
                     
                     # Try to find actual symbol in database
                     try:
@@ -1211,7 +1215,7 @@ def phase1_foundation_data():
                                             with st.spinner("Running targeted ingestion jobs..."):
                                                 try:
                                                     pipeline = DataIngestionPipeline()
-                                                    coverage_service = DataCoverageService()
+                                                    coverage_service = DataCoverageService(asset_class=selected_category)
                                                     logs = coverage_service.backfill_missing(pipeline, missing_records)
                                                     pipeline.close()
                                                     
@@ -1327,11 +1331,15 @@ def phase1_foundation_data():
                             st.stop()
                         
                         # Handle specific symbol mappings for DB storage
-                        effective_db_symbol = selected_instrument_item
+                        # Use the converted API symbol as the DB symbol for consistency
+                        # This ensures indices are stored as I:SPX, I:NDX, I:DJI (correct Polygon format)
+                        effective_db_symbol = api_symbol_cleaned  # Use the converted symbol
+                        
+                        # Override for specific cases that need different DB symbols
                         if selected_instrument_item == "GOLD":
                             effective_db_symbol = "C:XAUUSD"
-                        elif selected_instrument_item == "S&P 500":
-                            effective_db_symbol = "^SPX"
+                        # For indices, the api_symbol_cleaned should already be I:SPX, I:NDX, I:DJI format
+                        # So we use it directly - no need for special mapping
 
                         # Use indices-specific ingestion for indices (1 year, 1-day chunks, UTC→GMT+4)
                         try:
@@ -1390,11 +1398,11 @@ def phase1_foundation_data():
                     if st.button(f"Ingest File", key=f"btn_ingest_file_{selected_category}_{selected_instrument_item}"):
                         with st.spinner("Ingesting file..."):
                             # Handle specific symbol mappings if needed
-                            effective_symbol = selected_instrument_item
+                            # Use conversion function to get correct Polygon format
+                            effective_symbol = convert_instrument_to_polygon_symbol(selected_category, selected_instrument_item)
                             if selected_instrument_item == "GOLD":
                                 effective_symbol = "C:XAUUSD"
-                            elif selected_instrument_item == "S&P 500":
-                                effective_symbol = "^SPX"
+                            # For indices, effective_symbol will be I:SPX, I:NDX, I:DJI (correct format)
                                 
                             result = ingest_market_data(
                                 uploaded_file, 
@@ -2855,9 +2863,10 @@ def phase1_foundation_data():
                 if selected_category == "Commodities" and selected_instrument_item == "GOLD":
                     symbol = "C:XAUUSD"
                     instrument_display = "GOLD (C:XAUUSD)"
-                elif selected_category == "Indices" and selected_instrument_item == "S&P 500":
-                    symbol = "^SPX"
-                    instrument_display = "S&P 500 (^SPX)"
+                elif selected_category == "Indices":
+                    # Use conversion function to get correct Polygon format (I:SPX, I:NDX, I:DJI)
+                    symbol = convert_instrument_to_polygon_symbol(selected_category, selected_instrument_item)
+                    instrument_display = f"{selected_instrument_item} ({symbol})"
                 else:
                     symbol = selected_instrument_item
                     instrument_display = selected_instrument_item
@@ -2893,8 +2902,13 @@ def phase1_foundation_data():
                             symbols_to_try = [symbol]
                             if symbol == "C:XAUUSD":
                                 symbols_to_try = ["C:XAUUSD", "^XAUUSD", "GOLD", "XAUUSD"]
-                            elif symbol == "^SPX":
-                                symbols_to_try = ["^SPX", "S&P 500", "I:SPX"]
+                            elif symbol.startswith("I:") or symbol == "^SPX" or "SPX" in symbol.upper():
+                                # Handle indices - try I:SPX first (correct format), then variants
+                                if symbol.startswith("I:"):
+                                    base = symbol[2:]
+                                    symbols_to_try = [symbol, f"^{base}", base, selected_instrument_item]
+                                else:
+                                    symbols_to_try = ["I:SPX", "^SPX", "SPX", "S&P 500"]
                             
                             result_data = []
                             used_symbol = symbol
