@@ -60,6 +60,7 @@ from tradingagents.dataflows.indicator_confluence import (
     IndicatorCache,
     export_enriched_to_json,
 )
+from tradingagents.dataflows.alpha_decay_analyzer import AlphaDecayAnalyzer
 
 # Phase 2 imports
 from tradingagents.dataflows.ai_analysis import AIResearchAnalyzer
@@ -5109,6 +5110,350 @@ def phase1_foundation_data():
         st.info("No documents uploaded yet")
     
     doc_manager.close()
+    
+    # ===================================================================
+    # Alpha Decay & Robustness Module - NEW SECTION
+    # ===================================================================
+    st.markdown("---")
+    st.markdown('<div class="feature-card">', unsafe_allow_html=True)
+    st.markdown("### 📉 Alpha Decay & Robustness Analysis")
+    st.markdown("""
+    **Health Check Module**: Visualize the stability of the provider's edge over time.
+    - **Detect Decay**: Identify if Win Rate or Profitability is trending downward
+    - **Measure Alpha**: Compare provider performance against Buy & Hold benchmark
+    - **Drawdown Analysis**: Track maximum drawdown duration and depth
+    """)
+    
+    with st.expander("📖 About Alpha Decay Analysis", expanded=False):
+        st.markdown("""
+        **Alpha Decay & Robustness Analysis** helps answer critical questions:
+        
+        > *"Is the provider's edge decaying?"* - Track rolling win rate and profitability trends
+        
+        > *"Are they actually adding value?"* - Compare against simple Buy & Hold strategy
+        
+        > *"How long are the drawdowns?"* - Measure maximum stagnation periods
+        
+        **Key Metrics:**
+        - **Alpha Chart**: Provider's cumulative return vs Buy & Hold benchmark
+        - **Decay Monitor**: Rolling win rate over time (detects >10% drops)
+        - **Underwater Plot**: Drawdown percentage over time with duration tracking
+        - **Rolling Statistics**: Window-based analysis of win rate and average PnL
+        """)
+    
+    st.markdown('</div>', unsafe_allow_html=True)
+    
+    # Step 1: Select Provider and Symbol
+    st.markdown("#### Step 1: Select Data Source")
+    
+    alpha_col1, alpha_col2 = st.columns(2)
+    with alpha_col1:
+        alpha_providers = get_available_providers()
+        selected_alpha_provider = st.selectbox(
+            "Signal Provider",
+            options=alpha_providers if alpha_providers else ["No providers available"],
+            key="alpha_decay_provider"
+        )
+    
+    with alpha_col2:
+        if selected_alpha_provider and selected_alpha_provider != "No providers available":
+            # Get instruments for this provider
+            supabase = get_supabase()
+            alpha_instruments = []
+            if supabase:
+                try:
+                    result = supabase.table("backtest_results")\
+                        .select("symbol")\
+                        .eq("provider_name", selected_alpha_provider)\
+                        .execute()
+                    if result.data:
+                        alpha_instruments = sorted(list(set([r.get("symbol") for r in result.data if r.get("symbol")])))
+                except Exception:
+                    pass
+            
+            selected_alpha_symbol = st.selectbox(
+                "Symbol",
+                options=alpha_instruments if alpha_instruments else ["No symbols available"],
+                key="alpha_decay_symbol"
+            )
+        else:
+            selected_alpha_symbol = None
+    
+    # Step 2: Configuration
+    st.markdown("#### Step 2: Configuration")
+    
+    config_col1, config_col2, config_col3 = st.columns(3)
+    with config_col1:
+        rolling_window = st.slider(
+            "Rolling Window Size",
+            min_value=20,
+            max_value=100,
+            value=50,
+            step=10,
+            help="Number of trades for rolling statistics calculation",
+            key="alpha_rolling_window"
+        )
+    
+    with config_col2:
+        benchmark_type = st.selectbox(
+            "Benchmark Type",
+            options=["buy_hold", "naive_strategy"],
+            format_func=lambda x: "Buy & Hold" if x == "buy_hold" else "Naive Strategy (SMA)",
+            key="alpha_benchmark_type"
+        )
+    
+    with config_col3:
+        decay_threshold = st.number_input(
+            "Decay Threshold (%)",
+            min_value=5.0,
+            max_value=20.0,
+            value=10.0,
+            step=1.0,
+            help="Win rate drop percentage to flag as decay",
+            key="alpha_decay_threshold"
+        )
+    
+    # Step 3: Run Analysis
+    if st.button("🔍 Run Alpha Decay Analysis", key="run_alpha_analysis"):
+        if not selected_alpha_provider or selected_alpha_provider == "No providers available":
+            st.error("Please select a signal provider")
+        elif not selected_alpha_symbol or selected_alpha_symbol == "No symbols available":
+            st.error("Please select a symbol")
+        else:
+            with st.spinner("Running alpha decay analysis..."):
+                try:
+                    analyzer = AlphaDecayAnalyzer()
+                    
+                    # Run analysis
+                    analysis_result = analyzer.analyze_provider_alpha(
+                        provider_name=selected_alpha_provider,
+                        symbol=selected_alpha_symbol,
+                        window_size=rolling_window,
+                        benchmark_type=benchmark_type
+                    )
+                    
+                    if 'error' in analysis_result:
+                        st.error(f"❌ {analysis_result['error']}")
+                    else:
+                        st.session_state['alpha_decay_result'] = analysis_result
+                        st.success("✅ Analysis completed!")
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"Error running analysis: {str(e)}")
+                    import traceback
+                    st.code(traceback.format_exc())
+    
+    # Step 4: Display Results
+    if 'alpha_decay_result' in st.session_state:
+        result = st.session_state['alpha_decay_result']
+        
+        if 'error' not in result:
+            # Summary Metrics
+            st.markdown("---")
+            st.markdown("#### Step 3: Summary Metrics")
+            
+            metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
+            with metric_col1:
+                st.metric("Total Trades", f"{result.get('total_trades', 0)}")
+            with metric_col2:
+                max_dd = result.get('max_drawdown_pct', 0)
+                st.metric("Max Drawdown", f"{max_dd:.2f}%")
+            with metric_col3:
+                max_dd_duration = result.get('max_drawdown_duration_days', 0)
+                st.metric("Max Drawdown Duration", f"{max_dd_duration} days")
+            with metric_col4:
+                decay_info = result.get('decay_detection', {})
+                if decay_info.get('has_decay', False):
+                    st.metric("Decay Status", "⚠️ DECAYING", delta=f"-{decay_info.get('decay_pct', 0):.1f}%")
+                else:
+                    st.metric("Decay Status", "✅ STABLE", delta=f"{decay_info.get('decay_pct', 0):.1f}%")
+            
+            # Decay Alert
+            if decay_info.get('has_decay', False):
+                st.warning(f"⚠️ **Performance Decay Detected**: Win rate dropped by {decay_info.get('decay_pct', 0):.2f}% "
+                          f"(from {decay_info.get('first_window_win_rate', 0):.2f}% to {decay_info.get('last_window_win_rate', 0):.2f}%)")
+            
+            # Alpha Chart
+            st.markdown("---")
+            st.markdown("#### Step 4: Alpha Chart (Provider vs Benchmark)")
+            
+            daily_equity = result.get('daily_equity', pd.DataFrame())
+            benchmark_returns = result.get('benchmark_returns', pd.Series())
+            
+            if not daily_equity.empty and not benchmark_returns.empty:
+                # Align dates
+                common_dates = daily_equity.index.intersection(benchmark_returns.index)
+                if len(common_dates) > 0:
+                    provider_returns = daily_equity.loc[common_dates, 'cumulative_return_pct']
+                    benchmark_aligned = benchmark_returns.loc[common_dates]
+                    
+                    fig_alpha = go.Figure()
+                    
+                    # Provider line
+                    fig_alpha.add_trace(go.Scatter(
+                        x=common_dates,
+                        y=provider_returns,
+                        mode='lines',
+                        name=f'{selected_alpha_provider} (Provider)',
+                        line=dict(color='#1f77b4', width=2)
+                    ))
+                    
+                    # Benchmark line
+                    fig_alpha.add_trace(go.Scatter(
+                        x=common_dates,
+                        y=benchmark_aligned,
+                        mode='lines',
+                        name=f'Benchmark ({benchmark_type.replace("_", " ").title()})',
+                        line=dict(color='gray', width=2, dash='dash')
+                    ))
+                    
+                    fig_alpha.update_layout(
+                        title="Alpha Chart: Provider vs Benchmark",
+                        xaxis_title="Date",
+                        yaxis_title="Cumulative Return (%)",
+                        height=500,
+                        hovermode='x unified',
+                        legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01)
+                    )
+                    
+                    st.plotly_chart(fig_alpha, use_container_width=True)
+                    
+                    # Alpha interpretation
+                    final_provider_return = provider_returns.iloc[-1] if len(provider_returns) > 0 else 0
+                    final_benchmark_return = benchmark_aligned.iloc[-1] if len(benchmark_aligned) > 0 else 0
+                    alpha = final_provider_return - final_benchmark_return
+                    
+                    if alpha > 0:
+                        st.success(f"✅ Provider is generating **{alpha:.2f}%** alpha above benchmark")
+                    else:
+                        st.warning(f"⚠️ Provider is underperforming benchmark by **{abs(alpha):.2f}%**")
+                else:
+                    st.warning("Could not align provider and benchmark dates")
+            else:
+                st.warning("Insufficient data for alpha chart")
+            
+            # Decay Monitor
+            st.markdown("---")
+            st.markdown("#### Step 5: Decay Monitor (Rolling Win Rate)")
+            
+            rolling_stats = result.get('rolling_stats', pd.DataFrame())
+            if not rolling_stats.empty and 'Rolling_Win_Rate' in rolling_stats.columns:
+                time_col = 'exit_datetime' if 'exit_datetime' in rolling_stats.columns else rolling_stats.index
+                
+                fig_decay = go.Figure()
+                
+                fig_decay.add_trace(go.Scatter(
+                    x=time_col if isinstance(time_col, pd.Index) else rolling_stats[time_col],
+                    y=rolling_stats['Rolling_Win_Rate'],
+                    mode='lines',
+                    name='Rolling Win Rate',
+                    line=dict(color='#ff7f0e', width=2),
+                    fill='tozeroy',
+                    fillcolor='rgba(255, 127, 14, 0.1)'
+                ))
+                
+                # Add threshold line
+                if len(rolling_stats) > 0:
+                    first_win_rate = rolling_stats['Rolling_Win_Rate'].iloc[0]
+                    threshold_win_rate = first_win_rate * (1 - decay_threshold / 100)
+                    fig_decay.add_hline(
+                        y=threshold_win_rate,
+                        line_dash="dash",
+                        line_color="red",
+                        annotation_text=f"Decay Threshold ({decay_threshold}% drop)"
+                    )
+                
+                fig_decay.update_layout(
+                    title="Decay Monitor: Rolling Win Rate Over Time",
+                    xaxis_title="Trade Number / Time",
+                    yaxis_title="Rolling Win Rate (%)",
+                    height=400,
+                    hovermode='x unified'
+                )
+                
+                st.plotly_chart(fig_decay, use_container_width=True)
+                
+                # Show rolling stats summary
+                if len(rolling_stats) > 0:
+                    first_wr = rolling_stats['Rolling_Win_Rate'].iloc[0]
+                    last_wr = rolling_stats['Rolling_Win_Rate'].iloc[-1]
+                    st.caption(f"First Window: {first_wr:.2f}% | Last Window: {last_wr:.2f}%")
+            else:
+                st.warning("Insufficient data for decay monitor")
+            
+            # Underwater Plot
+            st.markdown("---")
+            st.markdown("#### Step 6: Underwater Plot (Drawdown Analysis)")
+            
+            drawdown_df = result.get('drawdown_df', pd.DataFrame())
+            if not drawdown_df.empty and 'drawdown_pct' in drawdown_df.columns:
+                fig_underwater = go.Figure()
+                
+                fig_underwater.add_trace(go.Scatter(
+                    x=drawdown_df.index,
+                    y=drawdown_df['drawdown_pct'],
+                    mode='lines',
+                    name='Drawdown',
+                    fill='tozeroy',
+                    fillcolor='rgba(255, 0, 0, 0.3)',
+                    line=dict(color='red', width=2)
+                ))
+                
+                # Highlight max drawdown
+                max_dd_idx = drawdown_df['drawdown_pct'].idxmin()
+                max_dd_value = drawdown_df.loc[max_dd_idx, 'drawdown_pct']
+                
+                fig_underwater.add_trace(go.Scatter(
+                    x=[max_dd_idx],
+                    y=[max_dd_value],
+                    mode='markers',
+                    name=f'Max Drawdown ({max_dd_value:.2f}%)',
+                    marker=dict(color='darkred', size=12, symbol='diamond')
+                ))
+                
+                fig_underwater.update_layout(
+                    title="Underwater Plot: Drawdown Over Time",
+                    xaxis_title="Date",
+                    yaxis_title="Drawdown (%)",
+                    height=400,
+                    hovermode='x unified',
+                    yaxis=dict(autorange='reversed')  # Invert Y-axis for underwater effect
+                )
+                
+                st.plotly_chart(fig_underwater, use_container_width=True)
+                
+                # Drawdown summary
+                st.caption(f"Maximum Drawdown: {max_dd_value:.2f}% | Duration: {max_dd_duration} days")
+            else:
+                st.warning("Insufficient data for underwater plot")
+            
+            # Rolling Statistics Table
+            st.markdown("---")
+            st.markdown("#### Step 7: Rolling Statistics Table")
+            
+            if not rolling_stats.empty:
+                display_cols = ['Rolling_Win_Rate', 'Rolling_Avg_PnL', 'Rolling_Expectancy']
+                available_cols = [col for col in display_cols if col in rolling_stats.columns]
+                
+                if available_cols:
+                    # Add time column if available
+                    if 'exit_datetime' in rolling_stats.columns:
+                        display_df = rolling_stats[['exit_datetime'] + available_cols].copy()
+                        display_df['exit_datetime'] = pd.to_datetime(display_df['exit_datetime']).dt.strftime('%Y-%m-%d %H:%M')
+                        display_df.columns = ['Exit Time'] + [col.replace('_', ' ') for col in available_cols]
+                    else:
+                        display_df = rolling_stats[available_cols].copy()
+                        display_df.columns = [col.replace('_', ' ') for col in available_cols]
+                    
+                    st.dataframe(
+                        display_df,
+                        use_container_width=True,
+                        height=300
+                    )
+                else:
+                    st.info("No rolling statistics columns available")
+            else:
+                st.warning("No rolling statistics data available")
 
 def phase2_master_data_ai():
     """Phase 2: Master Data & AI Integration"""
